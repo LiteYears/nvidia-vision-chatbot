@@ -1,0 +1,124 @@
+package com.example.data.preferences
+
+import android.content.Context
+import android.content.SharedPreferences
+import com.example.BuildConfig
+
+class SettingsManager(context: Context) {
+    private val prefs: SharedPreferences =
+        context.getSharedPreferences("ai_chatbot_settings", Context.MODE_PRIVATE)
+
+    companion object {
+        private const val KEY_CUSTOM_API_KEY = "custom_api_key"
+        private const val KEY_SELECTED_MODEL = "selected_model"
+        private const val KEY_USER_NAME = "user_name"
+        private const val KEY_PLAN_TYPE = "plan_type"
+        private const val KEY_INCOGNITO = "is_incognito"
+        private const val KEY_SYSTEM_PROMPT = "system_prompt"
+        private const val KEY_TEMPERATURE = "temperature"
+        private const val KEY_TOP_P = "top_p"
+        private const val KEY_MAX_TOKENS = "max_tokens"
+
+        const val DEFAULT_USER_NAME = ""
+        const val DEFAULT_MODEL = "meta/llama-3.2-11b-vision-instruct"
+        const val MODEL_QUANTUM = "Quantum 3"
+        const val DEFAULT_SYSTEM_PROMPT = "You are an intelligent, helpful AI assistant built with precision."
+        const val DEFAULT_TEMPERATURE = 0.7f
+        const val DEFAULT_TOP_P = 0.95f
+        const val DEFAULT_MAX_TOKENS = 4096
+
+        // Embedded default key configured for this environment
+        private const val DEFAULT_FALLBACK_KEY = "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"
+    }
+
+    /**
+     * Resolves API key from custom in-app preference, BuildConfig (from .env),
+     * BuildConfig (from environment variable), or the default key.
+     */
+    fun getEffectiveApiKey(): String {
+        val customKey = prefs.getString(KEY_CUSTOM_API_KEY, "")?.trim() ?: ""
+        if (customKey.isNotBlank()) return customKey
+
+        val buildKey = try {
+            BuildConfig.NVIDIA_API_KEY?.trim() ?: ""
+        } catch (_: Exception) {
+            ""
+        }
+        if (buildKey.isNotBlank() && !buildKey.contains("placeholder", ignoreCase = true)) {
+            return buildKey
+        }
+
+        val envKey = try {
+            BuildConfig.NVIDIA_ENV_API_KEY?.trim() ?: ""
+        } catch (_: Exception) {
+            ""
+        }
+        if (envKey.isNotBlank() && !envKey.contains("placeholder", ignoreCase = true)) {
+            return envKey
+        }
+
+        return DEFAULT_FALLBACK_KEY
+    }
+
+    fun getCustomApiKey(): String = prefs.getString(KEY_CUSTOM_API_KEY, "") ?: ""
+
+    fun setCustomApiKey(key: String) {
+        prefs.edit().putString(KEY_CUSTOM_API_KEY, key.trim()).apply()
+    }
+
+    fun getSelectedModel(): String =
+        prefs.getString(KEY_SELECTED_MODEL, MODEL_QUANTUM) ?: MODEL_QUANTUM
+
+    fun setSelectedModel(model: String) {
+        prefs.edit().putString(KEY_SELECTED_MODEL, model).apply()
+    }
+
+    fun getUserName(): String =
+        prefs.getString(KEY_USER_NAME, DEFAULT_USER_NAME) ?: DEFAULT_USER_NAME
+
+    fun setUserName(name: String) {
+        prefs.edit().putString(KEY_USER_NAME, name.trim()).apply()
+    }
+
+    fun getPlanType(): String =
+        prefs.getString(KEY_PLAN_TYPE, "Free plan") ?: "Free plan"
+
+    fun setPlanType(plan: String) {
+        prefs.edit().putString(KEY_PLAN_TYPE, plan).apply()
+    }
+
+    fun isIncognito(): Boolean =
+        prefs.getBoolean(KEY_INCOGNITO, false)
+
+    fun setIncognito(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_INCOGNITO, enabled).apply()
+    }
+
+    fun getSystemPrompt(): String =
+        prefs.getString(KEY_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT) ?: DEFAULT_SYSTEM_PROMPT
+
+    fun setSystemPrompt(prompt: String) {
+        prefs.edit().putString(KEY_SYSTEM_PROMPT, prompt.trim()).apply()
+    }
+
+    fun getTemperature(): Float =
+        prefs.getFloat(KEY_TEMPERATURE, DEFAULT_TEMPERATURE)
+
+    fun setTemperature(temperature: Float) {
+        prefs.edit().putFloat(KEY_TEMPERATURE, temperature.coerceIn(0.0f, 1.5f)).apply()
+    }
+
+    fun getTopP(): Float =
+        prefs.getFloat(KEY_TOP_P, DEFAULT_TOP_P)
+
+    fun setTopP(topP: Float) {
+        prefs.edit().putFloat(KEY_TOP_P, topP.coerceIn(0.05f, 1.0f)).apply()
+    }
+
+    fun getMaxTokens(): Int =
+        prefs.getInt(KEY_MAX_TOKENS, DEFAULT_MAX_TOKENS)
+
+    fun setMaxTokens(maxTokens: Int) {
+        prefs.edit().putInt(KEY_MAX_TOKENS, maxTokens.coerceIn(256, 8192)).apply()
+    }
+}

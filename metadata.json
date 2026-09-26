@@ -1,0 +1,8 @@
+{
+  "name": "Remix Remix Nvidia Vision Chatbot",
+  "description": "A vision-based chatbot leveraging the Nvidia API and DeepSeek-V4.1 to analyze images and generate descriptive text responses.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
