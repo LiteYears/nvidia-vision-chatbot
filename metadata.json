@@ -1,5 +1,6 @@
 {
   "name": "Nvidia Vision Chatbot",
   "description": "A native Android multimodal vision chatbot leveraging NVIDIA NIM APIs and DeepSeek models to analyze images, process documents with on-device RAG, and support real-time voice interactions.",
-  "requestFramePermissions": []
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

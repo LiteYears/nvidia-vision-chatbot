@@ -86,6 +86,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val database = ChatDatabase.getDatabase(application)
     private val settingsManager = SettingsManager(application)
     private val apiClient = NvidiaApiClient { settingsManager.getEffectiveApiKey() }
+    private val repository = ChatRepository(database.chatDao(), settingsManager, apiClient)
     private val workspaceManager = AgentWorkspaceManager(File(application.filesDir, "agent_workspaces"))
     private val toolRegistry = ToolRegistry.defaultRegistry(workspaceManager)
 

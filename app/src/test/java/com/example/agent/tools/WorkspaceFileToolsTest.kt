@@ -86,7 +86,7 @@ class WorkspaceFileToolsTest {
         val resolved = workspaceManager.resolvePath(deepPath)
         assertTrue(resolved.exists())
         assertTrue(resolved.isFile)
-        assertTrue(resolved.parentFile.exists())
+        assertTrue(resolved.parentFile!!.exists())
     }
 
     @Test
