@@ -14,6 +14,9 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import com.example.data.model.AgentSession
+import com.example.data.model.AgentTaskStatus
+import com.example.data.model.AppMode
 import com.example.data.model.MessageRole
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -70,14 +73,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.example.ui.components.AboutDeveloperDialog
+import com.example.ui.components.AgentGoalWelcomeView
+import com.example.ui.components.AgentTaskStateCard
 import com.example.ui.components.AiChatbotLogo
 import com.example.ui.components.ApiKeyDialog
 import com.example.ui.components.AttachmentBottomSheet
 import com.example.ui.components.ChatBubble
 import com.example.ui.components.ChatDrawerContent
 import com.example.ui.components.ChatInputCard
+import com.example.ui.components.ModeSelectorTabs
 import com.example.ui.components.ModelParametersDialog
 import com.example.ui.components.ModelSelectorSheet
+import com.example.ui.components.ToolExecutionCard
 import com.example.ui.components.TopNavigationBar
 import com.example.ui.components.UpgradePlanDialog
 import com.example.ui.components.VoiceModeDialog
@@ -96,12 +103,21 @@ fun ChatScreen(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val listState = rememberLazyListState()
+    val agentListState = rememberLazyListState()
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // Auto-scroll to latest message
+    // Auto-scroll to latest message in Chat Mode
     LaunchedEffect(uiState.messages.size, uiState.isLoading) {
         if (uiState.messages.isNotEmpty()) {
             listState.animateScrollToItem(uiState.messages.size - 1)
+        }
+    }
+
+    // Auto-scroll to latest message in Agent Mode
+    LaunchedEffect(uiState.currentAgentSession?.messages?.size, uiState.isAgentLoading) {
+        val agentMsgs = uiState.currentAgentSession?.messages
+        if (!agentMsgs.isNullOrEmpty()) {
+            agentListState.animateScrollToItem(agentMsgs.size - 1)
         }
     }
 
@@ -282,10 +298,12 @@ fun ChatScreen(
                 userName = uiState.userName,
                 planType = uiState.planType,
                 onSelectConversation = { conv ->
+                    viewModel.setAppMode(AppMode.CHAT)
                     viewModel.selectConversation(conv)
                     scope.launch { drawerState.close() }
                 },
                 onNewChatClick = {
+                    viewModel.setAppMode(AppMode.CHAT)
                     viewModel.startNewChat()
                     scope.launch { drawerState.close() }
                 },
@@ -311,6 +329,25 @@ fun ChatScreen(
                 onOpenParametersClick = {
                     scope.launch { drawerState.close() }
                     viewModel.setParametersSheetOpen(true)
+                },
+                currentMode = uiState.currentMode,
+                onModeChange = { mode ->
+                    viewModel.setAppMode(mode)
+                },
+                agentSessions = uiState.agentSessions,
+                activeAgentSessionId = uiState.currentAgentSession?.id,
+                onSelectAgentSession = { session ->
+                    viewModel.setAppMode(AppMode.AGENT)
+                    viewModel.selectAgentSession(session)
+                    scope.launch { drawerState.close() }
+                },
+                onNewAgentTaskClick = {
+                    viewModel.setAppMode(AppMode.AGENT)
+                    viewModel.startNewAgentSession()
+                    scope.launch { drawerState.close() }
+                },
+                onDeleteAgentSession = { id ->
+                    viewModel.deleteAgentSession(id)
                 }
             )
         }
@@ -325,8 +362,12 @@ fun ChatScreen(
         val extraBottomMargin = if (isKeyboardOpen) 4.dp else 10.dp
 
         LaunchedEffect(isKeyboardOpen) {
-            if (isKeyboardOpen && uiState.messages.isNotEmpty()) {
-                listState.animateScrollToItem(uiState.messages.size - 1)
+            if (isKeyboardOpen) {
+                if (uiState.currentMode == AppMode.CHAT && uiState.messages.isNotEmpty()) {
+                    listState.animateScrollToItem(uiState.messages.size - 1)
+                } else if (uiState.currentMode == AppMode.AGENT && !uiState.currentAgentSession?.messages.isNullOrEmpty()) {
+                    agentListState.animateScrollToItem(uiState.currentAgentSession!!.messages.size - 1)
+                }
             }
         }
 
@@ -337,7 +378,7 @@ fun ChatScreen(
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
             snackbarHost = { SnackbarHost(snackbarHostState) },
             topBar = {
-                Box(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .statusBarsPadding()
@@ -345,7 +386,7 @@ fun ChatScreen(
                     TopNavigationBar(
                         planText = uiState.planType,
                         isIncognito = uiState.isIncognito,
-                        canClearMessages = uiState.messages.isNotEmpty(),
+                        canClearMessages = if (uiState.currentMode == AppMode.CHAT) uiState.messages.isNotEmpty() else false,
                         onMenuClick = {
                             scope.launch { drawerState.open() }
                         },
@@ -361,64 +402,122 @@ fun ChatScreen(
                             showClearDialog = true
                         }
                     )
+
+                    // Mode Selector Tabs (Chat Mode vs Agent Mode)
+                    ModeSelectorTabs(
+                        currentMode = uiState.currentMode,
+                        onModeChange = viewModel::setAppMode
+                    )
                 }
             },
             bottomBar = {
-                // Floating chat input card positioned cleanly above the keyboard or navigation bar
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(
-                            start = 14.dp,
-                            end = 14.dp,
-                            top = 2.dp,
-                            bottom = bottomInsetDp + extraBottomMargin
-                        )
-                ) {
-                    ChatInputCard(
-                        inputText = uiState.inputText,
-                        onInputTextChange = viewModel::onInputTextChanged,
-                        selectedModel = uiState.selectedModel,
-                        onModelClick = { viewModel.setModelSheetOpen(true) },
-                        onSendClick = { viewModel.onSendMessage() },
-                        onVoiceClick = { viewModel.setVoiceModeOpen(true) },
-                        onMicDictationClick = {
-                            val hasPermission = ContextCompat.checkSelfPermission(
-                                context,
-                                Manifest.permission.RECORD_AUDIO
-                            ) == PackageManager.PERMISSION_GRANTED
+                val shouldShowBottomBar = uiState.currentMode == AppMode.CHAT || uiState.currentAgentSession != null
 
-                            if (hasPermission) {
-                                if (isDictating) {
-                                    speechRecognizer?.stopListening()
-                                    isDictating = false
-                                } else {
-                                    startSpeechRecognition(
-                                        context = context,
-                                        onResult = { text ->
+                if (shouldShowBottomBar) {
+                    // Floating chat/agent input card positioned cleanly above the keyboard or navigation bar
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(
+                                start = 14.dp,
+                                end = 14.dp,
+                                top = 2.dp,
+                                bottom = bottomInsetDp + extraBottomMargin
+                            )
+                    ) {
+                        if (uiState.currentMode == AppMode.CHAT) {
+                            ChatInputCard(
+                                inputText = uiState.inputText,
+                                onInputTextChange = viewModel::onInputTextChanged,
+                                selectedModel = uiState.selectedModel,
+                                onModelClick = { viewModel.setModelSheetOpen(true) },
+                                onSendClick = { viewModel.onSendMessage() },
+                                onVoiceClick = { viewModel.setVoiceModeOpen(true) },
+                                onMicDictationClick = {
+                                    val hasPermission = ContextCompat.checkSelfPermission(
+                                        context,
+                                        Manifest.permission.RECORD_AUDIO
+                                    ) == PackageManager.PERMISSION_GRANTED
+
+                                    if (hasPermission) {
+                                        if (isDictating) {
+                                            speechRecognizer?.stopListening()
                                             isDictating = false
-                                            viewModel.onInputTextChanged(
-                                                if (uiState.inputText.isBlank()) text else "${uiState.inputText} $text"
+                                        } else {
+                                            startSpeechRecognition(
+                                                context = context,
+                                                onResult = { text ->
+                                                    isDictating = false
+                                                    viewModel.onInputTextChanged(
+                                                        if (uiState.inputText.isBlank()) text else "${uiState.inputText} $text"
+                                                    )
+                                                },
+                                                onError = { isDictating = false },
+                                                onRecognizerCreated = { speechRecognizer = it }
                                             )
-                                        },
-                                        onError = { isDictating = false },
-                                        onRecognizerCreated = { speechRecognizer = it }
-                                    )
-                                    isDictating = true
-                                }
-                            } else {
-                                micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                            }
-                        },
-                        onAddAttachmentClick = { viewModel.setAttachmentSheetOpen(true) },
-                        selectedImageUri = uiState.selectedImageUri,
-                        onRemoveImage = viewModel::onRemoveSelectedImage,
-                        attachedDocument = uiState.attachedDocument,
-                        onRemoveDocument = viewModel::onRemoveAttachedDocument,
-                        isStreaming = uiState.isLoading || uiState.messages.lastOrNull()?.isStreaming == true,
-                        onStopStreaming = viewModel::stopGeneration,
-                        isVoiceRecording = isDictating
-                    )
+                                            isDictating = true
+                                        }
+                                    } else {
+                                        micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                    }
+                                },
+                                onAddAttachmentClick = { viewModel.setAttachmentSheetOpen(true) },
+                                selectedImageUri = uiState.selectedImageUri,
+                                onRemoveImage = viewModel::onRemoveSelectedImage,
+                                attachedDocument = uiState.attachedDocument,
+                                onRemoveDocument = viewModel::onRemoveAttachedDocument,
+                                isStreaming = uiState.isLoading || uiState.messages.lastOrNull()?.isStreaming == true,
+                                onStopStreaming = viewModel::stopGeneration,
+                                isVoiceRecording = isDictating
+                            )
+                        } else {
+                            // Agent Mode Follow-up Input Card
+                            ChatInputCard(
+                                inputText = uiState.agentInputText,
+                                onInputTextChange = viewModel::onAgentInputTextChanged,
+                                selectedModel = uiState.selectedModel,
+                                onModelClick = { viewModel.setModelSheetOpen(true) },
+                                onSendClick = { viewModel.sendAgentFollowUp() },
+                                onVoiceClick = { viewModel.setVoiceModeOpen(true) },
+                                onMicDictationClick = {
+                                    val hasPermission = ContextCompat.checkSelfPermission(
+                                        context,
+                                        Manifest.permission.RECORD_AUDIO
+                                    ) == PackageManager.PERMISSION_GRANTED
+
+                                    if (hasPermission) {
+                                        if (isDictating) {
+                                            speechRecognizer?.stopListening()
+                                            isDictating = false
+                                        } else {
+                                            startSpeechRecognition(
+                                                context = context,
+                                                onResult = { text ->
+                                                    isDictating = false
+                                                    viewModel.onAgentInputTextChanged(
+                                                        if (uiState.agentInputText.isBlank()) text else "${uiState.agentInputText} $text"
+                                                    )
+                                                },
+                                                onError = { isDictating = false },
+                                                onRecognizerCreated = { speechRecognizer = it }
+                                            )
+                                            isDictating = true
+                                        }
+                                    } else {
+                                        micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                    }
+                                },
+                                onAddAttachmentClick = { viewModel.setAttachmentSheetOpen(true) },
+                                selectedImageUri = null,
+                                onRemoveImage = {},
+                                attachedDocument = null,
+                                onRemoveDocument = {},
+                                isStreaming = uiState.isAgentLoading || uiState.currentAgentSession?.messages?.lastOrNull()?.isStreaming == true,
+                                onStopStreaming = viewModel::stopAgentGeneration,
+                                isVoiceRecording = isDictating
+                            )
+                        }
+                    }
                 }
             }
         ) { paddingValues ->
@@ -427,80 +526,148 @@ fun ChatScreen(
                     .fillMaxSize()
                     .padding(paddingValues)
             ) {
-                if (uiState.messages.isEmpty()) {
-                    // Clean landing screen with ONLY the animated logo and dynamic greeting
-                    val currentHour = remember { Calendar.getInstance().get(Calendar.HOUR_OF_DAY) }
-                    val greeting = remember(currentHour) {
-                        when (currentHour) {
-                            in 5..11 -> "Good Morning"
-                            in 12..16 -> "Good Afternoon"
-                            else -> "Good Evening"
+                if (uiState.currentMode == AppMode.CHAT) {
+                    // Chat Mode Content (100% Intact)
+                    if (uiState.messages.isEmpty()) {
+                        // Clean landing screen with ONLY the animated logo and dynamic greeting
+                        val currentHour = remember { Calendar.getInstance().get(Calendar.HOUR_OF_DAY) }
+                        val greeting = remember(currentHour) {
+                            when (currentHour) {
+                                in 5..11 -> "Good Morning"
+                                in 12..16 -> "Good Afternoon"
+                                else -> "Good Evening"
+                            }
                         }
-                    }
 
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(horizontal = 24.dp)
-                            .padding(bottom = 60.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        // Animated geometric ribbon AI logo
-                        AiChatbotLogo(
-                            size = 72.dp,
-                            color = MaterialTheme.colorScheme.onBackground,
-                            animate = true
-                        )
-
-                        Spacer(modifier = Modifier.height(24.dp))
-
-                        // Editorial greeting
-                        Text(
-                            text = greeting,
-                            style = MaterialTheme.typography.headlineMedium.copy(
-                                fontWeight = FontWeight.SemiBold,
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(horizontal = 24.dp)
+                                .padding(bottom = 60.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            // Animated geometric ribbon AI logo
+                            AiChatbotLogo(
+                                size = 72.dp,
                                 color = MaterialTheme.colorScheme.onBackground,
-                                letterSpacing = 0.2.sp
-                            ),
-                            textAlign = TextAlign.Center
-                        )
+                                animate = true
+                            )
 
-                        Spacer(modifier = Modifier.height(8.dp))
+                            Spacer(modifier = Modifier.height(24.dp))
 
-                        Text(
-                            text = "How can I help you today?",
-                            style = MaterialTheme.typography.bodyLarge.copy(
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
-                                fontSize = 15.sp
-                            ),
-                            textAlign = TextAlign.Center
-                        )
-                    }
-                } else {
-                    // Active Chat conversation with refined padding
-                    LazyColumn(
-                        state = listState,
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(top = 10.dp, bottom = 16.dp)
-                    ) {
-                        items(uiState.messages, key = { it.id }) { msg ->
-                            ChatBubble(
-                                message = msg,
-                                isCurrentlySpeaking = uiState.currentlySpeakingMessageId == msg.id,
-                                onSpeakClick = { text ->
-                                    if (uiState.currentlySpeakingMessageId == msg.id) {
-                                        viewModel.stopSpeaking()
-                                    } else {
-                                        viewModel.speakText(text, msg.id)
-                                    }
-                                },
-                                onRetryClick = {
-                                    viewModel.onSendMessage()
-                                }
+                            // Editorial greeting
+                            Text(
+                                text = greeting,
+                                style = MaterialTheme.typography.headlineMedium.copy(
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onBackground,
+                                    letterSpacing = 0.2.sp
+                                ),
+                                textAlign = TextAlign.Center
+                            )
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            Text(
+                                text = "How can I help you today?",
+                                style = MaterialTheme.typography.bodyLarge.copy(
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                                    fontSize = 15.sp
+                                ),
+                                textAlign = TextAlign.Center
                             )
                         }
+                    } else {
+                        // Active Chat conversation with refined padding
+                        LazyColumn(
+                            state = listState,
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(top = 10.dp, bottom = 16.dp)
+                        ) {
+                            items(uiState.messages, key = { it.id }) { msg ->
+                                ChatBubble(
+                                    message = msg,
+                                    isCurrentlySpeaking = uiState.currentlySpeakingMessageId == msg.id,
+                                    onSpeakClick = { text ->
+                                        if (uiState.currentlySpeakingMessageId == msg.id) {
+                                            viewModel.stopSpeaking()
+                                        } else {
+                                            viewModel.speakText(text, msg.id)
+                                        }
+                                    },
+                                    onRetryClick = {
+                                        viewModel.onSendMessage()
+                                    }
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    // Agent Mode Content
+                    if (uiState.currentAgentSession == null) {
+                        AgentGoalWelcomeView(
+                            goalInput = uiState.agentInputText,
+                            onGoalInputChange = viewModel::onAgentInputTextChanged,
+                            onSubmitGoal = { goal ->
+                                viewModel.createAgentSession(goal)
+                            },
+                            isLoading = uiState.isAgentLoading
+                        )
+                    } else {
+                        val currentSession = uiState.currentAgentSession!!
+                        Column(modifier = Modifier.fillMaxSize()) {
+                            // Task State Card
+                            AgentTaskStateCard(
+                                session = currentSession,
+                                onTogglePause = {
+                                    val newStatus = if (currentSession.status == AgentTaskStatus.PAUSED) {
+                                        AgentTaskStatus.IN_PROGRESS
+                                    } else {
+                                        AgentTaskStatus.PAUSED
+                                    }
+                                    viewModel.updateAgentTaskStatus(newStatus)
+                                },
+                                onMarkCompleted = {
+                                    viewModel.updateAgentTaskStatus(AgentTaskStatus.COMPLETED)
+                                }
+                            )
 
+                            // Agent Conversation Stream
+                            LazyColumn(
+                                state = agentListState,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .weight(1f),
+                                contentPadding = PaddingValues(top = 6.dp, bottom = 16.dp)
+                            ) {
+                                items(currentSession.messages, key = { it.id }) { msg ->
+                                    if (msg.role == MessageRole.ASSISTANT) {
+                                        val associatedTools = currentSession.toolExecutions.filter {
+                                            it.messageId == msg.id || (it.messageId == null && currentSession.messages.firstOrNull { m -> m.role == MessageRole.ASSISTANT }?.id == msg.id)
+                                        }
+                                        for (record in associatedTools) {
+                                            ToolExecutionCard(record = record)
+                                        }
+                                    }
+
+                                    ChatBubble(
+                                        message = msg,
+                                        isCurrentlySpeaking = uiState.currentlySpeakingMessageId == msg.id,
+                                        onSpeakClick = { text ->
+                                            if (uiState.currentlySpeakingMessageId == msg.id) {
+                                                viewModel.stopSpeaking()
+                                            } else {
+                                                viewModel.speakText(text, msg.id)
+                                            }
+                                        },
+                                        onRetryClick = {
+                                            viewModel.sendAgentFollowUp()
+                                        }
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }

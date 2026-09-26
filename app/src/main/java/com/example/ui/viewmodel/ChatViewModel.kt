@@ -9,10 +9,21 @@ import android.speech.tts.TextToSpeech
 import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.agent.tools.ToolCall
+import com.example.agent.tools.ToolCallParser
+import com.example.agent.tools.ToolRegistry
+import com.example.agent.tools.ToolResult
+import com.example.agent.tools.workspace.AgentWorkspaceManager
+import java.io.File
 import com.example.data.local.ChatDatabase
+import com.example.data.model.AgentSession
+import com.example.data.model.AgentStep
+import com.example.data.model.AgentTaskStatus
+import com.example.data.model.AppMode
 import com.example.data.model.ChatMessage
 import com.example.data.model.Conversation
 import com.example.data.model.MessageRole
+import com.example.data.model.ToolExecutionRecord
 import com.example.data.preferences.SettingsManager
 import com.example.data.rag.RagDocument
 import com.example.data.rag.RagEngine
@@ -61,7 +72,13 @@ data class ChatUiState(
     val systemPrompt: String = SettingsManager.DEFAULT_SYSTEM_PROMPT,
     val temperature: Float = SettingsManager.DEFAULT_TEMPERATURE,
     val topP: Float = SettingsManager.DEFAULT_TOP_P,
-    val maxTokens: Int = SettingsManager.DEFAULT_MAX_TOKENS
+    val maxTokens: Int = SettingsManager.DEFAULT_MAX_TOKENS,
+    val currentMode: AppMode = AppMode.CHAT,
+    val currentAgentSession: AgentSession? = null,
+    val agentSessions: List<AgentSession> = emptyList(),
+    val agentInputText: String = "",
+    val isAgentLoading: Boolean = false,
+    val agentErrorMessage: String? = null
 )
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
@@ -69,7 +86,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val database = ChatDatabase.getDatabase(application)
     private val settingsManager = SettingsManager(application)
     private val apiClient = NvidiaApiClient { settingsManager.getEffectiveApiKey() }
-    private val repository = ChatRepository(database.chatDao(), settingsManager, apiClient)
+    private val workspaceManager = AgentWorkspaceManager(File(application.filesDir, "agent_workspaces"))
+    private val toolRegistry = ToolRegistry.defaultRegistry(workspaceManager)
+
+    fun getToolRegistry(): ToolRegistry = toolRegistry
+    fun getWorkspaceManager(): AgentWorkspaceManager = workspaceManager
 
     private val _uiState = MutableStateFlow(
         ChatUiState(
@@ -89,6 +110,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private var tts: TextToSpeech? = null
     private var messageCollectionJob: Job? = null
     private var generationJob: Job? = null
+    private var agentGenerationJob: Job? = null
 
     init {
         // Observe conversation history
@@ -561,9 +583,539 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // Agent Mode Management
+    fun setAppMode(mode: AppMode) {
+        stopSpeaking()
+        _uiState.update { it.copy(currentMode = mode) }
+    }
+
+    fun onAgentInputTextChanged(text: String) {
+        _uiState.update { it.copy(agentInputText = text) }
+    }
+
+    fun startNewAgentSession() {
+        agentGenerationJob?.cancel()
+        _uiState.update {
+            it.copy(
+                currentAgentSession = null,
+                agentInputText = "",
+                isAgentLoading = false,
+                agentErrorMessage = null
+            )
+        }
+    }
+
+    fun selectAgentSession(session: AgentSession) {
+        agentGenerationJob?.cancel()
+        workspaceManager.activeSessionId = session.id
+        _uiState.update {
+            it.copy(
+                currentAgentSession = session,
+                agentInputText = "",
+                isAgentLoading = false,
+                agentErrorMessage = null
+            )
+        }
+    }
+
+    fun deleteAgentSession(sessionId: String) {
+        workspaceManager.deleteWorkspace(sessionId)
+        _uiState.update { state ->
+            val updatedSessions = state.agentSessions.filterNot { it.id == sessionId }
+            val newCurrent = if (state.currentAgentSession?.id == sessionId) null else state.currentAgentSession
+            state.copy(
+                agentSessions = updatedSessions,
+                currentAgentSession = newCurrent
+            )
+        }
+    }
+
+    fun updateAgentTaskStatus(status: AgentTaskStatus) {
+        val current = _uiState.value.currentAgentSession ?: return
+        val updated = current.copy(
+            status = status,
+            updatedAt = System.currentTimeMillis()
+        )
+        _uiState.update { state ->
+            val updatedSessions = state.agentSessions.map {
+                if (it.id == updated.id) updated else it
+            }
+            state.copy(
+                currentAgentSession = updated,
+                agentSessions = updatedSessions
+            )
+        }
+    }
+
+    fun createAgentSession(goal: String) {
+        val trimmedGoal = goal.trim()
+        if (trimmedGoal.isBlank()) return
+        agentGenerationJob?.cancel()
+
+        val state = _uiState.value
+        val sessionId = UUID.randomUUID().toString()
+        val now = System.currentTimeMillis()
+
+        val initialSteps = listOf(
+            AgentStep(
+                title = "Goal Intake & Verification",
+                description = "Parse objective and establish session parameters",
+                status = AgentTaskStatus.COMPLETED,
+                timestamp = now
+            ),
+            AgentStep(
+                title = "Task Decomposition & Roadmap",
+                description = "Formulate milestones and execution strategy",
+                status = AgentTaskStatus.IN_PROGRESS,
+                timestamp = now
+            ),
+            AgentStep(
+                title = "Execution Synthesis",
+                description = "Synthesize actionable deliverables for goal",
+                status = AgentTaskStatus.INITIALIZING,
+                timestamp = now
+            )
+        )
+
+        val userGoalMessage = ChatMessage(
+            id = UUID.randomUUID().toString(),
+            conversationId = sessionId,
+            role = MessageRole.USER,
+            content = trimmedGoal,
+            modelUsed = state.selectedModel,
+            timestamp = now
+        )
+
+        val assistantMessageId = UUID.randomUUID().toString()
+        val streamingAssistantMessage = ChatMessage(
+            id = assistantMessageId,
+            conversationId = sessionId,
+            role = MessageRole.ASSISTANT,
+            content = "",
+            modelUsed = state.selectedModel,
+            isStreaming = true,
+            timestamp = now + 1
+        )
+
+        val newSession = AgentSession(
+            id = sessionId,
+            goal = trimmedGoal,
+            status = AgentTaskStatus.IN_PROGRESS,
+            createdAt = now,
+            updatedAt = now,
+            modelUsed = state.selectedModel,
+            steps = initialSteps,
+            messages = listOf(userGoalMessage, streamingAssistantMessage)
+        )
+
+        _uiState.update {
+            it.copy(
+                currentAgentSession = newSession,
+                agentSessions = listOf(newSession) + it.agentSessions.filterNot { s -> s.id == sessionId },
+                agentInputText = "",
+                isAgentLoading = true,
+                agentErrorMessage = null
+            )
+        }
+
+        agentGenerationJob = viewModelScope.launch {
+            val toolsPrompt = toolRegistry.formatToolsForPrompt()
+            val agentSystemPrompt = "You are an autonomous NVIDIA Vision Agent. The user has set the following objective/goal:\n\n\"$trimmedGoal\"\n\n" +
+                "Provide a structured task roadmap. Outline:\n" +
+                "1. Objective Analysis & Scope\n" +
+                "2. Strategic Milestones\n" +
+                "3. Key Considerations & Trade-offs\n" +
+                "4. Immediate Next Steps\n\n" +
+                "$toolsPrompt\n\n" +
+                "Keep your response concise, well-structured, and formatted with clean Markdown headings and bullet points."
+
+            executeAgentSessionTurn(
+                session = newSession,
+                userMessage = userGoalMessage,
+                assistantMessageId = assistantMessageId,
+                streamingAssistantMessage = streamingAssistantMessage,
+                systemPrompt = agentSystemPrompt,
+                initialSteps = initialSteps
+            )
+        }
+    }
+
+    fun sendAgentFollowUp(overrideText: String? = null) {
+        val textToSend = (overrideText ?: _uiState.value.agentInputText).trim()
+        if (textToSend.isBlank()) return
+
+        val state = _uiState.value
+        val currentSession = state.currentAgentSession ?: return
+
+        agentGenerationJob?.cancel()
+
+        val userMessage = ChatMessage(
+            id = UUID.randomUUID().toString(),
+            conversationId = currentSession.id,
+            role = MessageRole.USER,
+            content = textToSend,
+            modelUsed = state.selectedModel
+        )
+
+        val assistantMessageId = UUID.randomUUID().toString()
+        val streamingAssistantMessage = ChatMessage(
+            id = assistantMessageId,
+            conversationId = currentSession.id,
+            role = MessageRole.ASSISTANT,
+            content = "",
+            modelUsed = state.selectedModel,
+            isStreaming = true
+        )
+
+        val updatedMessagesWithUser = currentSession.messages + userMessage + streamingAssistantMessage
+        val updatedSession = currentSession.copy(
+            messages = updatedMessagesWithUser,
+            status = AgentTaskStatus.IN_PROGRESS,
+            updatedAt = System.currentTimeMillis()
+        )
+
+        _uiState.update {
+            it.copy(
+                agentInputText = "",
+                isAgentLoading = true,
+                agentErrorMessage = null,
+                currentAgentSession = updatedSession,
+                agentSessions = it.agentSessions.map { s -> if (s.id == currentSession.id) updatedSession else s }
+            )
+        }
+
+        agentGenerationJob = viewModelScope.launch {
+            val toolsPrompt = toolRegistry.formatToolsForPrompt()
+            val agentSystemPrompt = "You are an autonomous NVIDIA Vision Agent working on the goal: \"${currentSession.goal}\".\n\n" +
+                "$toolsPrompt\n\n" +
+                "Respond to user inquiries and task adjustments concisely with technical precision."
+
+            executeAgentSessionTurn(
+                session = updatedSession,
+                userMessage = userMessage,
+                assistantMessageId = assistantMessageId,
+                streamingAssistantMessage = streamingAssistantMessage,
+                systemPrompt = agentSystemPrompt,
+                initialSteps = null
+            )
+        }
+    }
+
+    companion object {
+        private const val MAX_AUTONOMOUS_TOOL_STEPS = 6
+    }
+
+    private fun updateAgentSessionStatus(status: AgentTaskStatus) {
+        _uiState.update { cur ->
+            val curSession = cur.currentAgentSession ?: return@update cur
+            val s = curSession.copy(status = status, updatedAt = System.currentTimeMillis())
+            cur.copy(
+                currentAgentSession = s,
+                agentSessions = cur.agentSessions.map { if (it.id == curSession.id) s else it }
+            )
+        }
+    }
+
+    private fun updateAssistantStreamingContent(assistantMessageId: String, content: String) {
+        _uiState.update { cur ->
+            val curSession = cur.currentAgentSession ?: return@update cur
+            val updatedMessages = curSession.messages.map { msg ->
+                if (msg.id == assistantMessageId) {
+                    msg.copy(content = content, isStreaming = true)
+                } else msg
+            }
+            val s = curSession.copy(messages = updatedMessages)
+            cur.copy(
+                currentAgentSession = s,
+                agentSessions = cur.agentSessions.map { if (it.id == curSession.id) s else it }
+            )
+        }
+    }
+
+    private fun addToolExecutionToSession(record: ToolExecutionRecord) {
+        _uiState.update { cur ->
+            val curSession = cur.currentAgentSession ?: return@update cur
+            val updatedExecutions = curSession.toolExecutions + record
+            val s = curSession.copy(toolExecutions = updatedExecutions, updatedAt = System.currentTimeMillis())
+            cur.copy(
+                currentAgentSession = s,
+                agentSessions = cur.agentSessions.map { if (it.id == curSession.id) s else it }
+            )
+        }
+    }
+
+    private suspend fun executeAgentSessionTurn(
+        session: AgentSession,
+        userMessage: ChatMessage,
+        assistantMessageId: String,
+        streamingAssistantMessage: ChatMessage,
+        systemPrompt: String,
+        initialSteps: List<AgentStep>?
+    ) {
+        workspaceManager.activeSessionId = session.id
+        val state = _uiState.value
+        val historyMessages = session.messages
+            .filter { it.id != assistantMessageId && !it.isError }
+            .filterNot { it.id == userMessage.id }
+            .toMutableList()
+
+        var currentTurnMessage = userMessage
+        var toolStepCount = 0
+        var loopActive = true
+
+        while (loopActive && toolStepCount < MAX_AUTONOMOUS_TOOL_STEPS) {
+            // 1. STATE: THINKING
+            updateAgentSessionStatus(AgentTaskStatus.THINKING)
+
+            val attemptResult = repository.requestAiCompletion(
+                history = historyMessages,
+                userMessage = currentTurnMessage,
+                modelName = state.selectedModel,
+                systemPrompt = systemPrompt,
+                temperature = state.temperature,
+                topP = state.topP,
+                maxTokens = state.maxTokens
+            )
+
+            if (attemptResult.isFailure) {
+                val error = attemptResult.exceptionOrNull() ?: Exception("Unknown error during agent generation")
+                handleAgentError(assistantMessageId, streamingAssistantMessage, error)
+                return
+            }
+
+            val rawResponse = attemptResult.getOrThrow()
+            val toolCall = ToolCallParser.parse(rawResponse)
+
+            if (toolCall != null) {
+                toolStepCount++
+
+                // 2. STATE: USING_TOOL
+                updateAgentSessionStatus(AgentTaskStatus.USING_TOOL)
+
+                val preToolNarrative = ToolCallParser.stripToolCalls(rawResponse)
+                val intermediateContent = if (preToolNarrative.isNotBlank()) {
+                    "$preToolNarrative\n\n*(Step $toolStepCount/$MAX_AUTONOMOUS_TOOL_STEPS: Using tool '${toolCall.toolName}')*"
+                } else {
+                    "*(Step $toolStepCount/$MAX_AUTONOMOUS_TOOL_STEPS: Using tool '${toolCall.toolName}')*"
+                }
+
+                updateAssistantStreamingContent(assistantMessageId, intermediateContent)
+
+                // Execute the requested tool safely via the modular registry
+                val toolResult = toolRegistry.execute(toolCall)
+                val record = ToolExecutionRecord(
+                    callId = toolCall.callId,
+                    messageId = assistantMessageId,
+                    toolName = toolCall.toolName,
+                    arguments = toolCall.arguments,
+                    isSuccess = toolResult.isSuccess,
+                    result = toolResult.result,
+                    error = toolResult.error,
+                    timestamp = System.currentTimeMillis()
+                )
+
+                // Store tool execution record in active session
+                addToolExecutionToSession(record)
+
+                // 3. STATE: OBSERVING
+                updateAgentSessionStatus(AgentTaskStatus.OBSERVING)
+                delay(120L)
+
+                // Build structured observation feedback for the model
+                val toolFeedbackContent = buildString {
+                    appendLine("[TOOL_RESULT: ${record.toolName}]")
+                    appendLine("Status: ${if (record.isSuccess) "SUCCESS" else "FAILURE"}")
+                    if (record.isSuccess) {
+                        appendLine("Result: ${record.result}")
+                    } else {
+                        appendLine("Error: ${record.error}")
+                    }
+                    appendLine("Autonomous tool step $toolStepCount of $MAX_AUTONOMOUS_TOOL_STEPS complete.")
+                    if (toolStepCount >= MAX_AUTONOMOUS_TOOL_STEPS) {
+                        appendLine("Maximum tool steps reached. Deliver your final complete answer to the user now without any tool calls.")
+                    } else {
+                        appendLine("If you require another tool, output a ```tool_call``` block. Otherwise, deliver your final answer to conclude the task.")
+                    }
+                }
+
+                // Add past turn to ongoing history
+                historyMessages.add(currentTurnMessage)
+                historyMessages.add(
+                    ChatMessage(
+                        id = UUID.randomUUID().toString(),
+                        conversationId = session.id,
+                        role = MessageRole.ASSISTANT,
+                        content = rawResponse,
+                        modelUsed = state.selectedModel
+                    )
+                )
+
+                // Set feedback message as next user message to feed back to model
+                currentTurnMessage = ChatMessage(
+                    id = UUID.randomUUID().toString(),
+                    conversationId = session.id,
+                    role = MessageRole.USER,
+                    content = toolFeedbackContent,
+                    modelUsed = state.selectedModel
+                )
+
+                // Loop continues to next iteration (THINKING)
+            } else {
+                // Model provided its final answer (no tool call requested)
+                loopActive = false
+
+                streamAgentResponse(
+                    assistantMessageId = assistantMessageId,
+                    streamingAssistantMessage = streamingAssistantMessage,
+                    fullReplyText = rawResponse,
+                    initialSteps = initialSteps
+                )
+                return
+            }
+        }
+
+        // Fallback: If loop exited due to MAX_AUTONOMOUS_TOOL_STEPS limit
+        if (loopActive) {
+            updateAgentSessionStatus(AgentTaskStatus.THINKING)
+            val finalPrompt = ChatMessage(
+                id = UUID.randomUUID().toString(),
+                conversationId = session.id,
+                role = MessageRole.USER,
+                content = "You have completed $toolStepCount autonomous tool steps. Summarize all findings and provide your final response to the user now.",
+                modelUsed = state.selectedModel
+            )
+            val finalResult = repository.requestAiCompletion(
+                history = historyMessages,
+                userMessage = finalPrompt,
+                modelName = state.selectedModel,
+                systemPrompt = systemPrompt,
+                temperature = state.temperature,
+                topP = state.topP,
+                maxTokens = state.maxTokens
+            )
+
+            val finalReply = finalResult.getOrElse {
+                val lastTool = _uiState.value.currentAgentSession?.toolExecutions?.lastOrNull()
+                "Completed $toolStepCount autonomous tool steps. Last output: ${lastTool?.result ?: "Success"}."
+            }
+
+            streamAgentResponse(
+                assistantMessageId = assistantMessageId,
+                streamingAssistantMessage = streamingAssistantMessage,
+                fullReplyText = ToolCallParser.stripToolCalls(finalReply),
+                initialSteps = initialSteps
+            )
+        }
+    }
+
+    private suspend fun streamAgentResponse(
+        assistantMessageId: String,
+        streamingAssistantMessage: ChatMessage,
+        fullReplyText: String,
+        initialSteps: List<AgentStep>?
+    ) {
+        val words = fullReplyText.split(Regex("(?<=\\s)|(?=\\s)"))
+        val accumulated = StringBuilder()
+
+        for (token in words) {
+            accumulated.append(token)
+            val currentText = accumulated.toString()
+
+            _uiState.update { cur ->
+                val curSession = cur.currentAgentSession ?: return@update cur
+                val updatedMessages = curSession.messages.map { msg ->
+                    if (msg.id == assistantMessageId) {
+                        msg.copy(content = currentText, isStreaming = true)
+                    } else msg
+                }
+                val updatedSession = curSession.copy(messages = updatedMessages)
+                cur.copy(
+                    currentAgentSession = updatedSession,
+                    agentSessions = cur.agentSessions.map { if (it.id == curSession.id) updatedSession else it }
+                )
+            }
+            val delayMs = if (token.isBlank()) 10L else (16L + (token.length % 5) * 2L)
+            delay(delayMs)
+        }
+
+        val finalAssistantMessage = streamingAssistantMessage.copy(
+            content = fullReplyText,
+            isStreaming = false
+        )
+
+        val updatedSteps = initialSteps?.map { step ->
+            step.copy(status = AgentTaskStatus.COMPLETED)
+        }
+
+        _uiState.update { cur ->
+            val curSession = cur.currentAgentSession ?: return@update cur
+            val updatedMessages = curSession.messages.map { msg ->
+                if (msg.id == assistantMessageId) finalAssistantMessage else msg
+            }
+            val updatedSession = curSession.copy(
+                status = AgentTaskStatus.COMPLETED,
+                steps = updatedSteps ?: curSession.steps.map { it.copy(status = AgentTaskStatus.COMPLETED) },
+                messages = updatedMessages,
+                updatedAt = System.currentTimeMillis()
+            )
+            cur.copy(
+                isAgentLoading = false,
+                currentAgentSession = updatedSession,
+                agentSessions = cur.agentSessions.map { if (it.id == curSession.id) updatedSession else it }
+            )
+        }
+    }
+
+    private fun handleAgentError(
+        assistantMessageId: String,
+        streamingAssistantMessage: ChatMessage,
+        error: Throwable
+    ) {
+        val errorMessage = streamingAssistantMessage.copy(
+            content = "Task Error: ${error.message ?: "Could not complete autonomous agent loop."}",
+            isStreaming = false,
+            isError = true
+        )
+
+        _uiState.update { cur ->
+            val curSession = cur.currentAgentSession ?: return@update cur
+            val updatedMessages = curSession.messages.map { msg ->
+                if (msg.id == assistantMessageId) errorMessage else msg
+            }
+            val updatedSession = curSession.copy(
+                status = AgentTaskStatus.FAILED,
+                messages = updatedMessages,
+                updatedAt = System.currentTimeMillis()
+            )
+            cur.copy(
+                isAgentLoading = false,
+                agentErrorMessage = error.message,
+                currentAgentSession = updatedSession,
+                agentSessions = cur.agentSessions.map { if (it.id == curSession.id) updatedSession else it }
+            )
+        }
+    }
+
+    fun stopAgentGeneration() {
+        agentGenerationJob?.cancel()
+        _uiState.update { cur ->
+            val curSession = cur.currentAgentSession ?: return@update cur
+            val updatedMessages = curSession.messages.map { msg ->
+                if (msg.isStreaming) msg.copy(isStreaming = false) else msg
+            }.filterNot { it.isStreaming && it.content.isBlank() }
+            val s = curSession.copy(messages = updatedMessages)
+            cur.copy(
+                isAgentLoading = false,
+                currentAgentSession = s,
+                agentSessions = cur.agentSessions.map { if (it.id == curSession.id) s else it }
+            )
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
         generationJob?.cancel()
+        agentGenerationJob?.cancel()
         tts?.shutdown()
     }
 }

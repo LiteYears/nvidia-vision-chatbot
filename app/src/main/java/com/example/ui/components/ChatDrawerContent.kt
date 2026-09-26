@@ -26,6 +26,7 @@ import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.PersonOutline
+import androidx.compose.material.icons.outlined.SmartToy
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.HorizontalDivider
@@ -51,6 +52,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.model.AgentSession
+import com.example.data.model.AgentTaskStatus
+import com.example.data.model.AppMode
 import com.example.data.model.Conversation
 
 @Composable
@@ -67,6 +71,13 @@ fun ChatDrawerContent(
     onOpenPlanClick: () -> Unit,
     onOpenAboutClick: () -> Unit = {},
     onOpenParametersClick: () -> Unit = {},
+    currentMode: AppMode = AppMode.CHAT,
+    onModeChange: (AppMode) -> Unit = {},
+    agentSessions: List<AgentSession> = emptyList(),
+    activeAgentSessionId: String? = null,
+    onSelectAgentSession: (AgentSession) -> Unit = {},
+    onNewAgentTaskClick: () -> Unit = {},
+    onDeleteAgentSession: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -166,9 +177,91 @@ fun ChatDrawerContent(
                 }
             }
 
-            Spacer(modifier = Modifier.height(14.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
-            // Sleek "New Chat" button matching the rest of the dark editorial aesthetic
+            // Drawer Mode Switcher: Chat Mode vs Agent Mode
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)
+                ),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(3.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    val isChatMode = currentMode == AppMode.CHAT
+                    Surface(
+                        shape = RoundedCornerShape(9.dp),
+                        color = if (isChatMode) MaterialTheme.colorScheme.surface else Color.Transparent,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(9.dp))
+                            .clickable { onModeChange(AppMode.CHAT) }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(vertical = 6.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Outlined.Chat,
+                                contentDescription = null,
+                                tint = if (isChatMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "Chat",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontWeight = if (isChatMode) FontWeight.SemiBold else FontWeight.Normal,
+                                    fontSize = 12.sp,
+                                    color = if (isChatMode) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            )
+                        }
+                    }
+
+                    val isAgentMode = currentMode == AppMode.AGENT
+                    Surface(
+                        shape = RoundedCornerShape(9.dp),
+                        color = if (isAgentMode) MaterialTheme.colorScheme.surface else Color.Transparent,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(9.dp))
+                            .clickable { onModeChange(AppMode.AGENT) }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(vertical = 6.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.SmartToy,
+                                contentDescription = null,
+                                tint = if (isAgentMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "Agent",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontWeight = if (isAgentMode) FontWeight.SemiBold else FontWeight.Normal,
+                                    fontSize = 12.sp,
+                                    color = if (isAgentMode) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Sleek "New Chat" / "New Agent Task" button
             Surface(
                 shape = RoundedCornerShape(14.dp),
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
@@ -179,7 +272,13 @@ fun ChatDrawerContent(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(14.dp))
-                    .clickable { onNewChatClick() }
+                    .clickable {
+                        if (currentMode == AppMode.CHAT) {
+                            onNewChatClick()
+                        } else {
+                            onNewAgentTaskClick()
+                        }
+                    }
                     .testTag("drawer_new_chat_button")
             ) {
                 Row(
@@ -188,13 +287,13 @@ fun ChatDrawerContent(
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Icon(
-                        imageVector = Icons.Outlined.Add,
-                        contentDescription = "New Chat",
+                        imageVector = if (currentMode == AppMode.CHAT) Icons.Outlined.Add else Icons.Outlined.SmartToy,
+                        contentDescription = if (currentMode == AppMode.CHAT) "New Chat" else "New Agent Task",
                         tint = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.size(18.dp)
                     )
                     Text(
-                        text = "New chat",
+                        text = if (currentMode == AppMode.CHAT) "New chat" else "New agent task",
                         style = MaterialTheme.typography.labelLarge.copy(
                             color = MaterialTheme.colorScheme.onSurface,
                             fontWeight = FontWeight.SemiBold,
@@ -204,11 +303,11 @@ fun ChatDrawerContent(
                 }
             }
 
-            Spacer(modifier = Modifier.height(18.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
             // Section Header
             Text(
-                text = "RECENT CHATS",
+                text = if (currentMode == AppMode.CHAT) "RECENT CHATS" else "AGENT TASKS",
                 style = MaterialTheme.typography.labelSmall.copy(
                     fontWeight = FontWeight.SemiBold,
                     letterSpacing = 1.1.sp,
@@ -220,86 +319,189 @@ fun ChatDrawerContent(
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            // Conversation history list
+            // Conversation / Task history list
             LazyColumn(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(3.dp)
             ) {
-                if (conversations.isEmpty()) {
-                    item {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 36.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "No conversations yet",
-                                style = MaterialTheme.typography.bodySmall.copy(
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                if (currentMode == AppMode.CHAT) {
+                    if (conversations.isEmpty()) {
+                        item {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 36.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "No conversations yet",
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                    )
                                 )
-                            )
+                            }
+                        }
+                    } else {
+                        items(conversations, key = { it.id }) { conv ->
+                            val isSelected = conv.id == activeConversationId
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isSelected) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.85f) else Color.Transparent,
+                                border = if (isSelected) {
+                                    androidx.compose.foundation.BorderStroke(
+                                        1.dp,
+                                        MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+                                    )
+                                } else null,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable { onSelectConversation(conv) }
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 10.dp, vertical = 9.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.AutoMirrored.Outlined.Chat,
+                                            contentDescription = null,
+                                            tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Text(
+                                            text = conv.title,
+                                            style = MaterialTheme.typography.bodyMedium.copy(
+                                                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                                                fontSize = 13.5.sp,
+                                                color = if (isSelected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
+                                            ),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+
+                                    IconButton(
+                                        onClick = { onDeleteConversation(conv.id) },
+                                        modifier = Modifier.size(26.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Outlined.DeleteOutline,
+                                            contentDescription = "Delete Conversation",
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                                            modifier = Modifier.size(15.dp)
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                 } else {
-                    items(conversations, key = { it.id }) { conv ->
-                        val isSelected = conv.id == activeConversationId
-                        Surface(
-                            shape = RoundedCornerShape(10.dp),
-                            color = if (isSelected) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.85f) else Color.Transparent,
-                            border = if (isSelected) {
-                                androidx.compose.foundation.BorderStroke(
-                                    1.dp,
-                                    MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
-                                )
-                            } else null,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
-                                .clickable { onSelectConversation(conv) }
-                        ) {
-                            Row(
+                    // Agent Mode Sessions List
+                    if (agentSessions.isEmpty()) {
+                        item {
+                            Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 10.dp, vertical = 9.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
+                                    .padding(vertical = 36.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "No agent tasks yet",
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                    )
+                                )
+                            }
+                        }
+                    } else {
+                        items(agentSessions, key = { it.id }) { session ->
+                            val isSelected = session.id == activeAgentSessionId
+                            val statusColor = when (session.status) {
+                                AgentTaskStatus.INITIALIZING -> MaterialTheme.colorScheme.primary
+                                AgentTaskStatus.THINKING -> Color(0xFF818CF8)
+                                AgentTaskStatus.USING_TOOL -> Color(0xFFF59E0B)
+                                AgentTaskStatus.OBSERVING -> Color(0xFF38BDF8)
+                                AgentTaskStatus.IN_PROGRESS -> Color(0xFF38BDF8)
+                                AgentTaskStatus.COMPLETED -> Color(0xFF4ADE80)
+                                AgentTaskStatus.PAUSED -> Color(0xFFFBBF24)
+                                AgentTaskStatus.FAILED -> Color(0xFFF87171)
+                            }
+
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isSelected) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.85f) else Color.Transparent,
+                                border = if (isSelected) {
+                                    androidx.compose.foundation.BorderStroke(
+                                        1.dp,
+                                        MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+                                    )
+                                } else null,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable { onSelectAgentSession(session) }
                             ) {
                                 Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 10.dp, vertical = 9.dp),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                    modifier = Modifier.weight(1f)
+                                    horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.AutoMirrored.Outlined.Chat,
-                                        contentDescription = null,
-                                        tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Text(
-                                        text = conv.title,
-                                        style = MaterialTheme.typography.bodyMedium.copy(
-                                            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-                                            fontSize = 13.5.sp,
-                                            color = if (isSelected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
-                                        ),
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Outlined.SmartToy,
+                                            contentDescription = null,
+                                            tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Column {
+                                            Text(
+                                                text = session.goal,
+                                                style = MaterialTheme.typography.bodyMedium.copy(
+                                                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                                                    fontSize = 13.sp,
+                                                    color = if (isSelected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
+                                                ),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Text(
+                                                text = session.status.displayName,
+                                                style = MaterialTheme.typography.labelSmall.copy(
+                                                    fontSize = 10.5.sp,
+                                                    color = statusColor,
+                                                    fontWeight = FontWeight.Medium
+                                                )
+                                            )
+                                        }
+                                    }
 
-                                IconButton(
-                                    onClick = { onDeleteConversation(conv.id) },
-                                    modifier = Modifier.size(26.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Outlined.DeleteOutline,
-                                        contentDescription = "Delete Conversation",
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                                        modifier = Modifier.size(15.dp)
-                                    )
+                                    IconButton(
+                                        onClick = { onDeleteAgentSession(session.id) },
+                                        modifier = Modifier.size(26.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Outlined.DeleteOutline,
+                                            contentDescription = "Delete Agent Task",
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                                            modifier = Modifier.size(15.dp)
+                                        )
+                                    }
                                 }
                             }
                         }
