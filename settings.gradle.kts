@@ -21,6 +21,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "AI Chatbot"
+rootProject.name = "Nvidia Vision Chatbot"
 
 include(":app")
