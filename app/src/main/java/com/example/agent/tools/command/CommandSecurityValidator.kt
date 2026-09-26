@@ -24,7 +24,9 @@ class CommandSecurityValidator {
             // Text processing
             "grep", "egrep", "fgrep", "sed", "awk", "sort", "uniq", "cut", "tr", "echo", "printf", "diff", "cmp", "tee",
             // Safe basic workspace file operations
-            "touch", "mkdir", "rmdir", "cp", "mv", "rm", "basename", "dirname", "true", "false", "sleep",
+            "touch", "mkdir", "rmdir", "cp", "mv", "rm", "basename", "dirname", "true", "false", "sleep", "seq",
+            // Shell loop/structure keywords
+            "for", "do", "done", "while",
             // Script runners
             "sh", "bash", "python", "python3", "node"
         )

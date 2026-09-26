@@ -177,15 +177,16 @@ class RunCommandToolTest {
 
     @Test
     fun testOversizedOutputTruncation() = runBlocking {
-        // Generate output larger than max_output_bytes limit
+        // Generate output larger than max_output_bytes limit (min limit is 1024 bytes)
         val result = runCommandTool.execute(
             mapOf(
-                "command" to "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do echo \"Line \$i: Sample benchmark log statement with padding text\"; done",
+                "command" to "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do echo \"Line \$i: Sample benchmark log statement with padding text that exceeds byte buffer size easily\"; done",
                 "max_output_bytes" to 1024
             )
         )
-        assertTrue("Execution should succeed even with size constraints", result.isSuccess)
+        assertTrue("Execution should succeed even with size constraints: ${result.error}", result.isSuccess)
         assertNotNull(result.result)
+        assertTrue("Output should indicate truncation: ${result.result}", result.result!!.contains("Output truncated"))
     }
 
     @Test
