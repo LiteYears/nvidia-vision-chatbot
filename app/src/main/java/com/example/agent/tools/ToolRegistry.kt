@@ -2,6 +2,7 @@ package com.example.agent.tools
 
 import com.example.agent.tools.builtin.CalculatorTool
 import com.example.agent.tools.builtin.WebSearchTool
+import com.example.agent.tools.command.RunCommandTool
 import com.example.agent.tools.workspace.AgentWorkspaceManager
 import com.example.agent.tools.workspace.FileDeleteTool
 import com.example.agent.tools.workspace.FileListTool
@@ -136,6 +137,7 @@ class ToolRegistry {
                 register(FileReadTool(workspaceManager))
                 register(FileWriteTool(workspaceManager))
                 register(FileDeleteTool(workspaceManager))
+                register(RunCommandTool(workspaceManager))
             }
         }
     }

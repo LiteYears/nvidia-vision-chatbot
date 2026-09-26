@@ -19,6 +19,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.outlined.Build
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -73,6 +74,7 @@ fun ToolExecutionCard(
                         val toolIcon = when {
                             record.toolName.contains("search", ignoreCase = true) -> Icons.Outlined.Search
                             record.toolName.startsWith("file_", ignoreCase = true) -> Icons.Outlined.Description
+                            record.toolName.contains("command", ignoreCase = true) || record.toolName.contains("terminal", ignoreCase = true) -> Icons.Outlined.Terminal
                             else -> Icons.Outlined.Build
                         }
                         Icon(
