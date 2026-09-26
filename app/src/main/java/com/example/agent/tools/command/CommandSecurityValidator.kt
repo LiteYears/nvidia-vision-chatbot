@@ -3,196 +3,160 @@ package com.example.agent.tools.command
 import java.io.File
 
 /**
- * Enforces strict security boundaries on commands executed by the agent:
- * - Prevents access to arbitrary Android/system files (/system, /data, /etc, /proc, /sys, /sdcard, etc.)
- * - Prevents path traversal (e.g. ../) that resolves outside the workspace
- * - Prevents privilege escalation (su, sudo, chroot, mount, etc.)
- * - Prevents network scanning and outbound socket tools (curl, wget, nmap, ping, nc, etc.)
- * - Prevents package installation / system alteration (apt, pm, am, pkg, etc.)
- * - Restricts execution to workspace-safe tools for directory listing, file inspection,
- *   text processing, and workspace scripts.
+ * Analyzes and classifies shell commands requested by the agent.
+ * Instead of forbidding commands, this validator evaluates their risk level and
+ * supplies classification metadata to the Permission Manager, allowing the user
+ * to "Allow Once", "Always Allow This Command", or "Always Allow All (Unrestricted)".
  */
 class CommandSecurityValidator {
 
     companion object {
-        // Safe commands permitted for workspace agent tasks
-        val ALLOWED_COMMANDS = setOf(
-            // Directory listing
+        // Standard safe commands (file operations, text processing, basic inspection)
+        val STANDARD_SAFE_COMMANDS = setOf(
             "ls", "dir", "tree", "pwd",
-            // File inspection
             "cat", "head", "tail", "wc", "stat", "file", "find",
-            // Text processing
             "grep", "egrep", "fgrep", "sed", "awk", "sort", "uniq", "cut", "tr", "echo", "printf", "diff", "cmp", "tee",
-            // Safe basic workspace file operations
             "touch", "mkdir", "rmdir", "cp", "mv", "rm", "basename", "dirname", "true", "false", "sleep", "seq",
-            // Shell loop/structure keywords
-            "for", "do", "done", "while",
-            // Script runners
-            "sh", "bash", "python", "python3", "node"
+            "for", "do", "done", "while", "which", "whoami", "uname", "date", "env", "printenv", "test"
         )
 
-        // Explicitly forbidden commands that pose security, network, or escalation risks
-        val FORBIDDEN_COMMANDS = setOf(
-            "su", "sudo", "doas", "chroot", "mount", "umount", "insmod", "rmmod", "modprobe",
-            "curl", "wget", "nc", "netcat", "ncat", "socat", "nmap", "ping", "ping6", "ssh", "scp", "sftp",
-            "telnet", "ftp", "tcpdump", "traceroute", "route", "ifconfig", "ip",
-            "apt", "apt-get", "dpkg", "apk", "rpm", "yum", "pacman", "pkg",
+        // Network tools
+        val NETWORK_COMMANDS = setOf(
+            "curl", "wget", "nc", "netcat", "ncat", "socat", "nmap", "ping", "ping6",
+            "ssh", "scp", "sftp", "telnet", "ftp", "tcpdump", "traceroute", "route", "ifconfig", "ip"
+        )
+
+        // Android system and package management tools
+        val SYSTEM_PACKAGE_COMMANDS = setOf(
             "pm", "am", "cmd", "service", "dumpsys", "setprop", "getprop", "logcat", "dmesg",
-            "reboot", "shutdown", "poweroff", "killall",
-            "dd", "fdisk", "mkfs", "iptables", "nft"
+            "apt", "apt-get", "dpkg", "apk", "rpm", "yum", "pacman", "pkg"
         )
 
-        // Sensitive system directory roots that must never be accessed
-        val FORBIDDEN_SYSTEM_PATHS = listOf(
+        // Root / privilege escalation tools
+        val PRIVILEGED_COMMANDS = setOf(
+            "su", "sudo", "doas", "chroot", "mount", "umount", "insmod", "rmmod", "modprobe",
+            "iptables", "nft", "setenforce", "getenforce"
+        )
+
+        // Potentially destructive tools
+        val DESTRUCTIVE_COMMANDS = setOf(
+            "reboot", "shutdown", "poweroff", "killall",
+            "dd", "fdisk", "mkfs"
+        )
+
+        // System paths
+        val SENSITIVE_SYSTEM_PATHS = listOf(
             "/system", "/data", "/etc", "/proc", "/sys", "/dev",
             "/storage", "/sdcard", "/root", "/var", "/private",
             "/vendor", "/apex", "/mnt", "/product", "/system_ext",
-            "/init", "/sbin", "/lost+found"
+            "/init", "/sbin"
         )
     }
 
     /**
-     * Validates that the command and its arguments do not escape the workspace
-     * or attempt forbidden operations.
-     *
-     * @throws SecurityException if the command violates security boundaries.
-     * @throws IllegalArgumentException if the command syntax or executable is invalid.
+     * Inspects and classifies a command without blocking it.
      */
-    fun validateCommand(
+    fun classifyCommand(
         command: String,
         workingDir: File,
         workspaceRoot: File
-    ) {
+    ): CommandClassification {
         val trimmed = command.trim()
         if (trimmed.isEmpty()) {
-            throw IllegalArgumentException("Command cannot be empty.")
+            return CommandClassification(
+                executable = "",
+                fullCommand = command,
+                riskLevel = CommandRiskLevel.STANDARD,
+                description = "Empty command",
+                isPrivilegedOrSensitive = false
+            )
         }
 
-        if (trimmed.contains('\u0000')) {
-            throw SecurityException("Null byte detected in command string.")
-        }
-
-        val canonicalRoot = workspaceRoot.canonicalPath
-        val canonicalWorkDir = workingDir.canonicalPath
-
-        // 1. Verify working directory is within workspace boundary
-        val isWorkDirValid = canonicalWorkDir == canonicalRoot ||
-                canonicalWorkDir.startsWith(canonicalRoot + File.separator)
-        if (!isWorkDirValid) {
-            throw SecurityException("Working directory '${workingDir.path}' escapes the workspace boundary.")
-        }
-
-        // 2. Split command by shell operators (;, &&, ||, |, \n) to validate every segment
         val segments = splitCommandSegments(trimmed)
-        if (segments.isEmpty()) {
-            throw IllegalArgumentException("No executable command found.")
-        }
+        var maxRisk = CommandRiskLevel.STANDARD
+        var riskReason = "Standard workspace utility execution"
+        var primaryExecutable = ""
 
         for (segment in segments) {
             val tokens = tokenizeSegment(segment)
             if (tokens.isEmpty()) continue
+            val rawExec = tokens[0]
+            val cleanExec = cleanExecutableName(rawExec).lowercase()
+            if (primaryExecutable.isEmpty()) primaryExecutable = cleanExec
 
-            validateSegment(tokens, workingDir, workspaceRoot)
-        }
-    }
-
-    private fun validateSegment(
-        tokens: List<String>,
-        workingDir: File,
-        workspaceRoot: File
-    ) {
-        val rawExecutable = tokens[0]
-        val cleanExecutable = cleanExecutableName(rawExecutable)
-
-        // Check if executable is explicitly forbidden
-        if (FORBIDDEN_COMMANDS.contains(cleanExecutable.lowercase())) {
-            throw SecurityException("Command '$cleanExecutable' is forbidden for security reasons.")
-        }
-
-        // Check if it's a workspace script execution (e.g. ./script.sh or script.sh in workspace)
-        val isScript = isWorkspaceScript(rawExecutable, workingDir, workspaceRoot)
-
-        if (!isScript && !ALLOWED_COMMANDS.contains(cleanExecutable.lowercase())) {
-            throw SecurityException(
-                "Command '$cleanExecutable' is not permitted in the agent workspace. " +
-                "Only workspace-safe utilities (directory listing, file inspection, text processing, and workspace scripts) are supported."
-            )
-        }
-
-        // Check arguments for forbidden paths, system paths, or path traversal escapes
-        for (i in 1 until tokens.size) {
-            val token = tokens[i]
-            validateArgument(token, workingDir, workspaceRoot)
-        }
-    }
-
-    private fun validateArgument(
-        token: String,
-        workingDir: File,
-        workspaceRoot: File
-    ) {
-        // Strip quotes or redirection operators if attached
-        val cleanToken = token.trim('\'', '"')
-            .removePrefix(">>").removePrefix(">").removePrefix("<")
-            .trim()
-
-        if (cleanToken.isEmpty()) return
-
-        val canonicalRoot = workspaceRoot.canonicalPath
-
-        // Check for forbidden system path prefixes
-        for (forbiddenPath in FORBIDDEN_SYSTEM_PATHS) {
-            if (cleanToken == forbiddenPath || cleanToken.startsWith("$forbiddenPath/")) {
-                throw SecurityException(
-                    "Access to system path '$cleanToken' is prohibited. Commands may only access files inside the workspace."
+            // Check destructive
+            if (DESTRUCTIVE_COMMANDS.contains(cleanExec) || (cleanExec == "rm" && tokens.any { it.contains("rf") || it == "-r" || it == "-f" })) {
+                return CommandClassification(
+                    executable = cleanExec,
+                    fullCommand = trimmed,
+                    riskLevel = CommandRiskLevel.DESTRUCTIVE,
+                    description = "Potentially destructive system command ('$cleanExec')",
+                    isPrivilegedOrSensitive = true
                 )
             }
-        }
 
-        // Check absolute paths: if token starts with '/', it must resolve strictly inside workspace
-        if (cleanToken.startsWith("/")) {
-            val target = File(cleanToken).canonicalFile
-            val targetPath = target.canonicalPath
-            val isInside = targetPath == canonicalRoot || targetPath.startsWith(canonicalRoot + File.separator)
-            if (!isInside) {
-                throw SecurityException("Absolute path '$cleanToken' resolves outside the agent workspace.")
+            // Check privileged
+            if (PRIVILEGED_COMMANDS.contains(cleanExec)) {
+                return CommandClassification(
+                    executable = cleanExec,
+                    fullCommand = trimmed,
+                    riskLevel = CommandRiskLevel.PRIVILEGED,
+                    description = "Privileged / root elevation tool ('$cleanExec')",
+                    isPrivilegedOrSensitive = true
+                )
+            }
+
+            // Check network
+            if (NETWORK_COMMANDS.contains(cleanExec)) {
+                if (maxRisk.ordinal < CommandRiskLevel.NETWORK.ordinal) {
+                    maxRisk = CommandRiskLevel.NETWORK
+                    riskReason = "Outbound network connection or socket utility ('$cleanExec')"
+                }
+            }
+
+            // Check system package
+            if (SYSTEM_PACKAGE_COMMANDS.contains(cleanExec)) {
+                if (maxRisk.ordinal < CommandRiskLevel.SYSTEM_PACKAGE.ordinal) {
+                    maxRisk = CommandRiskLevel.SYSTEM_PACKAGE
+                    riskReason = "Android system service or package management command ('$cleanExec')"
+                }
+            }
+
+            // Check arguments for system paths
+            for (i in 1 until tokens.size) {
+                val arg = tokens[i].trim('\'', '"')
+                for (sysPath in SENSITIVE_SYSTEM_PATHS) {
+                    if (arg == sysPath || arg.startsWith("$sysPath/")) {
+                        if (maxRisk.ordinal < CommandRiskLevel.SYSTEM_PATH.ordinal) {
+                            maxRisk = CommandRiskLevel.SYSTEM_PATH
+                            riskReason = "Accesses system device path '$arg'"
+                        }
+                    }
+                }
+            }
+
+            // Check if script or non-standard
+            if (maxRisk == CommandRiskLevel.STANDARD && !STANDARD_SAFE_COMMANDS.contains(cleanExec)) {
+                maxRisk = CommandRiskLevel.CUSTOM_SCRIPT
+                riskReason = "Custom executable or script runner ('$cleanExec')"
             }
         }
 
-        // Check path traversal with '..'
-        if (cleanToken.contains("..")) {
-            val resolved = File(workingDir, cleanToken).canonicalFile
-            val targetPath = resolved.canonicalPath
-            val isInside = targetPath == canonicalRoot || targetPath.startsWith(canonicalRoot + File.separator)
-            if (!isInside) {
-                throw SecurityException("Path traversal '$cleanToken' attempts to escape the agent workspace.")
-            }
-        }
+        val isSensitive = maxRisk != CommandRiskLevel.STANDARD
+
+        return CommandClassification(
+            executable = if (primaryExecutable.isNotBlank()) primaryExecutable else "sh",
+            fullCommand = trimmed,
+            riskLevel = maxRisk,
+            description = riskReason,
+            isPrivilegedOrSensitive = isSensitive
+        )
     }
 
     private fun cleanExecutableName(raw: String): String {
         val trimmed = raw.trim('\'', '"')
         val lastSlash = trimmed.lastIndexOfAny(charArrayOf('/', '\\'))
         return if (lastSlash >= 0) trimmed.substring(lastSlash + 1) else trimmed
-    }
-
-    private fun isWorkspaceScript(rawExecutable: String, workingDir: File, workspaceRoot: File): Boolean {
-        val trimmed = rawExecutable.trim('\'', '"')
-        if (trimmed.startsWith("./") || trimmed.endsWith(".sh") || trimmed.contains("/")) {
-            val scriptFile = if (trimmed.startsWith("/")) {
-                File(trimmed).canonicalFile
-            } else {
-                File(workingDir, trimmed).canonicalFile
-            }
-            val canonicalRoot = workspaceRoot.canonicalPath
-            val scriptPath = scriptFile.canonicalPath
-            val isInside = scriptPath == canonicalRoot || scriptPath.startsWith(canonicalRoot + File.separator)
-            if (!isInside) {
-                throw SecurityException("Script path '$rawExecutable' escapes the agent workspace.")
-            }
-            return true
-        }
-        return false
     }
 
     private fun splitCommandSegments(command: String): List<String> {

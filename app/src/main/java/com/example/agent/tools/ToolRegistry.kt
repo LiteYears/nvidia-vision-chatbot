@@ -128,7 +128,9 @@ class ToolRegistry {
          * Creates a default ToolRegistry pre-configured with built-in tools.
          */
         fun defaultRegistry(
-            workspaceManager: AgentWorkspaceManager = AgentWorkspaceManager.getInstance()
+            workspaceManager: AgentWorkspaceManager = AgentWorkspaceManager.getInstance(),
+            settingsManager: com.example.data.preferences.SettingsManager? = null,
+            authorizer: com.example.agent.tools.command.CommandAuthorizer? = null
         ): ToolRegistry {
             return ToolRegistry().apply {
                 register(CalculatorTool())
@@ -137,7 +139,13 @@ class ToolRegistry {
                 register(FileReadTool(workspaceManager))
                 register(FileWriteTool(workspaceManager))
                 register(FileDeleteTool(workspaceManager))
-                register(RunCommandTool(workspaceManager))
+                register(
+                    RunCommandTool(
+                        workspaceManager = workspaceManager,
+                        settingsManager = settingsManager,
+                        authorizer = authorizer
+                    )
+                )
             }
         }
     }

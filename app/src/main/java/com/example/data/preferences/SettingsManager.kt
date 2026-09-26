@@ -19,6 +19,11 @@ class SettingsManager(context: Context) {
         private const val KEY_TOP_P = "top_p"
         private const val KEY_MAX_TOKENS = "max_tokens"
 
+        // Command Permission Keys
+        private const val KEY_ALWAYS_ALLOW_ALL_COMMANDS = "always_allow_all_commands"
+        private const val KEY_COMMAND_PERMISSION_POLICY = "command_permission_policy"
+        private const val KEY_ALWAYS_ALLOWED_COMMANDS = "always_allowed_commands"
+
         const val DEFAULT_USER_NAME = ""
         const val DEFAULT_MODEL = "meta/llama-3.2-11b-vision-instruct"
         const val MODEL_QUANTUM = "Quantum 3"
@@ -120,5 +125,58 @@ class SettingsManager(context: Context) {
 
     fun setMaxTokens(maxTokens: Int) {
         prefs.edit().putInt(KEY_MAX_TOKENS, maxTokens.coerceIn(256, 8192)).apply()
+    }
+
+    // --- Command Permission & Agent Control Preferences ---
+
+    /**
+     * True if the user granted unrestricted autonomous control (all commands allowed without asking).
+     */
+    fun isAlwaysAllowAllCommands(): Boolean =
+        prefs.getBoolean(KEY_ALWAYS_ALLOW_ALL_COMMANDS, false)
+
+    fun setAlwaysAllowAllCommands(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_ALWAYS_ALLOW_ALL_COMMANDS, enabled).apply()
+    }
+
+    /**
+     * Selected command permission policy (always_allow_all, ask_sensitive, always_ask).
+     */
+    fun getCommandPermissionPolicy(): String =
+        prefs.getString(KEY_COMMAND_PERMISSION_POLICY, "ask_sensitive") ?: "ask_sensitive"
+
+    fun setCommandPermissionPolicy(policy: String) {
+        prefs.edit().putString(KEY_COMMAND_PERMISSION_POLICY, policy).apply()
+    }
+
+    /**
+     * Set of specific commands/executables that have been whitelisted for "Always Allow".
+     */
+    fun getAlwaysAllowedCommands(): Set<String> =
+        prefs.getStringSet(KEY_ALWAYS_ALLOWED_COMMANDS, emptySet()) ?: emptySet()
+
+    fun isCommandAlwaysAllowed(executable: String): Boolean {
+        if (isAlwaysAllowAllCommands()) return true
+        val clean = executable.trim().lowercase()
+        return getAlwaysAllowedCommands().any { it.trim().lowercase() == clean }
+    }
+
+    fun addAlwaysAllowedCommand(executable: String) {
+        val clean = executable.trim().lowercase()
+        if (clean.isEmpty()) return
+        val current = getAlwaysAllowedCommands().toMutableSet()
+        current.add(clean)
+        prefs.edit().putStringSet(KEY_ALWAYS_ALLOWED_COMMANDS, current).apply()
+    }
+
+    fun removeAlwaysAllowedCommand(executable: String) {
+        val clean = executable.trim().lowercase()
+        val current = getAlwaysAllowedCommands().toMutableSet()
+        current.remove(clean)
+        prefs.edit().putStringSet(KEY_ALWAYS_ALLOWED_COMMANDS, current).apply()
+    }
+
+    fun clearAlwaysAllowedCommands() {
+        prefs.edit().remove(KEY_ALWAYS_ALLOWED_COMMANDS).apply()
     }
 }

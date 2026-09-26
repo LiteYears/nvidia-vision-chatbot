@@ -8,14 +8,14 @@ import java.io.InputStream
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Controlled process runner for workspace command execution.
+ * Robust process runner for executing shell commands and scripts.
  *
- * Enforces:
- * - Isolated working directory execution
- * - Sanitized environment (no API keys, system tokens, or secrets leaked)
- * - Strict execution timeouts with forced process termination
- * - Output buffer size limits to prevent out-of-memory or excessive token consumption
- * - Non-blocking stream consumption
+ * Provides:
+ * - Dynamic shell resolution (/system/bin/sh, /bin/sh, etc.)
+ * - Rich PATH resolution ensuring Android binaries (pm, am, getprop, curl, ping) are discoverable
+ * - Strict execution timeouts with process tree cleanup
+ * - Stream size limiting to protect memory
+ * - Non-blocking asynchronous stdout/stderr collection
  */
 class ProcessCommandRunner : CommandRunner {
 
@@ -28,18 +28,38 @@ class ProcessCommandRunner : CommandRunner {
         val startTime = System.currentTimeMillis()
         val shell = resolveShell()
 
+        // Ensure working directory exists
+        if (!workingDir.exists()) {
+            workingDir.mkdirs()
+        }
+
         val processBuilder = ProcessBuilder(shell, "-c", command)
         processBuilder.directory(workingDir)
 
-        // Sanitize environment: clear all inherited variables to prevent secret leakage
         val env = processBuilder.environment()
-        env.clear()
-        env["PATH"] = "/system/bin:/system/xbin:/bin:/usr/bin:/usr/local/bin"
+        
+        // Pass necessary system variables for Android shell tools
+        val systemEnv = System.getenv()
+        val pathCandidates = listOf(
+            systemEnv["PATH"],
+            "/system/bin",
+            "/system/xbin",
+            "/sbin",
+            "/vendor/bin",
+            "/bin",
+            "/usr/bin",
+            "/usr/local/bin"
+        ).filterNotNull().joinToString(":")
+
+        env["PATH"] = pathCandidates
         env["HOME"] = workingDir.canonicalPath
         env["PWD"] = workingDir.canonicalPath
         env["TMPDIR"] = workingDir.canonicalPath
         env["LANG"] = "C.UTF-8"
         env["LC_ALL"] = "C.UTF-8"
+        
+        systemEnv["ANDROID_ROOT"]?.let { env["ANDROID_ROOT"] = it }
+        systemEnv["ANDROID_DATA"]?.let { env["ANDROID_DATA"] = it }
 
         val process = try {
             processBuilder.start()
@@ -48,7 +68,7 @@ class ProcessCommandRunner : CommandRunner {
             return@withContext CommandExecutionResult(
                 exitCode = -1,
                 stdout = "",
-                stderr = "Failed to launch process: ${e.message ?: e.javaClass.simpleName}",
+                stderr = "Failed to launch command process: ${e.message ?: e.javaClass.simpleName}",
                 durationMs = duration,
                 isTimedOut = false,
                 isTruncated = false

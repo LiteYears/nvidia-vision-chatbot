@@ -81,6 +81,8 @@ import com.example.ui.components.AttachmentBottomSheet
 import com.example.ui.components.ChatBubble
 import com.example.ui.components.ChatDrawerContent
 import com.example.ui.components.ChatInputCard
+import com.example.ui.components.CommandPermissionDialog
+import com.example.ui.components.CommandPermissionsDialog
 import com.example.ui.components.ModeSelectorTabs
 import com.example.ui.components.ModelParametersDialog
 import com.example.ui.components.ModelSelectorSheet
@@ -330,6 +332,11 @@ fun ChatScreen(
                     scope.launch { drawerState.close() }
                     viewModel.setParametersSheetOpen(true)
                 },
+                onOpenCommandPermissionsClick = {
+                    scope.launch { drawerState.close() }
+                    viewModel.setCommandPermissionsDialogOpen(true)
+                },
+                isAlwaysAllowAllCommands = uiState.isAlwaysAllowAllCommands,
                 currentMode = uiState.currentMode,
                 onModeChange = { mode ->
                     viewModel.setAppMode(mode)
@@ -711,6 +718,28 @@ fun ChatScreen(
         currentKey = uiState.apiKey,
         onSaveKey = viewModel::setCustomApiKey,
         onDismiss = { viewModel.setApiKeyDialogOpen(false) }
+    )
+
+    // Interactive Permit Question Dialog (shown when agent requests a command needing permission)
+    uiState.pendingCommandPermission?.let { pendingReq ->
+        CommandPermissionDialog(
+            request = pendingReq,
+            onDecision = viewModel::onCommandPermissionDecision
+        )
+    }
+
+    // Command Permissions & Control Center Dialog
+    CommandPermissionsDialog(
+        isOpen = uiState.isCommandPermissionsDialogOpen,
+        isAlwaysAllowAll = uiState.isAlwaysAllowAllCommands,
+        currentPolicy = uiState.commandPermissionPolicy,
+        alwaysAllowedCommands = uiState.alwaysAllowedCommands,
+        onToggleAlwaysAllowAll = viewModel::setAlwaysAllowAllCommands,
+        onSelectPolicy = viewModel::setCommandPermissionPolicy,
+        onRemoveAllowedCommand = viewModel::removeAlwaysAllowedCommand,
+        onAddAllowedCommand = viewModel::addAlwaysAllowedCommand,
+        onClearAllAllowedCommands = viewModel::clearAllAlwaysAllowedCommands,
+        onDismiss = { viewModel.setCommandPermissionsDialogOpen(false) }
     )
 
     AttachmentBottomSheet(

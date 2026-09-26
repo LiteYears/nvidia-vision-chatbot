@@ -18,9 +18,10 @@ class NvidiaApiClient(
     private val getApiKey: () -> String
 ) {
     private val client = OkHttpClient.Builder()
-        .connectTimeout(60, TimeUnit.SECONDS)
-        .readTimeout(240, TimeUnit.SECONDS)
-        .writeTimeout(60, TimeUnit.SECONDS)
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(180, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
 
 
@@ -30,6 +31,7 @@ class NvidiaApiClient(
         const val DEFAULT_MODEL = "meta/llama-3.2-11b-vision-instruct"
         const val FALLBACK_MODEL = "meta/llama-3.2-11b-vision-instruct"
         const val QUANTUM_MODEL = "Quantum 3"
+        private const val MAX_NETWORK_RETRIES = 2
     }
 
     suspend fun sendChatCompletion(
@@ -65,13 +67,32 @@ class NvidiaApiClient(
             else -> model
         }
 
-        // Attempt API call with targetModel, and fallback to FALLBACK_MODEL if it fails
-        val firstAttempt = executeRequest(apiKey, targetModel, messages, systemPrompt, temperature, topP, maxTokens)
-        if (firstAttempt.isSuccess || targetModel == FALLBACK_MODEL) {
-            return@withContext firstAttempt
+        // Attempt API call with targetModel with network retry
+        var lastResult: Result<String>? = null
+        for (attempt in 0..MAX_NETWORK_RETRIES) {
+            val result = executeRequest(apiKey, targetModel, messages, systemPrompt, temperature, topP, maxTokens)
+            if (result.isSuccess) {
+                return@withContext result
+            }
+            lastResult = result
+            val exception = result.exceptionOrNull()
+            // If it's an authentication error or validation error, don't retry same model
+            if (exception is NvidiaApiException && exception.code in 400..404) {
+                break
+            }
+            if (attempt < MAX_NETWORK_RETRIES) {
+                Log.w(TAG, "Request to $targetModel failed on attempt ${attempt + 1}, retrying in 1200ms... Error: ${exception?.message}")
+                try {
+                    Thread.sleep(1200L * (attempt + 1))
+                } catch (_: InterruptedException) {}
+            }
         }
 
-        Log.w(TAG, "Request to $targetModel failed (${firstAttempt.exceptionOrNull()?.message}). Retrying with $FALLBACK_MODEL")
+        if (targetModel == FALLBACK_MODEL) {
+            return@withContext lastResult ?: Result.failure(NvidiaApiException(0, "Request failed"))
+        }
+
+        Log.w(TAG, "All attempts to $targetModel failed (${lastResult?.exceptionOrNull()?.message}). Retrying with $FALLBACK_MODEL")
         val fallbackAttempt = executeRequest(apiKey, FALLBACK_MODEL, messages, systemPrompt, temperature, topP, maxTokens)
         return@withContext fallbackAttempt
     }

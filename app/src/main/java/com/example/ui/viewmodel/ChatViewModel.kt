@@ -37,6 +37,12 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import com.example.agent.tools.command.CommandAuthorizer
+import com.example.agent.tools.command.CommandClassification
+import com.example.agent.tools.command.CommandPermissionDecision
+import com.example.agent.tools.command.CommandPermissionPolicy
+import com.example.agent.tools.command.PendingCommandPermission
+import kotlinx.coroutines.CompletableDeferred
 import java.io.ByteArrayOutputStream
 import java.util.Locale
 import java.util.UUID
@@ -78,17 +84,26 @@ data class ChatUiState(
     val agentSessions: List<AgentSession> = emptyList(),
     val agentInputText: String = "",
     val isAgentLoading: Boolean = false,
-    val agentErrorMessage: String? = null
+    val agentErrorMessage: String? = null,
+    val pendingCommandPermission: PendingCommandPermission? = null,
+    val isCommandPermissionsDialogOpen: Boolean = false,
+    val isAlwaysAllowAllCommands: Boolean = false,
+    val commandPermissionPolicy: String = CommandPermissionPolicy.ASK_FOR_SENSITIVE.id,
+    val alwaysAllowedCommands: Set<String> = emptySet()
 )
 
-class ChatViewModel(application: Application) : AndroidViewModel(application) {
+class ChatViewModel(application: Application) : AndroidViewModel(application), CommandAuthorizer {
 
     private val database = ChatDatabase.getDatabase(application)
     private val settingsManager = SettingsManager(application)
     private val apiClient = NvidiaApiClient { settingsManager.getEffectiveApiKey() }
     private val repository = ChatRepository(database.chatDao(), settingsManager, apiClient)
     private val workspaceManager = AgentWorkspaceManager(File(application.filesDir, "agent_workspaces"))
-    private val toolRegistry = ToolRegistry.defaultRegistry(workspaceManager)
+    private val toolRegistry = ToolRegistry.defaultRegistry(
+        workspaceManager = workspaceManager,
+        settingsManager = settingsManager,
+        authorizer = this
+    )
 
     fun getToolRegistry(): ToolRegistry = toolRegistry
     fun getWorkspaceManager(): AgentWorkspaceManager = workspaceManager
@@ -103,7 +118,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             systemPrompt = settingsManager.getSystemPrompt(),
             temperature = settingsManager.getTemperature(),
             topP = settingsManager.getTopP(),
-            maxTokens = settingsManager.getMaxTokens()
+            maxTokens = settingsManager.getMaxTokens(),
+            isAlwaysAllowAllCommands = settingsManager.isAlwaysAllowAllCommands(),
+            commandPermissionPolicy = settingsManager.getCommandPermissionPolicy(),
+            alwaysAllowedCommands = settingsManager.getAlwaysAllowedCommands()
         )
     )
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
@@ -1111,6 +1129,96 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 agentSessions = cur.agentSessions.map { if (it.id == curSession.id) s else it }
             )
         }
+    }
+
+    // --- Command Permission Authorization & Management ---
+
+    override suspend fun requestPermission(
+        command: String,
+        workingDir: String,
+        classification: CommandClassification
+    ): CommandPermissionDecision {
+        val deferred = CompletableDeferred<CommandPermissionDecision>()
+        _uiState.update {
+            it.copy(
+                pendingCommandPermission = PendingCommandPermission(
+                    id = UUID.randomUUID().toString(),
+                    command = command,
+                    workingDir = workingDir,
+                    riskLevel = classification.riskLevel,
+                    details = classification.description,
+                    executable = classification.executable,
+                    onDecision = { decision ->
+                        if (deferred.isActive) {
+                            deferred.complete(decision)
+                        }
+                    }
+                )
+            )
+        }
+
+        return try {
+            deferred.await()
+        } catch (e: Exception) {
+            CommandPermissionDecision.DENY
+        } finally {
+            _uiState.update { it.copy(pendingCommandPermission = null) }
+        }
+    }
+
+    fun onCommandPermissionDecision(decision: CommandPermissionDecision) {
+        val pending = _uiState.value.pendingCommandPermission ?: return
+        pending.onDecision(decision)
+        _uiState.update {
+            it.copy(
+                isAlwaysAllowAllCommands = settingsManager.isAlwaysAllowAllCommands(),
+                alwaysAllowedCommands = settingsManager.getAlwaysAllowedCommands(),
+                commandPermissionPolicy = settingsManager.getCommandPermissionPolicy()
+            )
+        }
+    }
+
+    fun setCommandPermissionsDialogOpen(isOpen: Boolean) {
+        _uiState.update { it.copy(isCommandPermissionsDialogOpen = isOpen) }
+    }
+
+    fun setAlwaysAllowAllCommands(enabled: Boolean) {
+        settingsManager.setAlwaysAllowAllCommands(enabled)
+        val policy = if (enabled) CommandPermissionPolicy.ALWAYS_ALLOW_ALL.id else CommandPermissionPolicy.ASK_FOR_SENSITIVE.id
+        settingsManager.setCommandPermissionPolicy(policy)
+        _uiState.update {
+            it.copy(
+                isAlwaysAllowAllCommands = enabled,
+                commandPermissionPolicy = policy
+            )
+        }
+    }
+
+    fun setCommandPermissionPolicy(policy: CommandPermissionPolicy) {
+        settingsManager.setCommandPermissionPolicy(policy.id)
+        val isUnrestricted = policy == CommandPermissionPolicy.ALWAYS_ALLOW_ALL
+        settingsManager.setAlwaysAllowAllCommands(isUnrestricted)
+        _uiState.update {
+            it.copy(
+                commandPermissionPolicy = policy.id,
+                isAlwaysAllowAllCommands = isUnrestricted
+            )
+        }
+    }
+
+    fun removeAlwaysAllowedCommand(executable: String) {
+        settingsManager.removeAlwaysAllowedCommand(executable)
+        _uiState.update { it.copy(alwaysAllowedCommands = settingsManager.getAlwaysAllowedCommands()) }
+    }
+
+    fun addAlwaysAllowedCommand(executable: String) {
+        settingsManager.addAlwaysAllowedCommand(executable)
+        _uiState.update { it.copy(alwaysAllowedCommands = settingsManager.getAlwaysAllowedCommands()) }
+    }
+
+    fun clearAllAlwaysAllowedCommands() {
+        settingsManager.clearAlwaysAllowedCommands()
+        _uiState.update { it.copy(alwaysAllowedCommands = emptySet()) }
     }
 
     override fun onCleared() {

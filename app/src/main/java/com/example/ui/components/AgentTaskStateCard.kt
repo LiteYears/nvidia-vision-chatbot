@@ -57,6 +57,8 @@ fun AgentTaskStateCard(
     session: AgentSession,
     onTogglePause: () -> Unit = {},
     onMarkCompleted: () -> Unit = {},
+    isAlwaysAllowCommands: Boolean = true,
+    onOpenCommandControl: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var isExpanded by remember { mutableStateOf(true) }
@@ -136,13 +138,42 @@ fun AgentTaskStateCard(
                             )
                         }
 
-                        Text(
-                            text = session.modelUsed.substringAfterLast("/"),
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                                fontSize = 10.5.sp
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Text(
+                                text = session.modelUsed.substringAfterLast("/"),
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                    fontSize = 10.5.sp
+                                )
                             )
-                        )
+                            Text(
+                                text = "•",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                                    fontSize = 10.sp
+                                )
+                            )
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .clickable { onOpenCommandControl() }
+                                    .padding(horizontal = 4.dp, vertical = 1.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(3.dp)
+                            ) {
+                                Text(
+                                    text = if (isAlwaysAllowCommands) "⚡ Shell: Always Allow" else "⚡ Shell: Ask Permission",
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        color = if (isAlwaysAllowCommands) MaterialTheme.colorScheme.primary else Color(0xFFF59E0B),
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 10.sp
+                                    )
+                                )
+                            }
+                        }
                     }
                 }
 

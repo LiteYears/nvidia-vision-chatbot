@@ -26,6 +26,7 @@ import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.PersonOutline
+import androidx.compose.material.icons.outlined.Security
 import androidx.compose.material.icons.outlined.SmartToy
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Tune
@@ -71,6 +72,8 @@ fun ChatDrawerContent(
     onOpenPlanClick: () -> Unit,
     onOpenAboutClick: () -> Unit = {},
     onOpenParametersClick: () -> Unit = {},
+    onOpenCommandPermissionsClick: () -> Unit = {},
+    isAlwaysAllowAllCommands: Boolean = false,
     currentMode: AppMode = AppMode.CHAT,
     onModeChange: (AppMode) -> Unit = {},
     agentSessions: List<AgentSession> = emptyList(),
@@ -551,6 +554,56 @@ fun ChatDrawerContent(
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                         )
+                    }
+
+                    // Command Permissions & Control Center
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { onOpenCommandPermissionsClick() }
+                            .padding(horizontal = 10.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Security,
+                                contentDescription = "Command Permissions",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
+                                modifier = Modifier.size(17.dp)
+                            )
+                            Text(
+                                text = "Command Permissions",
+                                style = MaterialTheme.typography.bodyMedium.copy(
+                                    fontWeight = FontWeight.Medium,
+                                    fontSize = 13.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            )
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = if (isAlwaysAllowAllCommands) {
+                                MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                            } else {
+                                MaterialTheme.colorScheme.surfaceVariant
+                            }
+                        ) {
+                            Text(
+                                text = if (isAlwaysAllowAllCommands) "Unrestricted" else "Interactive",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    color = if (isAlwaysAllowAllCommands) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                ),
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
                     }
 
                     // Developer & About (Issam Guesmia / obfusc8)

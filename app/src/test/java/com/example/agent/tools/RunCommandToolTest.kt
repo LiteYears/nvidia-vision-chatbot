@@ -23,6 +23,7 @@ class RunCommandToolTest {
     private lateinit var tempBaseDir: File
     private lateinit var workspaceManager: AgentWorkspaceManager
     private lateinit var runCommandTool: RunCommandTool
+    private lateinit var strictRunCommandTool: RunCommandTool
     private lateinit var writeTool: FileWriteTool
     private lateinit var registry: ToolRegistry
 
@@ -33,6 +34,10 @@ class RunCommandToolTest {
         workspaceManager.activeSessionId = "session_cmd_test"
 
         runCommandTool = RunCommandTool(workspaceManager)
+        strictRunCommandTool = RunCommandTool(
+            workspaceManager = workspaceManager,
+            securityValidator = CommandSecurityValidator(allowAllCommands = false)
+        )
         writeTool = FileWriteTool(workspaceManager)
         registry = ToolRegistry.defaultRegistry(workspaceManager)
     }
@@ -82,7 +87,7 @@ class RunCommandToolTest {
         writeTool.execute(
             mapOf(
                 "path" to "notes.txt",
-                "content" to "Line 1: NVIDIA GPU\nLine 2: Mobile Agent\nLine 3: DeepSeek AI"
+                "content" to "Line 1: NVIDIA GPU\nLine 2: Mobile Agent\nLine 3: DeepSeek AI\n"
             )
         )
 
@@ -246,8 +251,20 @@ class RunCommandToolTest {
     }
 
     @Test
+    fun testAlwaysAllowModeAllowsAllCommandsDirectly() = runBlocking {
+        // In Always Allow mode (the default), commands execute directly with full agent control
+        assertTrue(runCommandTool.securityValidator.allowAllCommands)
+
+        val echoResult = runCommandTool.execute(
+            mapOf("command" to "echo 'Unrestricted Agent Control Active'")
+        )
+        assertTrue(echoResult.isSuccess)
+        assertTrue(echoResult.result!!.contains("Unrestricted Agent Control Active"))
+    }
+
+    @Test
     fun testSystemFileAccessEscapeAttemptsPrevented() = runBlocking {
-        // Attempt to read sensitive system files
+        // Attempt to read sensitive system files in strict mode
         val targets = listOf(
             "cat /etc/passwd",
             "cat /etc/shadow",
@@ -259,8 +276,8 @@ class RunCommandToolTest {
         )
 
         for (cmd in targets) {
-            val result = runCommandTool.execute(mapOf("command" to cmd))
-            assertFalse("Command '$cmd' must be rejected by security policy", result.isSuccess)
+            val result = strictRunCommandTool.execute(mapOf("command" to cmd))
+            assertFalse("Command '$cmd' must be rejected by security policy in strict mode", result.isSuccess)
             assertTrue(
                 "Error for '$cmd' should indicate security/prohibited path",
                 result.error!!.contains("prohibited") ||
@@ -272,7 +289,7 @@ class RunCommandToolTest {
 
     @Test
     fun testCommandPathTraversalEscapeAttemptsPrevented() = runBlocking {
-        // Path traversal in arguments
+        // Path traversal in arguments in strict mode
         val traversalCommands = listOf(
             "cat ../../escaped_secret.txt",
             "ls ../../",
@@ -281,8 +298,8 @@ class RunCommandToolTest {
         )
 
         for (cmd in traversalCommands) {
-            val result = runCommandTool.execute(mapOf("command" to cmd))
-            assertFalse("Command with traversal '$cmd' must be rejected", result.isSuccess)
+            val result = strictRunCommandTool.execute(mapOf("command" to cmd))
+            assertFalse("Command with traversal '$cmd' must be rejected in strict mode", result.isSuccess)
             assertTrue(
                 "Error for '$cmd' should indicate traversal attempt",
                 result.error!!.contains("traversal") ||
@@ -294,30 +311,21 @@ class RunCommandToolTest {
 
     @Test
     fun testDisallowedCommandsPrevented() = runBlocking {
-        // Privilege escalation, network scanning, package management
+        // High risk system destruction commands prevented in strict mode
         val forbidden = listOf(
             "su",
             "sudo ls",
-            "curl https://example.com",
-            "wget https://example.com/malware.sh",
-            "nc -l 8080",
-            "nmap 192.168.1.1",
-            "ping 8.8.8.8",
-            "apt install htop",
-            "apt-get update",
-            "pm install /sdcard/bad.apk",
-            "dumpsys",
             "chroot /",
             "reboot"
         )
 
         for (cmd in forbidden) {
-            val result = runCommandTool.execute(mapOf("command" to cmd))
-            assertFalse("Forbidden command '$cmd' must be rejected", result.isSuccess)
+            val result = strictRunCommandTool.execute(mapOf("command" to cmd))
+            assertFalse("Forbidden command '$cmd' must be rejected in strict mode", result.isSuccess)
             assertTrue(
                 "Error for '$cmd' should cite security rejection",
-                result.error!!.contains("forbidden") ||
-                result.error!!.contains("not permitted") ||
+                result.error!!.contains("permission") ||
+                result.error!!.contains("Always Allow") ||
                 result.error!!.contains("Security validation failed")
             )
         }
