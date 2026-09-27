@@ -1758,6 +1758,16 @@ class PythonInterpreter(
                 else -> throw PythonRuntimeException("AttributeError", "'_Hash' object has no attribute '$name'", line)
             }
         }
+        if (obj is PyHttpResponse) {
+            return when (name) {
+                "read" -> PyBuiltinFunc("read") { _, _ -> obj.read() }
+                "readline" -> PyBuiltinFunc("readline") { _, _ -> obj.readline() }
+                "readlines" -> PyBuiltinFunc("readlines") { _, _ -> obj.readlines().toMutableList() }
+                "getcode" -> PyBuiltinFunc("getcode") { _, _ -> obj.getcode() }
+                "status" -> obj.getcode()
+                else -> throw PythonRuntimeException("AttributeError", "'HTTPResponse' object has no attribute '$name'", line)
+            }
+        }
         if (obj is SandboxedFile) {
             return when (name) {
                 "read" -> PyBuiltinFunc("read") { _, _ -> obj.read() }
@@ -2485,6 +2495,39 @@ class PythonInterpreter(
                 )
                 PyModule("os.path", pathMembers)
             }
+            "urllib" -> {
+                val reqMembers = mapOf<String, Any?>(
+                    "urlopen" to PyBuiltinFunc("urlopen") { args, _ ->
+                        val urlStr = pyStr(args.firstOrNull())
+                        executePythonHttpUrlopen(urlStr, line)
+                    }
+                )
+                val parseMembers = mapOf<String, Any?>(
+                    "quote" to PyBuiltinFunc("quote") { args, _ -> java.net.URLEncoder.encode(pyStr(args.firstOrNull()), "UTF-8") },
+                    "unquote" to PyBuiltinFunc("unquote") { args, _ -> java.net.URLDecoder.decode(pyStr(args.firstOrNull()), "UTF-8") }
+                )
+                val urllibMembers = mapOf<String, Any?>(
+                    "request" to PyModule("urllib.request", reqMembers),
+                    "parse" to PyModule("urllib.parse", parseMembers)
+                )
+                PyModule("urllib", urllibMembers)
+            }
+            "urllib.request" -> {
+                val reqMembers = mapOf<String, Any?>(
+                    "urlopen" to PyBuiltinFunc("urlopen") { args, _ ->
+                        val urlStr = pyStr(args.firstOrNull())
+                        executePythonHttpUrlopen(urlStr, line)
+                    }
+                )
+                PyModule("urllib.request", reqMembers)
+            }
+            "urllib.parse" -> {
+                val parseMembers = mapOf<String, Any?>(
+                    "quote" to PyBuiltinFunc("quote") { args, _ -> java.net.URLEncoder.encode(pyStr(args.firstOrNull()), "UTF-8") },
+                    "unquote" to PyBuiltinFunc("unquote") { args, _ -> java.net.URLDecoder.decode(pyStr(args.firstOrNull()), "UTF-8") }
+                )
+                PyModule("urllib.parse", parseMembers)
+            }
             else -> {
                 // Workspace module resolution
                 val candidatePaths = listOf(
@@ -2534,6 +2577,28 @@ class PythonInterpreter(
 
         loadedModules[module] = pyMod
         return pyMod
+    }
+
+    private fun executePythonHttpUrlopen(urlStr: String, line: Int): PyHttpResponse {
+        val targetUrl = if (urlStr.startsWith("http://", ignoreCase = true) || urlStr.startsWith("https://", ignoreCase = true)) {
+            urlStr
+        } else {
+            "https://$urlStr"
+        }
+        return try {
+            val url = java.net.URL(targetUrl)
+            val conn = url.openConnection() as java.net.HttpURLConnection
+            conn.instanceFollowRedirects = true
+            conn.connectTimeout = 12000
+            conn.readTimeout = 15000
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            val code = conn.responseCode
+            val stream = if (code in 200..399) conn.inputStream else conn.errorStream ?: java.io.ByteArrayInputStream(ByteArray(0))
+            val text = stream.bufferedReader().use { it.readText() }
+            PyHttpResponse(code, text)
+        } catch (e: Exception) {
+            throw PythonRuntimeException("URLError", "Failed to open URL '$targetUrl': ${e.message}", line)
+        }
     }
 
     private fun pyJsonDumps(obj: Any?): String {
@@ -2757,6 +2822,13 @@ class PyHashObject(
 class PyModule(val name: String, val members: MutableMap<String, Any?>) {
     constructor(name: String, membersMap: Map<String, Any?>) : this(name, membersMap.toMutableMap())
     fun getMember(name: String): Any? = members[name]
+}
+
+class PyHttpResponse(val code: Int, val content: String) {
+    fun read(): String = content
+    fun readline(): String = content.lines().firstOrNull() ?: ""
+    fun readlines(): List<String> = content.lines()
+    fun getcode(): Long = code.toLong()
 }
 
 class SandboxedFile(

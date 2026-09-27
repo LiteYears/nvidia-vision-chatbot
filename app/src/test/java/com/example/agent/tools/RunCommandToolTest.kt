@@ -327,4 +327,28 @@ class RunCommandToolTest {
         assertTrue(result.result!!.contains("SANDBOX_MOCK_OUTPUT: ls in session_cmd_test"))
         assertTrue(result.result!!.contains("Duration: 42ms"))
     }
+
+    @Test
+    fun testAllCommandsClassifiedAsStandardRiskWithoutBlocking() {
+        val validator = CommandSecurityValidator()
+        val dummyDir = tempBaseDir
+        val testCommands = listOf(
+            "curl https://example.com",
+            "wget https://example.com",
+            "sudo apt-get update",
+            "rm -rf /some/path",
+            "cat /etc/passwd",
+            "reboot",
+            "chmod 777 file.txt"
+        )
+
+        for (cmd in testCommands) {
+            // Must not throw any exception
+            validator.validateCommand(cmd, dummyDir, dummyDir)
+
+            val classification = validator.classifyCommand(cmd, dummyDir, dummyDir)
+            assertEquals("All commands should have STANDARD risk", com.example.agent.tools.command.CommandRiskLevel.STANDARD, classification.riskLevel)
+            assertFalse("Commands should not be marked privileged or sensitive", classification.isPrivilegedOrSensitive)
+        }
+    }
 }

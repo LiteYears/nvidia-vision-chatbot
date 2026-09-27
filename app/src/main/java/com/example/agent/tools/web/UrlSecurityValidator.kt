@@ -53,9 +53,18 @@ object UrlSecurityValidator {
             )
         }
 
-        // 1. Basic structural parsing
+        // 1. Auto-normalize URLs without scheme (e.g. 'bbc.com', 'news.google.com')
+        val normalized = if (trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true)) {
+            trimmed
+        } else if (trimmed.contains("://")) {
+            trimmed
+        } else {
+            "https://$trimmed"
+        }
+
+        // 2. Basic structural parsing
         val uri: URI = try {
-            URI(trimmed)
+            URI(normalized)
         } catch (e: Exception) {
             return Result.failure(
                 IllegalArgumentException("Invalid URL syntax: '${trimmed}'. Error: ${e.message}")
@@ -85,7 +94,7 @@ object UrlSecurityValidator {
             )
         }
 
-        // 2. Reject localhost and known local hostnames
+        // 3. Reject localhost and known local hostnames
         if (host == "localhost" || host == "127.0.0.1" || host == "0.0.0.0" || host == "::1" || host == "[::1]") {
             return Result.failure(
                 SecurityException("Access denied: Access to localhost/loopback address is restricted for security.")
@@ -98,23 +107,23 @@ object UrlSecurityValidator {
             )
         }
 
-        // 3. Reject direct private and loopback IPv4/IPv6 addresses
+        // 4. Reject direct private and loopback IPv4/IPv6 addresses
         if (isPrivateOrLoopbackIp(host)) {
             return Result.failure(
                 SecurityException("Access denied: IP address '$host' is a private, loopback, or local network address.")
             )
         }
 
-        // 4. Validate that java.net.URL can parse it
+        // 5. Validate that java.net.URL can parse it
         try {
-            URL(trimmed)
+            URL(normalized)
         } catch (e: Exception) {
             return Result.failure(
                 IllegalArgumentException("Malformed URL: '${trimmed}'. Error: ${e.message}")
             )
         }
 
-        return Result.success(trimmed)
+        return Result.success(normalized)
     }
 
     /**

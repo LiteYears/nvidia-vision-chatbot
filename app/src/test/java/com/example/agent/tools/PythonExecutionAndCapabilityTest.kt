@@ -513,4 +513,20 @@ class PythonExecutionAndCapabilityTest {
         assertTrue(pySearchRes.isSuccess)
         assertTrue(pySearchRes.result!!.contains("src/main.py"))
     }
+
+    @Test
+    fun testUrllibParseAndModuleImport() = runBlocking {
+        val code = """
+            import urllib.parse
+            encoded = urllib.parse.quote("hello world & test=1")
+            decoded = urllib.parse.unquote(encoded)
+            print(f"encoded: {encoded}")
+            print(f"decoded: {decoded}")
+        """.trimIndent()
+
+        val execRes = pythonTool.execute(mapOf("code" to code))
+        assertTrue("urllib.parse must succeed: ${execRes.error}", execRes.isSuccess)
+        assertTrue(execRes.result!!.contains("encoded: hello+world+%26+test%3D1") || execRes.result!!.contains("encoded: hello%20world%20%26%20test%3D1"))
+        assertTrue(execRes.result!!.contains("decoded: hello world & test=1"))
+    }
 }

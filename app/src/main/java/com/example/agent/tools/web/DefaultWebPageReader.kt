@@ -112,16 +112,17 @@ class DefaultWebPageReader(
                         )
                     }
 
-                    val source = responseBody.source()
-                    val rawHtml = source.readUtf8(minOf(responseBody.contentLength().coerceAtLeast(0), MAX_BODY_BYTES))
-                        .ifEmpty {
-                            // If contentLength was -1 (chunked)
-                            source.readUtf8()
-                        }
+                    val rawHtml = try {
+                        val text = responseBody.string()
+                        if (text.length > MAX_BODY_BYTES) text.substring(0, MAX_BODY_BYTES.toInt()) else text
+                    } catch (_: Exception) {
+                        val source = responseBody.source()
+                        source.readUtf8()
+                    }
 
                     if (rawHtml.isBlank()) {
                         return@withContext Result.failure(
-                            IOException("Web page at '$finalUrl' was loaded successfully (HTTP 200), but contains no readable content.")
+                            IOException("Web page at '$finalUrl' was loaded successfully (HTTP 200), but returned an empty response body.")
                         )
                     }
 
@@ -133,13 +134,20 @@ class DefaultWebPageReader(
                         maxChars = maxChars
                     )
 
-                    if (pageContent.content.isBlank()) {
-                        return@withContext Result.failure(
-                            IOException("Web page at '$finalUrl' contains only empty or non-text elements (no readable text found).")
-                        )
+                    val resolvedContent = if (pageContent.content.isBlank()) {
+                        val fallback = buildString {
+                            if (pageContent.title.isNotBlank()) appendLine("# ${pageContent.title}\n")
+                            if (pageContent.metadata.isNotEmpty()) {
+                                pageContent.metadata.forEach { (k, v) -> appendLine("- **$k**: $v") }
+                            }
+                            appendLine("\n(Web page was loaded successfully, but main article body was minimal or dynamically rendered.)")
+                        }.trim()
+                        pageContent.copy(content = fallback)
+                    } else {
+                        pageContent
                     }
 
-                    Result.success(pageContent)
+                    Result.success(resolvedContent)
                 }
             } catch (e: SocketTimeoutException) {
                 Result.failure(IOException("Web page request timed out while opening URL: '$validUrl'"))

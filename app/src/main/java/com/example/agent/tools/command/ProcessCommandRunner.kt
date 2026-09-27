@@ -2,9 +2,12 @@ package com.example.agent.tools.command
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -61,9 +64,19 @@ class ProcessCommandRunner : CommandRunner {
         systemEnv["ANDROID_ROOT"]?.let { env["ANDROID_ROOT"] = it }
         systemEnv["ANDROID_DATA"]?.let { env["ANDROID_DATA"] = it }
 
+        val trimmedCmd = command.trim()
+        val firstToken = trimmedCmd.split(Regex("\\s+")).firstOrNull()?.trim('\'', '"')?.let { File(it).name.lowercase() }
+        val isCurlOrWget = firstToken == "curl" || firstToken == "wget"
+
         val process = try {
             processBuilder.start()
         } catch (e: Exception) {
+            if (isCurlOrWget) {
+                val fallback = executeHttpFallback(command, workingDir, maxOutputBytes)
+                if (fallback != null) {
+                    return@withContext fallback
+                }
+            }
             val duration = System.currentTimeMillis() - startTime
             return@withContext CommandExecutionResult(
                 exitCode = -1,
@@ -130,6 +143,17 @@ class ProcessCommandRunner : CommandRunner {
             stderrReader.getOutput()
         }
 
+        val isNotFound = exitCode == 127 ||
+            stderr.contains("inaccessible or not found", ignoreCase = true) ||
+            stderr.contains("not found", ignoreCase = true)
+
+        if (isCurlOrWget && (isNotFound || (exitCode != 0 && stdout.isBlank()))) {
+            val fallback = executeHttpFallback(command, workingDir, maxOutputBytes)
+            if (fallback != null) {
+                return@withContext fallback
+            }
+        }
+
         CommandExecutionResult(
             exitCode = exitCode,
             stdout = stdout,
@@ -138,6 +162,93 @@ class ProcessCommandRunner : CommandRunner {
             isTimedOut = isTimedOut.get(),
             isTruncated = stdoutReader.isTruncated || stderrReader.isTruncated
         )
+    }
+
+    private fun executeHttpFallback(command: String, workingDir: File, maxOutputBytes: Int): CommandExecutionResult? {
+        val trimmed = command.trim()
+        val tokens = trimmed.split(Regex("\\s+"))
+        val exec = tokens.firstOrNull()?.trim('\'', '"')?.let { File(it).name.lowercase() }
+        if (exec != "curl" && exec != "wget") return null
+
+        var url: String? = null
+        var outputFile: String? = null
+        val headers = mutableMapOf<String, String>()
+
+        var i = 1
+        while (i < tokens.size) {
+            val t = tokens[i]
+            when {
+                t == "-o" || t == "-O" || t == "--output" -> {
+                    if (i + 1 < tokens.size) outputFile = tokens[++i]
+                }
+                t == "-H" || t == "--header" -> {
+                    if (i + 1 < tokens.size) {
+                        val headerStr = tokens[++i].trim('\'', '"')
+                        val colon = headerStr.indexOf(':')
+                        if (colon > 0) {
+                            headers[headerStr.substring(0, colon).trim()] = headerStr.substring(colon + 1).trim()
+                        }
+                    }
+                }
+                t.startsWith("http://", ignoreCase = true) || t.startsWith("https://", ignoreCase = true) -> {
+                    url = t.trim('\'', '"')
+                }
+                !t.startsWith("-") && url == null && (t.contains(".com") || t.contains(".org") || t.contains(".net") || t.contains(".io") || t.contains(".")) -> {
+                    url = if (t.startsWith("http", ignoreCase = true)) t.trim('\'', '"') else "https://${t.trim('\'', '"')}"
+                }
+            }
+            i++
+        }
+
+        if (url == null) return null
+
+        val startTime = System.currentTimeMillis()
+        return try {
+            val client = OkHttpClient.Builder()
+                .followRedirects(true)
+                .followSslRedirects(true)
+                .connectTimeout(12, TimeUnit.SECONDS)
+                .readTimeout(18, TimeUnit.SECONDS)
+                .build()
+
+            val reqBuilder = Request.Builder().url(url)
+            reqBuilder.header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+            for ((k, v) in headers) {
+                reqBuilder.header(k, v)
+            }
+
+            client.newCall(reqBuilder.build()).execute().use { resp ->
+                val bodyBytes = resp.body?.bytes() ?: ByteArray(0)
+                val duration = System.currentTimeMillis() - startTime
+                if (outputFile != null) {
+                    val target = if (File(outputFile).isAbsolute) File(outputFile) else File(workingDir, outputFile)
+                    target.parentFile?.mkdirs()
+                    target.writeBytes(bodyBytes)
+                    CommandExecutionResult(
+                        exitCode = if (resp.isSuccessful) 0 else resp.code,
+                        stdout = "Saved ${bodyBytes.size} bytes to $outputFile",
+                        stderr = "",
+                        durationMs = duration
+                    )
+                } else {
+                    val str = String(bodyBytes.take(maxOutputBytes).toByteArray(), Charsets.UTF_8)
+                    CommandExecutionResult(
+                        exitCode = if (resp.isSuccessful) 0 else resp.code,
+                        stdout = str,
+                        stderr = if (resp.isSuccessful) "" else "HTTP ${resp.code} ${resp.message}",
+                        durationMs = duration,
+                        isTruncated = bodyBytes.size > maxOutputBytes
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            CommandExecutionResult(
+                exitCode = 1,
+                stdout = "",
+                stderr = "curl error: ${e.message ?: e.javaClass.simpleName}",
+                durationMs = System.currentTimeMillis() - startTime
+            )
+        }
     }
 
     private fun terminateProcess(process: Process) {

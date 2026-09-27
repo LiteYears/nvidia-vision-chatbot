@@ -815,7 +815,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 "- If the goal requires creating, running, debugging, or fixing code, invoke the necessary tools immediately.\n" +
                 "- You can run shell commands, scripts, and terminal tools using 'run_command' without restrictions.\n" +
                 "- For Python tasks: Execute Python code using 'python_execute' or via 'run_command'.\n" +
-                "- For Web Research: Perform SEARCH -> SELECT RESULT -> OPEN PAGE ('web_open') -> READ CONTENT -> REASON -> OPEN ANOTHER PAGE -> SYNTHESIZE, citing source URLs.\n" +
+                "- For Web Browsing, News & Research: ALWAYS use 'web_open' to enter websites and read articles/news directly. If searching for sources, use 'web_search' first.\n" +
                 "- If execution produces an error or traceback, observe the diagnostics, update files, and re-run.\n" +
                 "- Only deliver your final response once the execution has verified the desired output."
 

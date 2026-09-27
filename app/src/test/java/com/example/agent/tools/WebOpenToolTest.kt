@@ -349,6 +349,25 @@ class WebOpenToolTest {
 
         val prompt = registry.formatToolsForPrompt()
         assertTrue("Prompt should document web_open", prompt.contains("web_open"))
-        assertTrue("Prompt should include autonomous web research & synthesis flow", prompt.contains("AUTONOMOUS WEB RESEARCH & SYNTHESIS FLOW"))
+        assertTrue("Prompt should include autonomous web browsing flow", prompt.contains("AUTONOMOUS WEB BROWSING & NEWS EXTRACTION FLOW"))
+    }
+
+    @Test
+    fun testUrlSecurityValidatorNormalizesSchemelessUrls() {
+        val result1 = UrlSecurityValidator.validate("bbc.com")
+        assertTrue("bbc.com should be valid: ${result1.exceptionOrNull()?.message}", result1.isSuccess)
+        assertEquals("https://bbc.com", result1.getOrThrow())
+
+        val result2 = UrlSecurityValidator.validate("news.ycombinator.com/news")
+        assertTrue(result2.isSuccess)
+        assertEquals("https://news.ycombinator.com/news", result2.getOrThrow())
+
+        val result3 = UrlSecurityValidator.validate("https://example.com")
+        assertTrue(result3.isSuccess)
+        assertEquals("https://example.com", result3.getOrThrow())
+
+        val result4 = UrlSecurityValidator.validate("http://example.org/test")
+        assertTrue(result4.isSuccess)
+        assertEquals("http://example.org/test", result4.getOrThrow())
     }
 }

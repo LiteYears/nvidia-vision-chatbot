@@ -123,6 +123,9 @@ class RuntimeCapabilityDetector(
             normalized in setOf("pip", "pip3") -> {
                 "Package manager 'pip' is unavailable. Standard Python libraries (math, json, random, sys, os, time, re, etc.) are built into 'python_execute'."
             }
+            normalized in setOf("curl", "wget") -> {
+                "For entering websites, downloading web pages, or fetching news, use the dedicated 'web_open' tool with parameter 'url'. For web search, use 'web_search'."
+            }
             else -> null
         }
     }
@@ -153,11 +156,12 @@ class RuntimeCapabilityDetector(
             appendLine("- $unavailableList")
             appendLine("\nNext Steps:")
             appendLine("Do NOT retry running '$executable' via run_command.")
-            appendLine("Do NOT attempt package installations (apt, pkg, curl).")
             if (executable.startsWith("python")) {
                 appendLine("-> Use 'python_execute' with 'script_path' or 'code' to execute Python tasks.")
+            } else if (executable == "curl" || executable == "wget") {
+                appendLine("-> Use 'web_open' with parameter 'url' to fetch and read web pages.")
             } else {
-                appendLine("-> Switch to a supported tool (file_write, python_execute, run_command for safe utilities) to complete the goal.")
+                appendLine("-> Switch to a supported tool (web_open, file_write, python_execute, run_command for safe utilities) to complete the goal.")
             }
         }.trim()
     }

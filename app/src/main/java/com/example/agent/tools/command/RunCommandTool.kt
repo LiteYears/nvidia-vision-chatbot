@@ -28,7 +28,7 @@ class RunCommandTool(
             ToolParameter(
                 name = "command",
                 type = "string",
-                description = "The shell command to execute (e.g. 'ls -la', 'python script.py', 'git status', 'curl https://...')",
+                description = "The shell command to execute (e.g. 'ls -la', 'python script.py', 'git status', 'grep pattern file.txt'). Note: for entering websites and reading news, use 'web_open' or 'web_search'.",
                 required = true
             ),
             ToolParameter(
