@@ -10,6 +10,8 @@ import com.example.agent.tools.workspace.AgentWorkspaceManager
 import com.example.agent.tools.workspace.FileDeleteTool
 import com.example.agent.tools.workspace.FileListTool
 import com.example.agent.tools.workspace.FileReadTool
+import com.example.agent.tools.workspace.FileSearchTool
+import com.example.agent.tools.workspace.FileTreeTool
 import com.example.agent.tools.workspace.FileWriteTool
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -104,12 +106,11 @@ class ToolRegistry {
         sb.append(RuntimeCapabilityDetector().formatCapabilitiesForPrompt())
         sb.append("\n### AUTONOMOUS CODING & DEBUGGING FLOW\n")
         sb.append("When asked to write, run, debug, or fix scripts:\n")
-        sb.append("1. Write the code to a file using `file_write` (e.g. `script.py`).\n")
-        sb.append("2. Execute it using `python_execute` (with `script_path`: \"script.py\").\n")
-        sb.append("3. If an error or traceback occurs, inspect the line number and exception details.\n")
-        sb.append("4. Fix the code by overwriting the file with `file_write`.\n")
-        sb.append("5. Re-run with `python_execute` to verify the fix.\n")
-        sb.append("6. Only conclude when the script runs cleanly and yields the expected results.\n")
+        sb.append("1. Inspect directory structure using `file_tree` or search codebase with `file_search`.\n")
+        sb.append("2. Write or modify modular scripts using `file_write` (e.g. `main.py` and `utils.py`).\n")
+        sb.append("3. Execute scripts using `python_execute` (with `script_path`: \"main.py\").\n")
+        sb.append("4. If an error occurs, inspect line numbers and diagnostics, refine code with `file_write`, and re-run.\n")
+        sb.append("5. Conclude only when verified and complete.\n")
 
         sb.append("\n### AUTONOMOUS WEB RESEARCH & SYNTHESIS FLOW\n")
         sb.append("When querying technical documentation, real-time facts, or performing web research:\n")
@@ -157,6 +158,8 @@ class ToolRegistry {
                 register(WebSearchTool())
                 register(WebOpenTool())
                 register(FileListTool(workspaceManager))
+                register(FileTreeTool(workspaceManager))
+                register(FileSearchTool(workspaceManager))
                 register(FileReadTool(workspaceManager))
                 register(FileWriteTool(workspaceManager))
                 register(FileDeleteTool(workspaceManager))

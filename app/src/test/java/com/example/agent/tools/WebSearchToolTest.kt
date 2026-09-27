@@ -164,4 +164,201 @@ class WebSearchToolTest {
         assertTrue("Prompt block must contain web_search", promptBlock.contains("web_search"))
         assertTrue("Prompt block must describe query parameter", promptBlock.contains("query"))
     }
+
+    @Test
+    fun testDefaultSearchProviderBingPrimary() = runBlocking {
+        val rssResponse = """
+            <rss version="2.0">
+            <channel>
+                <item>
+                    <title>NVIDIA Jetson AGX Orin Developer Kit</title>
+                    <link>https://developer.nvidia.com/embedded/jetson-orin</link>
+                    <description>Delivers 275 TOPS for autonomous AI machines.</description>
+                </item>
+            </channel>
+            </rss>
+        """.trimIndent()
+
+        val mockClient = okhttp3.OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .header("Content-Type", "application/rss+xml")
+                    .body(okhttp3.ResponseBody.create(okhttp3.MediaType.parse("application/rss+xml"), rssResponse))
+                    .build()
+            }
+            .build()
+
+        val provider = com.example.agent.tools.search.DefaultSearchProvider(mockClient)
+        val response = provider.search("NVIDIA Jetson", 4).getOrThrow()
+
+        assertEquals(1, response.results.size)
+        assertEquals("NVIDIA Jetson AGX Orin Developer Kit", response.results[0].title)
+        assertEquals("https://developer.nvidia.com/embedded/jetson-orin", response.results[0].url)
+        assertTrue(response.results[0].snippet.contains("275 TOPS"))
+    }
+
+    @Test
+    fun testDecodeBingClickUrl() {
+        val provider = com.example.agent.tools.search.DefaultSearchProvider()
+        // base64 for "https://www.nvidia.com/en-us/" is "aHR0cHM6Ly93d3cubnZpZGlhLmNvbS9lbi11cy8"
+        val clickUrl = "https://www.bing.com/ck/a?!&&p=123&u=a1aHR0cHM6Ly93d3cubnZpZGlhLmNvbS9lbi11cy8&ntb=1"
+        val decoded = provider.decodeBingClickUrl(clickUrl)
+        assertEquals("https://www.nvidia.com/en-us/", decoded)
+
+        // Non-tracking URL unchanged
+        val normalUrl = "https://developer.nvidia.com/orin"
+        assertEquals(normalUrl, provider.decodeBingClickUrl(normalUrl))
+    }
+
+    @Test
+    fun testFallbackToDuckDuckGoWhenBingFails() = runBlocking {
+        val ddgJson = """
+            {
+                "Heading": "NVIDIA CUDA",
+                "Abstract": "Compute Unified Device Architecture is a parallel computing platform.",
+                "AbstractURL": "https://en.wikipedia.org/wiki/CUDA"
+            }
+        """.trimIndent()
+
+        val mockClient = okhttp3.OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val url = chain.request().url().toString()
+                if (url.contains("bing.com")) {
+                    okhttp3.Response.Builder()
+                        .request(chain.request())
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(503)
+                        .message("Service Unavailable")
+                        .body(okhttp3.ResponseBody.create(okhttp3.MediaType.parse("text/plain"), "Bing down"))
+                        .build()
+                } else if (url.contains("duckduckgo.com")) {
+                    okhttp3.Response.Builder()
+                        .request(chain.request())
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .header("Content-Type", "application/json")
+                        .body(okhttp3.ResponseBody.create(okhttp3.MediaType.parse("application/json"), ddgJson))
+                        .build()
+                } else {
+                    okhttp3.Response.Builder()
+                        .request(chain.request())
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(404)
+                        .message("Not Found")
+                        .body(okhttp3.ResponseBody.create(okhttp3.MediaType.parse("text/plain"), "Not Found"))
+                        .build()
+                }
+            }
+            .build()
+
+        val provider = com.example.agent.tools.search.DefaultSearchProvider(mockClient)
+        val response = provider.search("CUDA", 2).getOrThrow()
+
+        assertTrue("Should contain DuckDuckGo fallback results", response.results.isNotEmpty())
+        assertEquals("NVIDIA CUDA", response.results[0].title)
+        assertTrue(response.results[0].snippet.contains("parallel computing platform"))
+    }
+
+    @Test
+    fun testFallbackToWikipediaWhenBingAndDdgEmpty() = runBlocking {
+        val wikiJson = """
+            {
+                "query": {
+                    "search": [
+                        {
+                            "title": "NVIDIA DRIVE",
+                            "snippet": "NVIDIA DRIVE is an autonomous vehicle platform."
+                        }
+                    ]
+                }
+            }
+        """.trimIndent()
+
+        val mockClient = okhttp3.OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val url = chain.request().url().toString()
+                if (url.contains("wikipedia.org")) {
+                    okhttp3.Response.Builder()
+                        .request(chain.request())
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .header("Content-Type", "application/json")
+                        .body(okhttp3.ResponseBody.create(okhttp3.MediaType.parse("application/json"), wikiJson))
+                        .build()
+                } else {
+                    // Bing & DDG empty
+                    okhttp3.Response.Builder()
+                        .request(chain.request())
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body(okhttp3.ResponseBody.create(okhttp3.MediaType.parse("text/plain"), ""))
+                        .build()
+                }
+            }
+            .build()
+
+        val provider = com.example.agent.tools.search.DefaultSearchProvider(mockClient)
+        val response = provider.search("NVIDIA DRIVE", 2).getOrThrow()
+
+        assertEquals(1, response.results.size)
+        assertEquals("NVIDIA DRIVE", response.results[0].title)
+        assertTrue(response.results[0].snippet.contains("autonomous vehicle platform"))
+    }
+
+    @Test
+    fun testFallbackToHackerNews() = runBlocking {
+        val hnJson = """
+            {
+                "hits": [
+                    {
+                        "title": "NVIDIA releases new TensorRT-LLM with enhanced FP4 support",
+                        "url": "https://developer.nvidia.com/blog/tensorrt-llm-fp4",
+                        "objectID": "98765",
+                        "points": 340,
+                        "num_comments": 85,
+                        "author": "cuda_dev"
+                    }
+                ]
+            }
+        """.trimIndent()
+
+        val mockClient = okhttp3.OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val url = chain.request().url().toString()
+                if (url.contains("algolia.com")) {
+                    okhttp3.Response.Builder()
+                        .request(chain.request())
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .header("Content-Type", "application/json")
+                        .body(okhttp3.ResponseBody.create(okhttp3.MediaType.parse("application/json"), hnJson))
+                        .build()
+                } else {
+                    okhttp3.Response.Builder()
+                        .request(chain.request())
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body(okhttp3.ResponseBody.create(okhttp3.MediaType.parse("text/plain"), ""))
+                        .build()
+                }
+            }
+            .build()
+
+        val provider = com.example.agent.tools.search.DefaultSearchProvider(mockClient)
+        val response = provider.search("TensorRT-LLM FP4", 2).getOrThrow()
+
+        assertEquals(1, response.results.size)
+        assertEquals("NVIDIA releases new TensorRT-LLM with enhanced FP4 support", response.results[0].title)
+        assertEquals("https://developer.nvidia.com/blog/tensorrt-llm-fp4", response.results[0].url)
+        assertTrue(response.results[0].snippet.contains("TensorRT-LLM"))
+    }
 }

@@ -1,12 +1,17 @@
 package com.example.agent.python
 
 import com.example.agent.tools.workspace.AgentWorkspaceManager
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
+import java.security.MessageDigest
+import java.util.Base64
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.regex.MatchResult
+import java.util.regex.Pattern
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.cos
@@ -245,6 +250,7 @@ sealed class PyStmt(val line: Int) {
     class Raise(val expr: PyExpr?, line: Int) : PyStmt(line)
     class With(val expr: PyExpr, val asName: String?, val body: List<PyStmt>, line: Int) : PyStmt(line)
     class Import(val module: String, val alias: String?, line: Int) : PyStmt(line)
+    class FromImport(val module: String, val items: List<Pair<String, String?>>, line: Int) : PyStmt(line)
     class Break(line: Int) : PyStmt(line)
     class Continue(line: Int) : PyStmt(line)
     class Pass(line: Int) : PyStmt(line)
@@ -782,7 +788,11 @@ class PythonParser(private val tokens: List<Token>, private val filename: String
 
     private fun parseImport(): PyStmt.Import {
         val impToken = consume(TokenType.KEYWORD, "Expected 'import'", "import")
-        val module = consume(TokenType.IDENTIFIER, "Expected module name").value
+        var module = consume(TokenType.IDENTIFIER, "Expected module name").value
+        while (match(TokenType.DOT)) {
+            val sub = consume(TokenType.IDENTIFIER, "Expected identifier after '.'").value
+            module = "$module.$sub"
+        }
         var alias: String? = null
         if (match(TokenType.KEYWORD, "as")) {
             alias = consume(TokenType.IDENTIFIER, "Expected alias after 'as'").value
@@ -791,17 +801,29 @@ class PythonParser(private val tokens: List<Token>, private val filename: String
         return PyStmt.Import(module, alias, impToken.line)
     }
 
-    private fun parseFromImport(): PyStmt.Import {
+    private fun parseFromImport(): PyStmt.FromImport {
         val fromToken = consume(TokenType.KEYWORD, "Expected 'from'", "from")
-        val module = consume(TokenType.IDENTIFIER, "Expected module name").value
+        var module = consume(TokenType.IDENTIFIER, "Expected module name").value
+        while (match(TokenType.DOT)) {
+            val sub = consume(TokenType.IDENTIFIER, "Expected identifier after '.'").value
+            module = "$module.$sub"
+        }
         consume(TokenType.KEYWORD, "Expected 'import'", "import")
-        val item = consume(TokenType.IDENTIFIER, "Expected imported name").value
-        var alias: String? = null
-        if (match(TokenType.KEYWORD, "as")) {
-            alias = consume(TokenType.IDENTIFIER, "Expected alias after 'as'").value
+        val items = mutableListOf<Pair<String, String?>>()
+        if (match(TokenType.STAR)) {
+            items.add("*" to null)
+        } else {
+            do {
+                val item = consume(TokenType.IDENTIFIER, "Expected imported name").value
+                var alias: String? = null
+                if (match(TokenType.KEYWORD, "as")) {
+                    alias = consume(TokenType.IDENTIFIER, "Expected alias after 'as'").value
+                }
+                items.add(item to alias)
+            } while (match(TokenType.COMMA))
         }
         consumeEndStatement()
-        return PyStmt.Import(module, alias ?: item, fromToken.line)
+        return PyStmt.FromImport(module, items, fromToken.line)
     }
 
     private fun parseAssignOrExprStmt(): PyStmt {
@@ -1205,6 +1227,7 @@ class PythonInterpreter(
 ) {
     private val callStack = mutableListOf<PythonTracebackFrame>()
     private val globalScope = mutableMapOf<String, Any?>()
+    private val loadedModules = mutableMapOf<String, PyModule>()
 
     init {
         initBuiltins()
@@ -1438,6 +1461,9 @@ class PythonInterpreter(
             }
             is PyStmt.Import -> {
                 handleImport(stmt.module, stmt.alias, scope, stmt.line)
+            }
+            is PyStmt.FromImport -> {
+                handleFromImport(stmt.module, stmt.items, scope, stmt.line)
             }
             is PyStmt.Break -> return BreakSignal
             is PyStmt.Continue -> return ContinueSignal
@@ -1710,6 +1736,27 @@ class PythonInterpreter(
     private fun getAttr(obj: Any?, name: String, line: Int): Any? {
         if (obj is PyModule) {
             return obj.getMember(name) ?: throw PythonRuntimeException("AttributeError", "module '${obj.name}' has no attribute '$name'", line)
+        }
+        if (obj is PyMatch) {
+            return when (name) {
+                "group" -> PyBuiltinFunc("group") { args, _ ->
+                    val idx = (args.firstOrNull() as? Number)?.toInt() ?: 0
+                    obj.group(idx)
+                }
+                "groups" -> PyBuiltinFunc("groups") { _, _ -> obj.groups().toMutableList() }
+                "start" -> PyBuiltinFunc("start") { _, _ -> obj.start().toLong() }
+                "end" -> PyBuiltinFunc("end") { _, _ -> obj.end().toLong() }
+                "span" -> PyBuiltinFunc("span") { _, _ -> listOf(obj.start().toLong(), obj.end().toLong()).toMutableList() }
+                else -> throw PythonRuntimeException("AttributeError", "'re.Match' object has no attribute '$name'", line)
+            }
+        }
+        if (obj is PyHashObject) {
+            return when (name) {
+                "hexdigest" -> PyBuiltinFunc("hexdigest") { _, _ -> obj.hexdigest() }
+                "digest" -> PyBuiltinFunc("digest") { _, _ -> obj.digest() }
+                "update" -> PyBuiltinFunc("update") { args, _ -> obj.update(args.firstOrNull()); null }
+                else -> throw PythonRuntimeException("AttributeError", "'_Hash' object has no attribute '$name'", line)
+            }
         }
         if (obj is SandboxedFile) {
             return when (name) {
@@ -2106,12 +2153,40 @@ class PythonInterpreter(
     }
 
     private fun handleImport(module: String, alias: String?, scope: MutableMap<String, Any?>, line: Int) {
-        val targetName = alias ?: module
-        when (module) {
+        val pyMod = resolveModule(module, line)
+        val targetName = alias ?: (if (module.contains('.')) module.substringBefore('.') else module)
+        scope[targetName] = pyMod
+    }
+
+    private fun handleFromImport(module: String, items: List<Pair<String, String?>>, scope: MutableMap<String, Any?>, line: Int) {
+        val pyMod = resolveModule(module, line)
+        for ((item, alias) in items) {
+            if (item == "*") {
+                for ((k, v) in pyMod.members) {
+                    if (!k.startsWith("_")) {
+                        scope[k] = v
+                    }
+                }
+            } else {
+                val member = pyMod.getMember(item)
+                    ?: throw PythonRuntimeException("ImportError", "cannot import name '$item' from '$module'", line)
+                scope[alias ?: item] = member
+            }
+        }
+    }
+
+    private fun resolveModule(module: String, line: Int): PyModule {
+        if (loadedModules.containsKey(module)) {
+            return loadedModules[module]!!
+        }
+
+        val pyMod: PyModule = when (module) {
             "math" -> {
                 val members = mapOf<String, Any?>(
                     "pi" to Math.PI,
                     "e" to Math.E,
+                    "inf" to Double.POSITIVE_INFINITY,
+                    "nan" to Double.NaN,
                     "sqrt" to PyBuiltinFunc("sqrt") { args, _ ->
                         val n = (args.firstOrNull() as? Number)?.toDouble() ?: 0.0
                         if (n < 0) throw PythonRuntimeException("ValueError", "math domain error", line)
@@ -2127,6 +2202,24 @@ class PythonInterpreter(
                     "sin" to PyBuiltinFunc("sin") { args, _ -> sin((args.firstOrNull() as Number).toDouble()) },
                     "cos" to PyBuiltinFunc("cos") { args, _ -> cos((args.firstOrNull() as Number).toDouble()) },
                     "tan" to PyBuiltinFunc("tan") { args, _ -> tan((args.firstOrNull() as Number).toDouble()) },
+                    "log" to PyBuiltinFunc("log") { args, _ ->
+                        val x = (args.firstOrNull() as? Number)?.toDouble() ?: 0.0
+                        if (x <= 0) throw PythonRuntimeException("ValueError", "math domain error", line)
+                        val base = (args.getOrNull(1) as? Number)?.toDouble()
+                        if (base != null) kotlin.math.ln(x) / kotlin.math.ln(base) else kotlin.math.ln(x)
+                    },
+                    "exp" to PyBuiltinFunc("exp") { args, _ ->
+                        val x = (args.firstOrNull() as? Number)?.toDouble() ?: 0.0
+                        kotlin.math.exp(x)
+                    },
+                    "radians" to PyBuiltinFunc("radians") { args, _ ->
+                        val deg = (args.firstOrNull() as? Number)?.toDouble() ?: 0.0
+                        Math.toRadians(deg)
+                    },
+                    "degrees" to PyBuiltinFunc("degrees") { args, _ ->
+                        val rad = (args.firstOrNull() as? Number)?.toDouble() ?: 0.0
+                        Math.toDegrees(rad)
+                    },
                     "factorial" to PyBuiltinFunc("factorial") { args, _ ->
                         val n = (args.firstOrNull() as? Number)?.toInt() ?: 0
                         if (n < 0) throw PythonRuntimeException("ValueError", "factorial() not defined for negative values", line)
@@ -2145,7 +2238,7 @@ class PythonInterpreter(
                         a
                     }
                 )
-                scope[targetName] = PyModule("math", members)
+                PyModule("math", members)
             }
             "random" -> {
                 val rng = java.util.Random()
@@ -2155,11 +2248,25 @@ class PythonInterpreter(
                         val b = (args.getOrNull(1) as? Number)?.toInt() ?: 1
                         (a + rng.nextInt(b - a + 1)).toLong()
                     },
+                    "randrange" to PyBuiltinFunc("randrange") { args, _ ->
+                        val start = if (args.size > 1) (args[0] as Number).toInt() else 0
+                        val stop = if (args.size > 1) (args[1] as Number).toInt() else (args.firstOrNull() as? Number)?.toInt() ?: 1
+                        if (stop <= start) throw PythonRuntimeException("ValueError", "empty range for randrange()", line)
+                        (start + rng.nextInt(stop - start)).toLong()
+                    },
                     "random" to PyBuiltinFunc("random") { _, _ -> rng.nextDouble() },
                     "choice" to PyBuiltinFunc("choice") { args, _ ->
                         val list = toIterable(args.firstOrNull(), line)
                         if (list.isEmpty()) throw PythonRuntimeException("IndexError", "Cannot choose from an empty sequence", line)
                         list[rng.nextInt(list.size)]
+                    },
+                    "sample" to PyBuiltinFunc("sample") { args, _ ->
+                        val list = toIterable(args.firstOrNull(), line)
+                        val k = (args.getOrNull(1) as? Number)?.toInt() ?: 0
+                        if (k > list.size) throw PythonRuntimeException("ValueError", "Sample larger than population", line)
+                        val shuffled = list.toMutableList()
+                        shuffled.shuffle(rng)
+                        shuffled.take(k).toMutableList()
                     },
                     "shuffle" to PyBuiltinFunc("shuffle") { args, _ ->
                         val list = args.firstOrNull() as? MutableList<Any?>
@@ -2168,7 +2275,7 @@ class PythonInterpreter(
                         null
                     }
                 )
-                scope[targetName] = PyModule("random", members)
+                PyModule("random", members)
             }
             "sys" -> {
                 val members = mapOf<String, Any?>(
@@ -2179,11 +2286,12 @@ class PythonInterpreter(
                         throw PythonSystemExit(code)
                     }
                 )
-                scope[targetName] = PyModule("sys", members)
+                PyModule("sys", members)
             }
             "time" -> {
                 val members = mapOf<String, Any?>(
                     "time" to PyBuiltinFunc("time") { _, _ -> System.currentTimeMillis() / 1000.0 },
+                    "ctime" to PyBuiltinFunc("ctime") { _, _ -> java.util.Date().toString() },
                     "sleep" to PyBuiltinFunc("sleep") { args, _ ->
                         val secs = (args.firstOrNull() as? Number)?.toDouble() ?: 0.0
                         val ms = (secs * 1000).toLong()
@@ -2192,13 +2300,144 @@ class PythonInterpreter(
                         null
                     }
                 )
-                scope[targetName] = PyModule("time", members)
+                PyModule("time", members)
             }
             "json" -> {
                 val members = mapOf<String, Any?>(
-                    "dumps" to PyBuiltinFunc("dumps") { args, _ -> pyJsonDumps(args.firstOrNull()) }
+                    "dumps" to PyBuiltinFunc("dumps") { args, _ -> pyJsonDumps(args.firstOrNull()) },
+                    "loads" to PyBuiltinFunc("loads") { args, _ ->
+                        val jsonStr = args.firstOrNull()?.toString() ?: ""
+                        parseJsonToPy(jsonStr)
+                    }
                 )
-                scope[targetName] = PyModule("json", members)
+                PyModule("json", members)
+            }
+            "re" -> {
+                val members = mapOf<String, Any?>(
+                    "search" to PyBuiltinFunc("search") { args, _ ->
+                        val patternStr = pyStr(args.getOrNull(0))
+                        val targetStr = pyStr(args.getOrNull(1))
+                        val pattern = Pattern.compile(patternStr)
+                        val matcher = pattern.matcher(targetStr)
+                        if (matcher.find()) PyMatch(matcher.toMatchResult()) else null
+                    },
+                    "match" to PyBuiltinFunc("match") { args, _ ->
+                        val patternStr = pyStr(args.getOrNull(0))
+                        val targetStr = pyStr(args.getOrNull(1))
+                        val pattern = Pattern.compile(patternStr)
+                        val matcher = pattern.matcher(targetStr)
+                        if (matcher.lookingAt()) PyMatch(matcher.toMatchResult()) else null
+                    },
+                    "findall" to PyBuiltinFunc("findall") { args, _ ->
+                        val patternStr = pyStr(args.getOrNull(0))
+                        val targetStr = pyStr(args.getOrNull(1))
+                        val pattern = Pattern.compile(patternStr)
+                        val matcher = pattern.matcher(targetStr)
+                        val results = mutableListOf<Any?>()
+                        while (matcher.find()) {
+                            val groupCount = matcher.groupCount()
+                            when {
+                                groupCount == 0 -> results.add(matcher.group())
+                                groupCount == 1 -> results.add(matcher.group(1))
+                                else -> {
+                                    val tuple = (1..groupCount).map { matcher.group(it) }
+                                    results.add(tuple)
+                                }
+                            }
+                        }
+                        results
+                    },
+                    "sub" to PyBuiltinFunc("sub") { args, _ ->
+                        val patternStr = pyStr(args.getOrNull(0))
+                        val replStr = pyStr(args.getOrNull(1))
+                        val targetStr = pyStr(args.getOrNull(2))
+                        val pattern = Pattern.compile(patternStr)
+                        pattern.matcher(targetStr).replaceAll(replStr)
+                    },
+                    "split" to PyBuiltinFunc("split") { args, _ ->
+                        val patternStr = pyStr(args.getOrNull(0))
+                        val targetStr = pyStr(args.getOrNull(1))
+                        val limit = (args.getOrNull(2) as? Number)?.toInt() ?: 0
+                        val pattern = Pattern.compile(patternStr)
+                        val parts = if (limit > 0) pattern.split(targetStr, limit + 1) else pattern.split(targetStr)
+                        parts.toMutableList()
+                    }
+                )
+                PyModule("re", members)
+            }
+            "base64" -> {
+                val members = mapOf<String, Any?>(
+                    "b64encode" to PyBuiltinFunc("b64encode") { args, _ ->
+                        val input = args.firstOrNull()
+                        val bytes = when (input) {
+                            is ByteArray -> input
+                            is String -> input.toByteArray(Charsets.UTF_8)
+                            is List<*> -> input.map { (it as? Number)?.toByte() ?: 0.toByte() }.toByteArray()
+                            else -> (input?.toString() ?: "").toByteArray(Charsets.UTF_8)
+                        }
+                        Base64.getEncoder().encodeToString(bytes)
+                    },
+                    "b64decode" to PyBuiltinFunc("b64decode") { args, _ ->
+                        val input = pyStr(args.firstOrNull()).trim()
+                        val decoded = Base64.getDecoder().decode(input)
+                        String(decoded, Charsets.UTF_8)
+                    }
+                )
+                PyModule("base64", members)
+            }
+            "hashlib" -> {
+                val members = mapOf<String, Any?>(
+                    "md5" to PyBuiltinFunc("md5") { args, _ ->
+                        val initial = args.firstOrNull()
+                        val bytes = when (initial) {
+                            is ByteArray -> initial
+                            is String -> initial.toByteArray(Charsets.UTF_8)
+                            else -> initial?.toString()?.toByteArray(Charsets.UTF_8) ?: ByteArray(0)
+                        }
+                        PyHashObject("MD5", bytes)
+                    },
+                    "sha1" to PyBuiltinFunc("sha1") { args, _ ->
+                        val initial = args.firstOrNull()
+                        val bytes = when (initial) {
+                            is ByteArray -> initial
+                            is String -> initial.toByteArray(Charsets.UTF_8)
+                            else -> initial?.toString()?.toByteArray(Charsets.UTF_8) ?: ByteArray(0)
+                        }
+                        PyHashObject("SHA-1", bytes)
+                    },
+                    "sha256" to PyBuiltinFunc("sha256") { args, _ ->
+                        val initial = args.firstOrNull()
+                        val bytes = when (initial) {
+                            is ByteArray -> initial
+                            is String -> initial.toByteArray(Charsets.UTF_8)
+                            else -> initial?.toString()?.toByteArray(Charsets.UTF_8) ?: ByteArray(0)
+                        }
+                        PyHashObject("SHA-256", bytes)
+                    },
+                    "sha512" to PyBuiltinFunc("sha512") { args, _ ->
+                        val initial = args.firstOrNull()
+                        val bytes = when (initial) {
+                            is ByteArray -> initial
+                            is String -> initial.toByteArray(Charsets.UTF_8)
+                            else -> initial?.toString()?.toByteArray(Charsets.UTF_8) ?: ByteArray(0)
+                        }
+                        PyHashObject("SHA-512", bytes)
+                    }
+                )
+                PyModule("hashlib", members)
+            }
+            "string" -> {
+                val members = mapOf<String, Any?>(
+                    "ascii_lowercase" to "abcdefghijklmnopqrstuvwxyz",
+                    "ascii_uppercase" to "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+                    "ascii_letters" to "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
+                    "digits" to "0123456789",
+                    "hexdigits" to "0123456789abcdefABCDEF",
+                    "octdigits" to "01234567",
+                    "punctuation" to "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~",
+                    "whitespace" to " \t\n\r\u000b\u000c"
+                )
+                PyModule("string", members)
             }
             "os" -> {
                 val pathMembers = mapOf<String, Any?>(
@@ -2225,12 +2464,76 @@ class PythonInterpreter(
                         dir.list()?.toList()?.toMutableList() ?: mutableListOf<String>()
                     }
                 )
-                scope[targetName] = PyModule("os", osMembers)
+                PyModule("os", osMembers)
+            }
+            "os.path" -> {
+                val pathMembers = mapOf<String, Any?>(
+                    "join" to PyBuiltinFunc("join") { args, _ ->
+                        val parts = args.map { it.toString().trim('/') }
+                        parts.joinToString(File.separator)
+                    },
+                    "exists" to PyBuiltinFunc("exists") { args, _ ->
+                        val rel = args.firstOrNull()?.toString() ?: ""
+                        try {
+                            workspaceManager.resolvePath(rel).exists()
+                        } catch (_: SecurityException) {
+                            false
+                        }
+                    },
+                    "basename" to PyBuiltinFunc("basename") { args, _ -> File(args.firstOrNull()?.toString() ?: "").name },
+                    "dirname" to PyBuiltinFunc("dirname") { args, _ -> File(args.firstOrNull()?.toString() ?: "").parent ?: "" }
+                )
+                PyModule("os.path", pathMembers)
             }
             else -> {
-                throw PythonRuntimeException("ModuleNotFoundError", "No module named '$module'", line)
+                // Workspace module resolution
+                val candidatePaths = listOf(
+                    "$module.py",
+                    "${module.replace('.', '/')}.py"
+                )
+                var resolvedFile: File? = null
+                for (p in candidatePaths) {
+                    try {
+                        val f = workspaceManager.resolvePath(p)
+                        if (f.exists() && f.isFile) {
+                            resolvedFile = f
+                            break
+                        }
+                    } catch (_: SecurityException) {
+                    }
+                }
+
+                if (resolvedFile != null) {
+                    val modCode = resolvedFile.readText()
+                    val modMembers = mutableMapOf<String, Any?>()
+                    val moduleObj = PyModule(module, modMembers)
+                    loadedModules[module] = moduleObj
+
+                    val modScope = mutableMapOf<String, Any?>()
+                    modScope.putAll(globalScope)
+                    modScope["__file__"] = resolvedFile.name
+                    modScope["__name__"] = module
+
+                    val modTokens = PythonLexer(modCode, resolvedFile.name).tokenize()
+                    val modAst = PythonParser(modTokens, resolvedFile.name).parse()
+                    for (stmt in modAst) {
+                        val res = executeStmt(stmt, modScope)
+                        if (res is ReturnSignal) break
+                    }
+                    for ((k, v) in modScope) {
+                        if (!k.startsWith("__")) {
+                            modMembers[k] = v
+                        }
+                    }
+                    moduleObj
+                } else {
+                    throw PythonRuntimeException("ModuleNotFoundError", "No module named '$module'", line)
+                }
             }
         }
+
+        loadedModules[module] = pyMod
+        return pyMod
     }
 
     private fun pyJsonDumps(obj: Any?): String {
@@ -2243,6 +2546,139 @@ class PythonInterpreter(
             is Map<*, *> -> "{${obj.entries.joinToString(", ") { "\"${it.key}\": ${pyJsonDumps(it.value)}" }}}"
             else -> "\"$obj\""
         }
+    }
+
+    private fun parseJsonToPy(str: String): Any? {
+        val trimmed = str.trim()
+        if (trimmed.isEmpty()) {
+            throw PythonRuntimeException("ValueError", "JSONDecodeError: Expecting value: line 1 column 1 (char 0)", 1)
+        }
+        var p = 0
+        fun skipWs() {
+            while (p < str.length && str[p].isWhitespace()) p++
+        }
+        lateinit var parseVal: () -> Any?
+
+        fun parseString(): String {
+            p++ // skip leading '"'
+            val sb = StringBuilder()
+            while (p < str.length) {
+                val c = str[p++]
+                if (c == '"') return sb.toString()
+                if (c == '\\' && p < str.length) {
+                    when (val esc = str[p++]) {
+                        '"' -> sb.append('"')
+                        '\\' -> sb.append('\\')
+                        '/' -> sb.append('/')
+                        'b' -> sb.append('\b')
+                        'f' -> sb.append('\u000c')
+                        'n' -> sb.append('\n')
+                        'r' -> sb.append('\r')
+                        't' -> sb.append('\t')
+                        'u' -> {
+                            if (p + 4 <= str.length) {
+                                val hex = str.substring(p, p + 4)
+                                p += 4
+                                val codePoint = hex.toIntOrNull(16) ?: 0
+                                sb.append(codePoint.toChar())
+                            }
+                        }
+                        else -> sb.append(esc)
+                    }
+                } else {
+                    sb.append(c)
+                }
+            }
+            throw PythonRuntimeException("ValueError", "JSONDecodeError: Unterminated string in JSON", 1)
+        }
+
+        fun parseNumber(): Number {
+            val start = p
+            if (p < str.length && (str[p] == '-' || str[p] == '+')) p++
+            var isFloat = false
+            while (p < str.length && (str[p].isDigit() || str[p] == '.' || str[p] == 'e' || str[p] == 'E' || str[p] == '+' || str[p] == '-')) {
+                if (str[p] == '.' || str[p] == 'e' || str[p] == 'E') isFloat = true
+                p++
+            }
+            val raw = str.substring(start, p)
+            return if (isFloat) raw.toDoubleOrNull() ?: 0.0 else raw.toLongOrNull() ?: 0L
+        }
+
+        fun parseObject(): MutableMap<String, Any?> {
+            p++ // skip '{'
+            val map = mutableMapOf<String, Any?>()
+            skipWs()
+            if (p < str.length && str[p] == '}') {
+                p++
+                return map
+            }
+            while (p < str.length) {
+                skipWs()
+                if (p >= str.length || str[p] != '"') throw PythonRuntimeException("ValueError", "JSONDecodeError: Expected string key", 1)
+                val key = parseString()
+                skipWs()
+                if (p >= str.length || str[p] != ':') throw PythonRuntimeException("ValueError", "JSONDecodeError: Expected ':' after key", 1)
+                p++ // skip ':'
+                skipWs()
+                val value = parseVal()
+                map[key] = value
+                skipWs()
+                if (p < str.length && str[p] == ',') {
+                    p++
+                } else if (p < str.length && str[p] == '}') {
+                    p++
+                    break
+                } else {
+                    throw PythonRuntimeException("ValueError", "JSONDecodeError: Expected ',' or '}' in object", 1)
+                }
+            }
+            return map
+        }
+
+        fun parseArray(): MutableList<Any?> {
+            p++ // skip '['
+            val list = mutableListOf<Any?>()
+            skipWs()
+            if (p < str.length && str[p] == ']') {
+                p++
+                return list
+            }
+            while (p < str.length) {
+                skipWs()
+                val value = parseVal()
+                list.add(value)
+                skipWs()
+                if (p < str.length && str[p] == ',') {
+                    p++
+                } else if (p < str.length && str[p] == ']') {
+                    p++
+                    break
+                } else {
+                    throw PythonRuntimeException("ValueError", "JSONDecodeError: Expected ',' or ']' in array", 1)
+                }
+            }
+            return list
+        }
+
+        parseVal = {
+            skipWs()
+            if (p >= str.length) throw PythonRuntimeException("ValueError", "JSONDecodeError: Unexpected end of JSON input", 1)
+            when {
+                str[p] == '"' -> parseString()
+                str[p] == '{' -> parseObject()
+                str[p] == '[' -> parseArray()
+                str[p] == 't' && str.startsWith("true", p) -> { p += 4; true }
+                str[p] == 'f' && str.startsWith("false", p) -> { p += 5; false }
+                str[p] == 'n' && str.startsWith("null", p) -> { p += 4; null }
+                str[p].isDigit() || str[p] == '-' -> parseNumber()
+                else -> throw PythonRuntimeException("ValueError", "JSONDecodeError: Unexpected character '${str[p]}'", 1)
+            }
+        }
+
+        skipWs()
+        val result = parseVal()
+        skipWs()
+        return result
     }
 }
 
@@ -2263,7 +2699,63 @@ class PyBuiltinFunc(
     val invoke: (args: List<Any?>, kwargs: Map<String, Any?>) -> Any?
 )
 
-class PyModule(val name: String, private val members: Map<String, Any?>) {
+class PyMatch(
+    private val matchResult: MatchResult
+) {
+    fun group(idx: Int = 0): String? {
+        return if (idx in 0..matchResult.groupCount()) matchResult.group(idx) else null
+    }
+    fun groups(): List<String?> {
+        val list = mutableListOf<String?>()
+        for (i in 1..matchResult.groupCount()) {
+            list.add(matchResult.group(i))
+        }
+        return list
+    }
+    fun start(): Int = matchResult.start()
+    fun end(): Int = matchResult.end()
+}
+
+class PyHashObject(
+    private val algorithm: String,
+    initialData: ByteArray = ByteArray(0)
+) {
+    private val buffer = ByteArrayOutputStream()
+    init {
+        if (initialData.isNotEmpty()) {
+            buffer.write(initialData)
+        }
+    }
+
+    fun update(data: Any?) {
+        val bytes = when (data) {
+            is ByteArray -> data
+            is String -> data.toByteArray(Charsets.UTF_8)
+            is List<*> -> data.map { (it as? Number)?.toByte() ?: 0.toByte() }.toByteArray()
+            else -> data?.toString()?.toByteArray(Charsets.UTF_8) ?: ByteArray(0)
+        }
+        buffer.write(bytes)
+    }
+
+    fun hexdigest(): String {
+        val md = MessageDigest.getInstance(algorithm)
+        val hashBytes = md.digest(buffer.toByteArray())
+        val sb = StringBuilder()
+        for (b in hashBytes) {
+            sb.append(String.format(Locale.US, "%02x", b))
+        }
+        return sb.toString()
+    }
+
+    fun digest(): String {
+        val md = MessageDigest.getInstance(algorithm)
+        val hashBytes = md.digest(buffer.toByteArray())
+        return String(hashBytes, Charsets.ISO_8859_1)
+    }
+}
+
+class PyModule(val name: String, val members: MutableMap<String, Any?>) {
+    constructor(name: String, membersMap: Map<String, Any?>) : this(name, membersMap.toMutableMap())
     fun getMember(name: String): Any? = members[name]
 }
 
