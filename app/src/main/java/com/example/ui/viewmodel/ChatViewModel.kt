@@ -16,7 +16,10 @@ import com.example.agent.tools.ToolCall
 import com.example.agent.tools.ToolCallParser
 import com.example.agent.tools.ToolRegistry
 import com.example.agent.tools.ToolResult
+import com.example.agent.tools.workspace.AgentWorkspaceContext
 import com.example.agent.tools.workspace.AgentWorkspaceManager
+import com.example.agent.tools.workspace.FileChangeType
+import com.example.agent.tools.workspace.VerificationStatus
 import java.io.File
 import com.example.data.local.ChatDatabase
 import com.example.data.model.AgentSession
@@ -949,21 +952,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             "USER OBJECTIVE: \"$goal\"\n\n" +
             "$toolsPrompt\n\n" +
             "EXECUTION GUIDELINES:\n" +
-            "- If the goal requires creating, running, debugging, or fixing code, invoke the necessary tools immediately.\n" +
-            "- You operate with Claude Code-level capabilities: full filesystem access, standard pre-created directories (src/, scripts/, data/, output/, docs/, lib/, tests/, bin/), and support for all file types (including binary/images/archives via base64).\n" +
-            "- When modifying, fixing, or updating existing source code files, prefer 'file_patch' over rewriting entire files with 'file_write'. 'file_patch' applies targeted surgical diffs (exact/fuzzy target_content & replacement_content, search/replace blocks, or unified diff hunks) accurately without truncating large files.\n" +
-            "- When working with uploaded code repositories or archives, unpack them using 'archive_extract' (or inspect workspace contents with 'file_list'), examine source files with 'file_read', and make precise modifications using 'file_patch'.\n" +
+            "- Act as an expert coding agent: understand user goals, inspect existing code before editing, determine necessary steps, execute them, inspect results, and verify the final state.\n" +
+            "- INSPECTION & DISCOVERY BEFORE EDITING:\n" +
+            "  * Never modify code blind. When asked to modify, extend, or integrate features in an existing project, first inspect the project structure (with 'file_list' or 'file_tree'), locate relevant files (with 'file_search'), and examine existing implementations (with 'file_read') to understand architecture, state management, and interfaces before making changes.\n" +
+            "- SURGICAL & MULTI-FILE CODE MODIFICATIONS:\n" +
+            "  * Plan minimal targeted changes. When modifying or extending existing source code files, prefer 'file_patch' over rewriting entire files with 'file_write'. 'file_patch' applies targeted surgical diffs without truncating large files.\n" +
+            "  * For multi-file feature additions (e.g. settings screens, persistence, agent integrations), modify each affected component cleanly across files.\n" +
+            "- TESTING, BUILD & VERIFICATION MANDATE:\n" +
+            "  * Never claim a task is complete without testing and verifying the implementation. Run build/test commands ('run_command' or 'python_execute') and inspect stdout/stderr.\n" +
+            "  * If compilation or tests produce errors or tracebacks, observe the diagnostics, formulate repairs, apply them with 'file_patch' or 'file_write', and retest to verify.\n" +
+            "- DYNAMIC PLAN ADAPTATION & RECOVERY:\n" +
+            "  * If results differ from expectations, an approach fails, or dependencies are missing, do not repeat the failing action blindly.\n" +
+            "  * Adapt your plan: output an updated ```plan block with revised or recovery subtasks (marking completed steps [x], failed steps [!], in-progress steps [/], and pending steps [ ]).\n" +
             "- Package & dependency management: install Python libraries via 'pip install <package>' (installed into workspace lib/) and Node modules via 'npm install <package>' using 'run_command'.\n" +
             "- You can run shell commands, scripts, and terminal tools (python3, pip, node, npm, git, bash) using 'run_command' without restrictions.\n" +
             "- For Python tasks: Execute Python code using 'python_execute' or via 'run_command'.\n" +
             "- For Web Research & Information Gathering:\n" +
-            "  * Understand the user query and generate an appropriate, tailored search query adapted to the topic (e.g. for IP/network tasks, use IP or WHOIS terms; for code/libraries, use package and tech terms; for factual questions, use core entity keywords).\n" +
+            "  * Understand the user query and generate an appropriate, tailored search query adapted to the topic.\n" +
             "  * Do NOT hardcode or default to Wikipedia as the primary source. Avoid Wikipedia when specialized registries (such as IP/WHOIS/RDAP, CVE databases, official documentation, or package indices) are more authoritative.\n" +
             "  * Do not assume the first search result is sufficient: search across multiple relevant websites when the task requires it.\n" +
             "  * Distinguish search-result snippets from actual page content. Snippets are brief previews; invoke 'web_open' on authoritative candidate URLs to retrieve and read full, verified content.\n" +
             "  * If initial search results are irrelevant, insufficient, or incomplete, automatically perform a follow-up 'web_search' with refined keywords or open additional sources.\n" +
             "  * Synthesize verified findings with source context, and cite your sources using markdown links [Source Title](URL).\n" +
-            "- If execution produces an error or traceback, observe the diagnostics, update files, and re-run.\n" +
             "- Only deliver your final response once the execution has verified the desired output."
     }
 
@@ -1079,6 +1089,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         initialSteps: List<AgentStep>?
     ) {
         workspaceManager.activeSessionId = session.id
+        val workspaceContext = AgentWorkspaceContext(
+            sessionId = session.id,
+            workspaceManager = workspaceManager
+        )
+        workspaceContext.discoverWorkspace()
+
         val state = _uiState.value
         val historyMessages = session.messages
             .filter { it.id != assistantMessageId && !it.isError }
@@ -1106,7 +1122,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             updateAgentSessionStatus(AgentTaskStatus.THINKING)
 
             val planPromptSnippet = taskPlanner.formatPlanForPrompt(currentPlan)
-            val fullSystemPrompt = "$systemPrompt\n\n$planPromptSnippet"
+            val workspacePromptSnippet = workspaceContext.formatContextForPrompt()
+            val fullSystemPrompt = "$systemPrompt\n\n$workspacePromptSnippet\n\n$planPromptSnippet"
 
             val attemptResult = repository.requestAiCompletion(
                 history = historyMessages,
@@ -1167,6 +1184,57 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
                 // Store tool execution record in active session
                 addToolExecutionToSession(record)
+
+                // Update workspace context with tool effects
+                val pathArg = (toolCall.arguments["path"] ?: toolCall.arguments["file"] ?: toolCall.arguments["script_path"])?.toString()
+                when (toolCall.toolName.lowercase()) {
+                    "file_list", "file_tree" -> {
+                        val lines = (toolResult.result ?: "").lines()
+                        val discovered = lines.mapNotNull { line ->
+                            val trimmed = line.trim()
+                            if (trimmed.startsWith("[FILE]") || trimmed.startsWith("[DIR ]")) {
+                                trimmed.substring(6).trim().split(" ").firstOrNull()
+                            } else if (trimmed.contains("── ") && !trimmed.endsWith("/")) {
+                                trimmed.substringAfter("── ").split(" ").firstOrNull()
+                            } else null
+                        }
+                        if (discovered.isNotEmpty()) {
+                            workspaceContext.recordDiscoveredFiles(discovered)
+                        }
+                    }
+                    "file_read" -> {
+                        if (pathArg != null) {
+                            workspaceContext.recordFileInspection(pathArg, (toolResult.result ?: "").length.toLong(), "Inspected file content")
+                        }
+                    }
+                    "file_write" -> {
+                        if (pathArg != null && toolResult.isSuccess) {
+                            workspaceContext.recordFileModification(pathArg, FileChangeType.CREATED, "Wrote file content")
+                        }
+                    }
+                    "file_patch" -> {
+                        if (pathArg != null && toolResult.isSuccess) {
+                            workspaceContext.recordFileModification(pathArg, FileChangeType.PATCHED, "Patched file content")
+                        }
+                    }
+                    "file_delete" -> {
+                        if (pathArg != null && toolResult.isSuccess) {
+                            workspaceContext.recordFileDeletion(pathArg)
+                        }
+                    }
+                    "run_command", "python_execute" -> {
+                        val cmd = (toolCall.arguments["command"] ?: toolCall.arguments["code"] ?: toolCall.arguments["script_path"] ?: toolCall.toolName).toString()
+                        workspaceContext.recordCommandExecution(
+                            command = cmd,
+                            exitCode = if (toolResult.isSuccess) 0 else 1,
+                            output = toolResult.result ?: toolResult.error ?: "",
+                            isSuccess = toolResult.isSuccess
+                        )
+                    }
+                }
+                if (!toolResult.isSuccess) {
+                    workspaceContext.recordToolFailure(toolCall.toolName, toolResult.error ?: "Error")
+                }
 
                 if (toolResult.isSuccess) {
                     // Advance subtask state if this tool logically achieves its objective
@@ -1239,8 +1307,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             appendLine("- If the script executed cleanly (Exit Code 0) and output verifies the fix, conclude and deliver your final answer.")
                             appendLine("- If an error occurred or fixes are needed, modify the code with 'file_patch' or 'file_write' and re-run with 'python_execute' to verify the fix.]")
                         }
+                        val notice = workspaceContext.formatPostActionNotice(record.toolName, record.isSuccess)
+                        if (notice != null) {
+                            appendLine("\n$notice")
+                        }
                     } else {
                         appendLine("Error: ${record.error}")
+                        val notice = workspaceContext.formatPostActionNotice(record.toolName, record.isSuccess)
+                        if (notice != null) {
+                            appendLine("\n$notice")
+                        }
                         appendLine("\n[SUBTASK STATUS: Subtask \"${activeSubtask?.description}\" failed with tool ${record.toolName}. You may retry, use a different tool, or choose another approach.]")
                         if (record.error?.contains("CAPABILITY_UNAVAILABLE") == true) {
                             appendLine("\n[RECOVERY INSTRUCTION: The requested executable is not available in the Android shell. Switch to 'python_execute' for Python execution. Do NOT attempt shell package managers (apt, pkg, curl).]")
@@ -1283,7 +1359,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 // Loop continues to next iteration (THINKING)
             } else {
                 // Model returned text without a tool call
-                val hasPendingAction = taskPlanner.hasPendingActionSubtasks(currentPlan)
+                val hasPendingAction = taskPlanner.hasPendingActionSubtasks(currentPlan) || workspaceContext.hasUnverifiedModifications()
                 val canNudge = hasPendingAction &&
                     consecutiveNudges < MAX_CONSECUTIVE_NUDGES &&
                     totalNudges < MAX_TOTAL_NUDGES &&
@@ -1317,12 +1393,29 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         appendLine("[EXECUTION CONTROL: Tool invocation required]")
                         appendLine("You provided commentary or described next steps, but did not emit a ```tool_call``` block.")
                         appendLine("Unfinished action subtask: \"${activeSubtask?.description}\".")
+                        if (workspaceContext.hasUnverifiedModifications()) {
+                            val unverified = workspaceContext.modifiedFiles.filter { it.value.verificationStatus == VerificationStatus.NEEDS_VERIFICATION }.keys
+                            appendLine("Unverified modifications exist on disk for: ${unverified.joinToString(", ")}.")
+                            appendLine("You must run compilation or test checks (using 'run_command' or 'python_execute') to verify the modified workspace state before completing.")
+                        }
                         if (activeSubtask?.status == SubtaskStatus.FAILED) {
-                            appendLine("The previous tool execution for this subtask FAILED. You must apply a repair with 'file_patch' or 'file_write' and re-run with 'python_execute' before concluding.")
-                        } else if (activeSubtask?.description?.contains("execute", ignoreCase = true) == true || activeSubtask?.description?.contains("run", ignoreCase = true) == true) {
-                            appendLine("The modified code has not been tested yet. You MUST invoke 'python_execute' to run and verify the output before claiming it is fixed.")
-                        } else if (activeSubtask?.description?.contains("modify", ignoreCase = true) == true || activeSubtask?.description?.contains("fix", ignoreCase = true) == true || activeSubtask?.description?.contains("write", ignoreCase = true) == true) {
-                            appendLine("The file modification has not been saved yet. You MUST invoke 'file_patch' or 'file_write' to apply the change on disk.")
+                            appendLine("The previous tool execution for subtask \"${activeSubtask.description}\" FAILED.")
+                            appendLine("You must inspect diagnostics, apply a repair (via 'file_patch' or 'file_write'), test an alternative approach, or adapt your plan before concluding.")
+                        } else if (activeSubtask?.description?.contains("test", ignoreCase = true) == true ||
+                            activeSubtask?.description?.contains("compile", ignoreCase = true) == true ||
+                            activeSubtask?.description?.contains("verify", ignoreCase = true) == true ||
+                            activeSubtask?.description?.contains("execute", ignoreCase = true) == true ||
+                            activeSubtask?.description?.contains("run", ignoreCase = true) == true) {
+                            appendLine("The implementation has not been tested or verified yet. You MUST run tests or verify the build (via 'run_command' or 'python_execute') before claiming completion.")
+                        } else if (activeSubtask?.description?.contains("inspect", ignoreCase = true) == true ||
+                            activeSubtask?.description?.contains("locate", ignoreCase = true) == true ||
+                            activeSubtask?.description?.contains("search", ignoreCase = true) == true) {
+                            appendLine("Before editing, inspect the existing code and architecture using 'file_list', 'file_tree', 'file_search', or 'file_read'.")
+                        } else if (activeSubtask?.description?.contains("modify", ignoreCase = true) == true ||
+                            activeSubtask?.description?.contains("implement", ignoreCase = true) == true ||
+                            activeSubtask?.description?.contains("fix", ignoreCase = true) == true ||
+                            activeSubtask?.description?.contains("write", ignoreCase = true) == true) {
+                            appendLine("The required code modifications have not been saved yet. You MUST invoke 'file_patch' or 'file_write' to apply the changes on disk.")
                         }
                         appendLine("You MUST output the next tool call inside a ```tool_call``` block now to proceed with execution.")
                         appendLine("Do NOT deliver an intermediate text-only response without a tool call until the objective is fully executed and verified.")
@@ -1340,21 +1433,26 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     // Model provided its final answer (all actions complete or nudge limit reached)
                     loopActive = false
 
-                    // Verify active subtask
-                    currentPlan = taskPlanner.verifyAndCompleteSubtask(
-                        plan = currentPlan,
-                        subtaskId = activeSubtask?.id,
-                        verificationNotes = "Verified by agent completion"
-                    )
-                    // Complete remaining synthesis subtasks
+                    // Only verify active subtask if it is a synthesis/final subtask or if all action subtasks were already completed
+                    val hasUnfinishedActions = taskPlanner.hasPendingActionSubtasks(currentPlan) || workspaceContext.hasUnverifiedModifications()
+                    if (!hasUnfinishedActions && activeSubtask != null && activeSubtask.status != SubtaskStatus.FAILED) {
+                        currentPlan = taskPlanner.verifyAndCompleteSubtask(
+                            plan = currentPlan,
+                            subtaskId = activeSubtask.id,
+                            verificationNotes = "Verified by agent completion"
+                        )
+                    }
+
+                    // Complete only synthesis/final subtasks that remained pending; never falsely claim action subtasks are complete
                     val updatedSubtasks = currentPlan.subtasks.map {
-                        if (it.status != SubtaskStatus.COMPLETED) {
+                        if (it.status != SubtaskStatus.COMPLETED && taskPlanner.isSynthesisOrFinalSubtask(it.description) && !hasUnfinishedActions) {
                             it.copy(status = SubtaskStatus.COMPLETED, result = it.result ?: "Completed in final deliverable")
                         } else it
                     }
+                    val allCompleted = updatedSubtasks.isNotEmpty() && updatedSubtasks.all { it.status == SubtaskStatus.COMPLETED }
                     currentPlan = currentPlan.copy(
                         subtasks = updatedSubtasks,
-                        isCompleted = true,
+                        isCompleted = allCompleted,
                         updatedAt = System.currentTimeMillis()
                     )
                     updateSessionPlan(currentPlan)

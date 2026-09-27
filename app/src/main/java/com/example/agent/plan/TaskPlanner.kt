@@ -17,7 +17,7 @@ class TaskPlanner {
         )
 
         private val PLAN_HEADER_REGEX = Regex(
-            """(?:^|\n)\s*(?:PLAN|TASK PLAN|CURRENT PLAN):\s*\n([\s\S]*?)(?=\n\s*(?:GOAL|OBJECTIVE|NOTES|EXECUTION|$))""",
+            """(?:^|\n)\s*(?:PLAN|TASK PLAN|CURRENT PLAN|REVISED PLAN|UPDATED PLAN|ADAPTED PLAN|NEW PLAN|EXECUTION PLAN):\s*\n([\s\S]*?)(?=\n\s*(?:GOAL|OBJECTIVE|NOTES|EXECUTION|$))""",
             RegexOption.IGNORE_CASE
         )
     }
@@ -96,28 +96,31 @@ class TaskPlanner {
             val status: SubtaskStatus?
             val description: String
 
+            // Strip optional leading ordinal numbering like "1. ", "2) " while checking markers
+            val normalizedLine = line.replaceFirst(Regex("""^\d+[\.\)]\s*"""), "").trim()
+
             when {
                 // Completed markers
-                line.startsWith("☑") || line.startsWith("✔") || line.startsWith("[x]", ignoreCase = true) || line.startsWith("- [x]", ignoreCase = true) || line.startsWith("* [x]", ignoreCase = true) -> {
+                normalizedLine.startsWith("☑") || normalizedLine.startsWith("✔") || normalizedLine.startsWith("[x]", ignoreCase = true) || normalizedLine.startsWith("- [x]", ignoreCase = true) || normalizedLine.startsWith("* [x]", ignoreCase = true) -> {
                     status = SubtaskStatus.COMPLETED
-                    description = line.replaceFirst(Regex("""^(?:☑|✔|[-*]?\s*\[x\])\s*""", RegexOption.IGNORE_CASE), "").trim()
+                    description = normalizedLine.replaceFirst(Regex("""^(?:☑|✔|[-*]?\s*\[x\])\s*""", RegexOption.IGNORE_CASE), "").trim()
                 }
                 // Running / In-progress markers
-                line.startsWith("⏳") || line.startsWith("[/]", ignoreCase = true) || line.startsWith("- [/]", ignoreCase = true) || line.startsWith("[>]", ignoreCase = true) || line.startsWith("- [>]", ignoreCase = true) -> {
+                normalizedLine.startsWith("⏳") || normalizedLine.startsWith("[/]", ignoreCase = true) || normalizedLine.startsWith("- [/]", ignoreCase = true) || normalizedLine.startsWith("[>]", ignoreCase = true) || normalizedLine.startsWith("- [>]", ignoreCase = true) -> {
                     status = SubtaskStatus.RUNNING
-                    description = line.replaceFirst(Regex("""^(?:⏳|[-*]?\s*\[[/>]\])\s*""", RegexOption.IGNORE_CASE), "").trim()
+                    description = normalizedLine.replaceFirst(Regex("""^(?:⏳|[-*]?\s*\[[/>]\])\s*""", RegexOption.IGNORE_CASE), "").trim()
                 }
                 // Failed markers
-                line.startsWith("☒") || line.startsWith("[!]", ignoreCase = true) || line.startsWith("- [!]", ignoreCase = true) || line.startsWith("❌") -> {
+                normalizedLine.startsWith("☒") || normalizedLine.startsWith("[!]", ignoreCase = true) || normalizedLine.startsWith("- [!]", ignoreCase = true) || normalizedLine.startsWith("❌") -> {
                     status = SubtaskStatus.FAILED
-                    description = line.replaceFirst(Regex("""^(?:☒|❌|[-*]?\s*\[!\])\s*""", RegexOption.IGNORE_CASE), "").trim()
+                    description = normalizedLine.replaceFirst(Regex("""^(?:☒|❌|[-*]?\s*\[!\])\s*""", RegexOption.IGNORE_CASE), "").trim()
                 }
                 // Pending markers
-                line.startsWith("☐") || line.startsWith("[ ]") || line.startsWith("- [ ]") || line.startsWith("* [ ]") -> {
+                normalizedLine.startsWith("☐") || normalizedLine.startsWith("[ ]") || normalizedLine.startsWith("- [ ]") || normalizedLine.startsWith("* [ ]") -> {
                     status = SubtaskStatus.PENDING
-                    description = line.replaceFirst(Regex("""^(?:☐|[-*]?\s*\[\s*\])\s*"""), "").trim()
+                    description = normalizedLine.replaceFirst(Regex("""^(?:☐|[-*]?\s*\[\s*\])\s*"""), "").trim()
                 }
-                // Numbered lines: 1. Subtask description
+                // Simple numbered lines without checkbox: 1. Subtask description
                 line.matches(Regex("""^\d+[\.\)]\s+.*""")) -> {
                     status = SubtaskStatus.PENDING
                     description = line.replaceFirst(Regex("""^\d+[\.\)]\s+"""), "").trim()
@@ -216,9 +219,9 @@ class TaskPlanner {
         val updatedSubtasks = plan.subtasks.map { subtask ->
             if (subtask.id == targetId) {
                 subtask.copy(
+                    status = if (subtask.status == SubtaskStatus.FAILED) SubtaskStatus.RUNNING else subtask.status,
                     result = "Tool '$toolName' output: $snippet",
                     updatedAt = System.currentTimeMillis()
-                    // Status deliberately remains RUNNING!
                 )
             } else {
                 subtask
@@ -281,6 +284,106 @@ class TaskPlanner {
         return plan.copy(
             subtasks = updatedSubtasks,
             currentSubtaskId = subtaskId,
+            updatedAt = System.currentTimeMillis()
+        )
+    }
+
+    /**
+     * Adapts an active plan following a tool or implementation failure by recording
+     * the diagnostic on the failed subtask, inserting a recovery subtask, and setting it to RUNNING.
+     */
+    fun adaptPlanForFailure(
+        plan: TaskPlan,
+        failedSubtaskId: String?,
+        failureDiagnostic: String,
+        recoverySubtask: Subtask
+    ): TaskPlan {
+        val targetId = failedSubtaskId ?: plan.currentSubtaskId
+        val updatedSubtasks = mutableListOf<Subtask>()
+        var found = false
+
+        for (subtask in plan.subtasks) {
+            if (subtask.id == targetId) {
+                updatedSubtasks.add(
+                    subtask.copy(
+                        status = SubtaskStatus.FAILED,
+                        result = "Failed: $failureDiagnostic",
+                        retryCount = subtask.retryCount + 1,
+                        updatedAt = System.currentTimeMillis()
+                    )
+                )
+                updatedSubtasks.add(
+                    recoverySubtask.copy(
+                        status = SubtaskStatus.RUNNING,
+                        updatedAt = System.currentTimeMillis()
+                    )
+                )
+                found = true
+            } else {
+                updatedSubtasks.add(subtask)
+            }
+        }
+
+        if (!found) {
+            updatedSubtasks.add(recoverySubtask.copy(status = SubtaskStatus.RUNNING))
+        }
+
+        val reindexed = updatedSubtasks.mapIndexed { idx, s -> s.copy(orderIndex = idx) }
+        return plan.copy(
+            subtasks = reindexed,
+            currentSubtaskId = recoverySubtask.id,
+            updatedAt = System.currentTimeMillis()
+        )
+    }
+
+    /**
+     * Inserts a new subtask immediately following the specified subtask (or at the end if null),
+     * re-indexing order indices.
+     */
+    fun insertSubtaskAfter(
+        plan: TaskPlan,
+        afterSubtaskId: String?,
+        newSubtask: Subtask
+    ): TaskPlan {
+        val targetId = afterSubtaskId ?: plan.currentSubtaskId
+        val updatedSubtasks = mutableListOf<Subtask>()
+        var inserted = false
+
+        for (subtask in plan.subtasks) {
+            updatedSubtasks.add(subtask)
+            if (subtask.id == targetId) {
+                updatedSubtasks.add(newSubtask)
+                inserted = true
+            }
+        }
+        if (!inserted) {
+            updatedSubtasks.add(newSubtask)
+        }
+
+        val reindexed = updatedSubtasks.mapIndexed { idx, s -> s.copy(orderIndex = idx) }
+        return plan.copy(
+            subtasks = reindexed,
+            updatedAt = System.currentTimeMillis()
+        )
+    }
+
+    /**
+     * Replaces or updates subtasks with a revised list, preserving existing results/IDs where possible.
+     */
+    fun revisePlan(
+        plan: TaskPlan,
+        newSubtasks: List<Subtask>
+    ): TaskPlan {
+        val reindexed = newSubtasks.mapIndexed { idx, s -> s.copy(orderIndex = idx) }
+        val activeId = reindexed.firstOrNull { it.status == SubtaskStatus.RUNNING }?.id
+            ?: reindexed.firstOrNull { it.status == SubtaskStatus.PENDING }?.id
+            ?: plan.currentSubtaskId
+        val allDone = reindexed.isNotEmpty() && reindexed.all { it.status == SubtaskStatus.COMPLETED }
+
+        return plan.copy(
+            subtasks = reindexed,
+            currentSubtaskId = activeId,
+            isCompleted = allDone,
             updatedAt = System.currentTimeMillis()
         )
     }
@@ -372,13 +475,15 @@ class TaskPlanner {
                     descLower.contains("fix") || descLower.contains("repair") ||
                     descLower.contains("update") || descLower.contains("edit") ||
                     descLower.contains("correct") || descLower.contains("solution") ||
-                    descLower.contains("extract")
+                    descLower.contains("extract") || descLower.contains("implement") ||
+                    descLower.contains("change")
             }
             "python_execute", "run_command" -> {
                 descLower.contains("execute") || descLower.contains("run") ||
                     descLower.contains("command") || descLower.contains("test") ||
                     descLower.contains("script") || descLower.contains("verify") ||
-                    descLower.contains("check")
+                    descLower.contains("check") || descLower.contains("compile") ||
+                    descLower.contains("build")
             }
             "web_search" -> {
                 descLower.contains("search") || descLower.contains("query") ||
@@ -397,7 +502,11 @@ class TaskPlanner {
                 descLower.contains("list") || descLower.contains("tree") ||
                     descLower.contains("search") || descLower.contains("inspect") ||
                     descLower.contains("read") || descLower.contains("open") ||
-                    descLower.contains("find") || descLower.contains("clarify")
+                    descLower.contains("find") || descLower.contains("clarify") ||
+                    descLower.contains("locate") || descLower.contains("architecture") ||
+                    descLower.contains("explore") || descLower.contains("analyze") ||
+                    descLower.contains("understand") || descLower.contains("plan") ||
+                    descLower.contains("review")
             }
             "calculator" -> {
                 descLower.contains("calculate") || descLower.contains("compute") ||
@@ -423,21 +532,25 @@ class TaskPlanner {
                     updatedPlan = verifyAndCompleteSubtask(updatedPlan, pendingWrite.id, "Verified: Code updated via '$toolName'")
                 }
 
-                // If an execution subtask had previously failed, reset it back to RUNNING so it gets re-run and re-verified
+                // If an execution or test subtask at or after this subtask had previously failed, reset it back to RUNNING
                 val failedExecution = updatedPlan.subtasks.find {
                     it.status == SubtaskStatus.FAILED &&
+                        it.orderIndex >= active.orderIndex &&
                         (it.description.contains("execute", ignoreCase = true) ||
                          it.description.contains("run", ignoreCase = true) ||
-                         it.description.contains("test", ignoreCase = true))
+                         it.description.contains("test", ignoreCase = true) ||
+                         it.description.contains("compile", ignoreCase = true) ||
+                         it.description.contains("verify", ignoreCase = true) ||
+                         it.description.contains("check", ignoreCase = true))
                 }
                 if (failedExecution != null) {
                     updatedPlan = retrySubtask(updatedPlan, failedExecution.id)
                 }
             }
 
-            // If there is a next pending subtask, transition it to RUNNING
+            // If there is a next pending subtask and no subtask is currently running, transition it to RUNNING
             val nextPending = updatedPlan.subtasks.firstOrNull { it.status == SubtaskStatus.PENDING }
-            if (nextPending != null && updatedPlan.activeSubtask == null) {
+            if (nextPending != null && updatedPlan.subtasks.none { it.status == SubtaskStatus.RUNNING }) {
                 updatedPlan = startSubtask(updatedPlan, nextPending.id)
             }
         }
@@ -495,10 +608,11 @@ class TaskPlanner {
             }
             appendLine()
             appendLine("PLANNING GUIDELINES:")
-            appendLine("- Always execute the tool corresponding to the CURRENT ACTIVE SUBTASK.")
-            appendLine("- You MUST output a ```tool_call``` block whenever active or pending subtasks require actions (e.g. creating, running, debugging, or searching).")
-            appendLine("- If a tool fails, observe diagnostics, then modify code with file_patch or file_write and re-run with python_execute.")
-            appendLine("- Do not provide conversational status updates or next-step descriptions without the tool call.")
+            appendLine("- Understand the user's goal and inspect existing code before making changes.")
+            appendLine("- Dynamic execution: Focus on the CURRENT ACTIVE SUBTASK, but adapt dynamically as you observe tool results.")
+            appendLine("- For multi-file development: Inspect relevant files first, plan minimal edits, and update each affected file cleanly.")
+            appendLine("- Verification mandate: Always compile, run tests, or execute checks (using 'run_command' or 'python_execute') and inspect errors before concluding.")
+            appendLine("- Plan adaptation: If results differ from expectations, unexpected errors occur, or an approach fails, diagnose the error and update your plan (emit a revised ```plan block with adjusted or recovery subtasks).")
             appendLine("- Only provide a final text response when all actions are executed, verified, and complete.")
             appendLine("============================")
         }
@@ -510,7 +624,7 @@ class TaskPlanner {
     private fun decomposeGoalIntoSubtasks(goal: String): List<Subtask> {
         val lower = goal.lowercase()
 
-        // Example from requirements: "Research three Android LLM frameworks, compare them, and create a report."
+        // 1. Example from requirements: "Research three Android LLM frameworks, compare them, and create a report."
         if (lower.contains("three") && (lower.contains("framework") || lower.contains("compare") || lower.contains("report"))) {
             return listOf(
                 Subtask(description = "Find relevant frameworks", orderIndex = 0),
@@ -524,9 +638,10 @@ class TaskPlanner {
             )
         }
 
-        // Code repair / bug fix / modify existing code / error correction (when not creating a new script from scratch)
+        // 2. Code repair / bug fix / syntax error / broken implementation (when not building new features or creating scripts from scratch)
         val isCreatingNew = lower.contains("create a python") || lower.contains("create a script") || lower.contains("create python") || lower.contains("write a python") || lower.contains("write a script")
-        if (!isCreatingNew && (lower.contains("fix") || lower.contains("repair") || lower.contains("syntax error") ||
+        val isFeatureDev = lower.contains("settings") || lower.contains("screen") || lower.contains("integrate") || lower.contains("persist") || lower.contains("feature") || lower.contains("multi-file") || lower.contains("architecture")
+        if (!isCreatingNew && !isFeatureDev && (lower.contains("fix") || lower.contains("repair") || lower.contains("syntax error") ||
             (lower.contains("modify") && (lower.contains(".py") || lower.contains("file") || lower.contains("code") || lower.contains("script"))) ||
             (lower.contains("open") && (lower.contains(".py") || lower.contains("error") || lower.contains("fix") || lower.contains("run"))) ||
             lower.contains("debug") || lower.contains("bug"))
@@ -540,7 +655,19 @@ class TaskPlanner {
             )
         }
 
-        // Python code / script / run
+        // 3. Complex development requests / Feature additions / Multi-file integrations / Architecture / Settings
+        if (isFeatureDev || lower.contains("add a ") || lower.contains("implement") || lower.contains("refactor") || lower.contains("build a ") || (lower.contains("add") && (lower.contains("screen") || lower.contains("button") || lower.contains("option") || lower.contains("mode") || lower.contains("view")))) {
+            return listOf(
+                Subtask(description = "Inspect project architecture and locate relevant files", orderIndex = 0),
+                Subtask(description = "Analyze existing implementation and plan minimal changes", orderIndex = 1),
+                Subtask(description = "Implement modifications across relevant files", orderIndex = 2),
+                Subtask(description = "Compile, run tests, or execute checks to verify implementation", orderIndex = 3),
+                Subtask(description = "Review test results, repair any errors, and retest", orderIndex = 4),
+                Subtask(description = "Verify final state and complete integration", orderIndex = 5)
+            )
+        }
+
+        // 4. Standalone Python scripts / computations / algorithms
         if (lower.contains("python") || lower.contains("script") || lower.contains("code") || lower.contains("write a program")) {
             return listOf(
                 Subtask(description = "Analyze requirements and prepare solution", orderIndex = 0),
@@ -551,7 +678,7 @@ class TaskPlanner {
             )
         }
 
-        // Research / Search / Benchmark / IP address & WHOIS lookup
+        // 5. Research / Search / Benchmark / IP address & WHOIS lookup
         if (lower.contains("research") || lower.contains("search") || lower.contains("find") ||
             lower.contains("compare") || lower.contains("ip address") || lower.contains("whois") ||
             lower.contains("origin") || lower.contains("location of ip") || lower.contains("owner of ip") ||
@@ -565,9 +692,9 @@ class TaskPlanner {
             )
         }
 
-        // Generic autonomous workflow
+        // 6. Generic autonomous workflow
         return listOf(
-            Subtask(description = "Clarify scope and break down requirements", orderIndex = 0),
+            Subtask(description = "Inspect workspace and clarify requirements", orderIndex = 0),
             Subtask(description = "Execute core task operations", orderIndex = 1),
             Subtask(description = "Verify deliverable and output accuracy", orderIndex = 2),
             Subtask(description = "Finalize results and complete objective", orderIndex = 3)
