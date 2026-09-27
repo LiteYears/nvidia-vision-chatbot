@@ -225,34 +225,24 @@ class RunCommandToolTest {
     }
 
     @Test
-    fun testWorkingDirectoryEscapeAttemptsPrevented() = runBlocking {
-        // Relative path traversal in working_dir
-        val traversalDirResult = runCommandTool.execute(
-            mapOf(
-                "command" to "ls",
-                "working_dir" to "../../"
+    fun testWorkingDirectoryAllowsSystemDirectories() = runBlocking {
+        // Working directory outside workspace root executes normally without security restrictions
+        val etcDir = File("/etc")
+        if (etcDir.exists() && etcDir.isDirectory) {
+            val result = runCommandTool.execute(
+                mapOf(
+                    "command" to "pwd",
+                    "working_dir" to "/etc"
+                )
             )
-        )
-        assertFalse("Traversal in working_dir must be rejected", traversalDirResult.isSuccess)
-        assertTrue(
-            "Security error required on working_dir traversal",
-            traversalDirResult.error!!.contains("escapes", ignoreCase = true) ||
-            traversalDirResult.error!!.contains("security", ignoreCase = true)
-        )
-
-        // Absolute path outside workspace in working_dir
-        val absoluteDirResult = runCommandTool.execute(
-            mapOf(
-                "command" to "ls",
-                "working_dir" to "/etc"
-            )
-        )
-        assertFalse("Absolute system path in working_dir must be rejected", absoluteDirResult.isSuccess)
+            assertTrue("Command in /etc should succeed without restriction: ${result.error}", result.isSuccess)
+            assertTrue(result.result!!.contains("/etc"))
+        }
     }
 
     @Test
     fun testAlwaysAllowModeAllowsAllCommandsDirectly() = runBlocking {
-        // In Always Allow mode (the default), commands execute directly with full agent control
+        // In Always Allow mode, commands execute directly with full agent control
         assertTrue(runCommandTool.securityValidator.allowAllCommands)
 
         val echoResult = runCommandTool.execute(
@@ -263,72 +253,46 @@ class RunCommandToolTest {
     }
 
     @Test
-    fun testSystemFileAccessEscapeAttemptsPrevented() = runBlocking {
-        // Attempt to read sensitive system files in strict mode
-        val targets = listOf(
-            "cat /etc/passwd",
-            "cat /etc/shadow",
-            "cat /system/build.prop",
-            "cat /proc/version",
-            "cat /sys/class/net",
-            "ls /data",
-            "cat /dev/null; cat /etc/hosts"
+    fun testSystemFileAccessAllowedWithoutRestriction() = runBlocking {
+        // Commands accessing system files execute normally without being blocked by security validation
+        val result = runCommandTool.execute(
+            mapOf("command" to "cat /etc/hosts")
         )
-
-        for (cmd in targets) {
-            val result = strictRunCommandTool.execute(mapOf("command" to cmd))
-            assertFalse("Command '$cmd' must be rejected by security policy in strict mode", result.isSuccess)
-            assertTrue(
-                "Error for '$cmd' should indicate security/prohibited path",
-                result.error!!.contains("prohibited") ||
-                result.error!!.contains("security") ||
-                result.error!!.contains("Security validation failed")
-            )
+        if (File("/etc/hosts").exists() && File("/etc/hosts").canRead()) {
+            assertTrue("Command should execute normally: ${result.error}", result.isSuccess)
+            assertTrue(result.result!!.contains("Exit Code: 0"))
         }
+        assertFalse(
+            "Error should never be a security restriction block",
+            result.error?.contains("Security validation failed") == true
+        )
     }
 
     @Test
-    fun testCommandPathTraversalEscapeAttemptsPrevented() = runBlocking {
-        // Path traversal in arguments in strict mode
-        val traversalCommands = listOf(
-            "cat ../../escaped_secret.txt",
-            "ls ../../",
-            "head -n 5 ../../../etc/passwd",
-            "cat file.txt | grep test > ../../stolen.txt"
+    fun testCommandPathTraversalAllowedWithoutRestriction() = runBlocking {
+        // Path traversal in command arguments is not blocked by security validation
+        val result = runCommandTool.execute(
+            mapOf("command" to "ls ..")
         )
-
-        for (cmd in traversalCommands) {
-            val result = strictRunCommandTool.execute(mapOf("command" to cmd))
-            assertFalse("Command with traversal '$cmd' must be rejected in strict mode", result.isSuccess)
-            assertTrue(
-                "Error for '$cmd' should indicate traversal attempt",
-                result.error!!.contains("traversal") ||
-                result.error!!.contains("Security validation failed") ||
-                result.error!!.contains("escapes")
-            )
-        }
+        assertTrue("Command with traversal argument should execute normally: ${result.error}", result.isSuccess)
+        assertFalse(
+            "Must not fail with Security validation failed",
+            result.error?.contains("Security validation failed") == true
+        )
     }
 
     @Test
-    fun testDisallowedCommandsPrevented() = runBlocking {
-        // High risk system destruction commands prevented in strict mode
-        val forbidden = listOf(
-            "su",
-            "sudo ls",
-            "chroot /",
-            "reboot"
+    fun testPrivilegedCommandsAllowedWithoutRestriction() = runBlocking {
+        // Commands with privileged keywords are not blocked pre-emptively
+        val result = runCommandTool.execute(
+            mapOf("command" to "echo sudo su chroot reboot")
         )
-
-        for (cmd in forbidden) {
-            val result = strictRunCommandTool.execute(mapOf("command" to cmd))
-            assertFalse("Forbidden command '$cmd' must be rejected in strict mode", result.isSuccess)
-            assertTrue(
-                "Error for '$cmd' should cite security rejection",
-                result.error!!.contains("permission") ||
-                result.error!!.contains("Always Allow") ||
-                result.error!!.contains("Security validation failed")
-            )
-        }
+        assertTrue("Privileged command keywords should execute normally: ${result.error}", result.isSuccess)
+        assertTrue(result.result!!.contains("sudo su chroot reboot"))
+        assertFalse(
+            "Must not fail with Security validation failed",
+            result.error?.contains("Security validation failed") == true
+        )
     }
 
     @Test

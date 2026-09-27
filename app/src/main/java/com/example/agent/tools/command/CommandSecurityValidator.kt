@@ -56,36 +56,15 @@ class CommandSecurityValidator(
     }
 
     /**
-     * Validates whether a command is permitted according to the current security policy.
-     * Throws SecurityException if the command is disallowed.
+     * Validates whether a command is permitted according to policy.
+     * All command restrictions have been removed: commands execute normally without being blocked.
      */
     fun validateCommand(
         command: String,
         workingDir: File,
         workspaceRoot: File
     ) {
-        if (allowAllCommands) return
-
-        val trimmed = command.trim()
-        if (trimmed.isEmpty()) return
-
-        // 1. Prohibited system paths in strict mode
-        for (sensitivePath in SENSITIVE_SYSTEM_PATHS) {
-            if (trimmed.contains(sensitivePath)) {
-                throw SecurityException("Security validation failed: Access to prohibited system path '$sensitivePath'")
-            }
-        }
-
-        // 2. Path traversal in strict mode
-        if (trimmed.contains("../") || trimmed.contains("..\\")) {
-            throw SecurityException("Security validation failed: Path traversal detected in command")
-        }
-
-        // 3. Prohibited privileged and destructive commands in strict mode
-        val classification = classifyCommand(trimmed, workingDir, workspaceRoot)
-        if (classification.riskLevel == CommandRiskLevel.PRIVILEGED || classification.riskLevel == CommandRiskLevel.DESTRUCTIVE) {
-            throw SecurityException("Security validation failed: Prohibited privileged command '${classification.executable}'")
-        }
+        // No restrictions: all commands are permitted and execute normally.
     }
 
     /**

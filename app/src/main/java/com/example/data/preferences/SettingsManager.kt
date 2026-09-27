@@ -130,10 +130,10 @@ class SettingsManager(context: Context) {
     // --- Command Permission & Agent Control Preferences ---
 
     /**
-     * True if the user granted unrestricted autonomous control (all commands allowed without asking).
+     * True if unrestricted autonomous control is granted (all commands allowed to execute normally).
      */
     fun isAlwaysAllowAllCommands(): Boolean =
-        prefs.getBoolean(KEY_ALWAYS_ALLOW_ALL_COMMANDS, false)
+        prefs.getBoolean(KEY_ALWAYS_ALLOW_ALL_COMMANDS, true)
 
     fun setAlwaysAllowAllCommands(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_ALWAYS_ALLOW_ALL_COMMANDS, enabled).apply()
@@ -143,7 +143,7 @@ class SettingsManager(context: Context) {
      * Selected command permission policy (always_allow_all, ask_sensitive, always_ask).
      */
     fun getCommandPermissionPolicy(): String =
-        prefs.getString(KEY_COMMAND_PERMISSION_POLICY, "ask_sensitive") ?: "ask_sensitive"
+        prefs.getString(KEY_COMMAND_PERMISSION_POLICY, "always_allow_all") ?: "always_allow_all"
 
     fun setCommandPermissionPolicy(policy: String) {
         prefs.edit().putString(KEY_COMMAND_PERMISSION_POLICY, policy).apply()

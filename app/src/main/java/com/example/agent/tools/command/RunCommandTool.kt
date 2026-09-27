@@ -21,22 +21,20 @@ class RunCommandTool(
 
     override val definition: ToolDefinition = ToolDefinition(
         name = "run_command",
-        description = "Executes a workspace-safe shell command or script strictly inside the active agent workspace. " +
-            "Runs with a controlled process runner enforcing strict execution timeouts, output size limits, " +
-            "and sandboxing. Returns stdout, stderr, exit code, and execution duration. " +
-            "Supported commands include directory listing (ls, dir, tree), file inspection (cat, head, tail, wc, stat, find), " +
-            "text processing (grep, sed, awk, sort, uniq, cut, tr, echo, diff), and workspace scripts.",
+        description = "Executes shell commands, scripts, and terminal utilities. " +
+            "Returns stdout, stderr, exit code, and execution duration. " +
+            "Runs commands directly with controlled execution timeout and output buffer capture.",
         parameters = listOf(
             ToolParameter(
                 name = "command",
                 type = "string",
-                description = "The workspace command to execute (e.g. 'ls -la', 'cat notes.txt | grep topic', 'wc -l src/*')",
+                description = "The shell command to execute (e.g. 'ls -la', 'python script.py', 'git status', 'curl https://...')",
                 required = true
             ),
             ToolParameter(
                 name = "working_dir",
                 type = "string",
-                description = "Relative directory inside the workspace to execute within (default: '.' for workspace root)",
+                description = "Directory to execute within (default: '.' for workspace root)",
                 required = false,
                 default = "."
             ),
@@ -80,15 +78,15 @@ class RunCommandTool(
         val workspaceRoot = workspaceManager.getWorkspaceDir()
 
         // 1. Resolve and validate working directory
-        val resolvedWorkingDir: File
-        try {
-            resolvedWorkingDir = workspaceManager.resolvePath(workingDirArg)
-        } catch (e: SecurityException) {
-            return ToolResult.failure(
-                callId = callId,
-                toolName = definition.name,
-                error = "Working directory security error: ${e.message}"
-            )
+        val resolvedWorkingDir: File = if (workingDirArg.isBlank() || workingDirArg == "." || workingDirArg == "./") {
+            workspaceRoot
+        } else {
+            val candidate = File(workingDirArg)
+            if (candidate.isAbsolute) {
+                candidate.canonicalFile
+            } else {
+                File(workspaceRoot, workingDirArg).canonicalFile
+            }
         }
 
         if (!resolvedWorkingDir.exists() || !resolvedWorkingDir.isDirectory) {
@@ -120,16 +118,10 @@ class RunCommandTool(
             )
         }
 
-        // 3. Check for language runtimes that are unavailable in Android shell
         val primaryExecutable = rawCommand.trim().split(Regex("\\s+")).firstOrNull()?.trim('\'', '"') ?: ""
         val cleanExec = if (primaryExecutable.contains('/')) File(primaryExecutable).name else primaryExecutable
 
-        if (cleanExec.isNotBlank() && isLanguageRuntimeCommand(cleanExec) && !capabilityDetector.isExecutableAvailable(cleanExec)) {
-            val capError = capabilityDetector.buildCapabilityUnavailableError(cleanExec, rawCommand)
-            return ToolResult.failure(callId = callId, toolName = definition.name, error = capError)
-        }
-
-        // 4. Execute via modular CommandRunner
+        // 3. Execute via modular CommandRunner
         val execResult = commandRunner.run(
             command = rawCommand,
             workingDir = resolvedWorkingDir,
@@ -137,7 +129,11 @@ class RunCommandTool(
             maxOutputBytes = maxOutputBytes
         )
 
-        val relativeDir = workspaceManager.getRelativePath(resolvedWorkingDir).ifBlank { "." }
+        val relativeDir = try {
+            workspaceManager.getRelativePath(resolvedWorkingDir).ifBlank { "." }
+        } catch (_: Exception) {
+            resolvedWorkingDir.canonicalPath
+        }
 
         // 5. Return structured ToolResult
         return if (execResult.isTimedOut) {

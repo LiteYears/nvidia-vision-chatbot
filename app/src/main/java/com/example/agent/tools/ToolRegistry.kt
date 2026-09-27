@@ -2,6 +2,7 @@ package com.example.agent.tools
 
 import com.example.agent.capability.RuntimeCapabilityDetector
 import com.example.agent.tools.builtin.CalculatorTool
+import com.example.agent.tools.builtin.WebOpenTool
 import com.example.agent.tools.builtin.WebSearchTool
 import com.example.agent.tools.command.RunCommandTool
 import com.example.agent.tools.python.PythonExecuteTool
@@ -110,6 +111,15 @@ class ToolRegistry {
         sb.append("5. Re-run with `python_execute` to verify the fix.\n")
         sb.append("6. Only conclude when the script runs cleanly and yields the expected results.\n")
 
+        sb.append("\n### AUTONOMOUS WEB RESEARCH & SYNTHESIS FLOW\n")
+        sb.append("When querying technical documentation, real-time facts, or performing web research:\n")
+        sb.append("1. SEARCH: Query the web with `web_search` using precise keywords.\n")
+        sb.append("2. SELECT: Review search result titles and snippets to choose the most authoritative URLs.\n")
+        sb.append("3. OPEN: Fetch and inspect full page content using `web_open` (with `url`).\n")
+        sb.append("4. REASON: Analyze the extracted content, headings, and metadata.\n")
+        sb.append("5. MULTI-PAGE EXPLORATION: Open additional pages with `web_open` to cross-verify or gather missing details.\n")
+        sb.append("6. SYNTHESIZE: Provide a comprehensive final answer, explicitly citing the source URLs.\n")
+
         return sb.toString()
     }
 
@@ -145,6 +155,7 @@ class ToolRegistry {
             return ToolRegistry().apply {
                 register(CalculatorTool())
                 register(WebSearchTool())
+                register(WebOpenTool())
                 register(FileListTool(workspaceManager))
                 register(FileReadTool(workspaceManager))
                 register(FileWriteTool(workspaceManager))

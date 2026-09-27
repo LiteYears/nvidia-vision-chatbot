@@ -813,10 +813,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 "$toolsPrompt\n\n" +
                 "EXECUTION GUIDELINES:\n" +
                 "- If the goal requires creating, running, debugging, or fixing code, invoke the necessary tools immediately.\n" +
-                "- For Python tasks: Use 'file_write' to save scripts in workspace, then execute using 'python_execute'.\n" +
-                "- If execution produces an error or traceback, observe the diagnostics, update the file using 'file_write', and re-run with 'python_execute'.\n" +
-                "- Never use 'run_command' to run 'python', as Android shell does not contain python; always use 'python_execute'.\n" +
-                "- Only deliver your final response once the code execution has verified the desired output."
+                "- You can run shell commands, scripts, and terminal tools using 'run_command' without restrictions.\n" +
+                "- For Python tasks: Execute Python code using 'python_execute' or via 'run_command'.\n" +
+                "- For Web Research: Perform SEARCH -> SELECT RESULT -> OPEN PAGE ('web_open') -> READ CONTENT -> REASON -> OPEN ANOTHER PAGE -> SYNTHESIZE, citing source URLs.\n" +
+                "- If execution produces an error or traceback, observe the diagnostics, update files, and re-run.\n" +
+                "- Only deliver your final response once the execution has verified the desired output."
 
             executeAgentSessionTurn(
                 session = newSession,
@@ -1061,6 +1062,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         appendLine("\n[SUBTASK STATUS: Objective for \"${activeSubtask?.description}\" is currently RUNNING with output above. Note: A successful tool operation does not mark the subtask COMPLETED; you must verify that the subtask's objective was actually achieved.]")
                         if (record.toolName == "file_list" && record.result?.contains("empty") == true) {
                             appendLine("\n[WORKSPACE NOTE: The workspace is empty. Create any needed script files with 'file_write'.]")
+                        } else if (record.toolName == "web_search") {
+                            appendLine("\n[RESEARCH GUIDANCE: Review the search results above. Choose the most relevant URL and call 'web_open' with that URL to read the full page content.]")
+                        } else if (record.toolName == "web_open") {
+                            appendLine("\n[RESEARCH GUIDANCE: Page content retrieved. You may reason over this text, open another relevant URL with 'web_open' for comparison/depth, or synthesize your final findings with citations.]")
                         }
                     } else {
                         appendLine("Error: ${record.error}")

@@ -185,9 +185,9 @@ class RuntimeCapabilityDetector(
                 sb.append("  * Alternative: Use ${cap.alternatives.joinToString(", ") { "`$it`" }}\n")
             }
         }
-        sb.append("\n**CRITICAL EXECUTION RULE**:\n")
-        sb.append("Python is executed using the dedicated `python_execute` tool, NOT `run_command`.\n")
-        sb.append("All files and scripts are stored in the agent workspace root (use `file_write`, `file_read`, `file_list`).\n")
+        sb.append("\n**EXECUTION NOTES**:\n")
+        sb.append("Both `python_execute` and `run_command` are available for code and command execution without restrictions.\n")
+        sb.append("All files and scripts can be managed in the agent workspace root (use `file_write`, `file_read`, `file_list`).\n")
 
         return sb.toString()
     }
