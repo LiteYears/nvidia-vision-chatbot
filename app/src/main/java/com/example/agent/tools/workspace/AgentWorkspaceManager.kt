@@ -85,7 +85,7 @@ This workspace is pre-configured with standard development folders:
             gitignoreFile.writeText(
                 """__pycache__/
 *.py[cod]
-*$py.class
+*${'$'}py.class
 node_modules/
 .npm/
 *.tmp
@@ -359,6 +359,27 @@ node_modules/
     }
 
     /**
+     * Extracts a ZIP archive from an InputStream into a target subdirectory path within the workspace.
+     */
+    fun extractZipStream(
+        inputStream: java.io.InputStream,
+        targetSubdir: String,
+        overwrite: Boolean = true
+    ): ZipExtractResult {
+        val destDir = if (targetSubdir.isBlank() || targetSubdir == ".") {
+            getWorkspaceDir()
+        } else {
+            resolvePath(targetSubdir)
+        }
+        return extractZipStream(
+            inputStream = inputStream,
+            destinationDir = destDir,
+            archiveName = "archive.zip",
+            overwrite = overwrite
+        )
+    }
+
+    /**
      * Extracts a local ZIP file located inside the workspace into a destination directory.
      */
     fun extractZipFile(
@@ -521,5 +542,7 @@ data class ZipExtractResult(
     val extractedPaths: List<String>,
     val isSuccess: Boolean,
     val errorMessage: String? = null
-)
+) {
+    val error: String? get() = errorMessage
+}
 

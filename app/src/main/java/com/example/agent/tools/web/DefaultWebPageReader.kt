@@ -39,6 +39,11 @@ class DefaultWebPageReader(
 
     override suspend fun open(
         url: String,
+        maxChars: Int
+    ): Result<WebPageContent> = open(url, maxChars, 0, null)
+
+    override suspend fun open(
+        url: String,
         maxChars: Int,
         offset: Int,
         section: String?

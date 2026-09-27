@@ -11,6 +11,7 @@ package com.example.agent.tools
  */
 interface AgentTool {
     val definition: ToolDefinition
+    val name: String get() = definition.name
 
     /**
      * Executes the tool with the provided arguments.

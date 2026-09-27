@@ -34,5 +34,10 @@ interface WebPageReader {
         maxChars: Int = 4000,
         offset: Int = 0,
         section: String? = null
-    ): Result<WebPageContent>
+    ): Result<WebPageContent> = open(url, maxChars)
+
+    suspend fun open(
+        url: String,
+        maxChars: Int
+    ): Result<WebPageContent> = Result.failure(UnsupportedOperationException("Not implemented"))
 }

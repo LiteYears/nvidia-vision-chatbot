@@ -229,9 +229,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
                 val extractResult = withContext(Dispatchers.IO) {
                     inputStream.use { stream ->
+                        val destDir = if (targetSubdir.isBlank() || targetSubdir == ".") {
+                            workspaceManager.getWorkspaceDir()
+                        } else {
+                            workspaceManager.resolvePath(targetSubdir)
+                        }
                         workspaceManager.extractZipStream(
                             inputStream = stream,
-                            targetSubdir = targetSubdir,
+                            destinationDir = destDir,
+                            archiveName = fileName,
                             overwrite = true
                         )
                     }
@@ -268,7 +274,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     _uiState.update {
                         it.copy(
                             isAgentLoading = false,
-                            agentErrorMessage = "Failed to extract $fileName: ${extractResult.error}"
+                            agentErrorMessage = "Failed to extract $fileName: ${extractResult.errorMessage}"
                         )
                     }
                 }

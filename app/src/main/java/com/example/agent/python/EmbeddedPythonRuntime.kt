@@ -2819,8 +2819,8 @@ class PyHashObject(
     }
 }
 
-class PyModule(val name: String, val members: MutableMap<String, Any?>) {
-    constructor(name: String, membersMap: Map<String, Any?>) : this(name, membersMap.toMutableMap())
+class PyModule(val name: String, membersInput: Map<String, Any?> = emptyMap()) {
+    val members: MutableMap<String, Any?> = membersInput.toMutableMap()
     fun getMember(name: String): Any? = members[name]
 }
 

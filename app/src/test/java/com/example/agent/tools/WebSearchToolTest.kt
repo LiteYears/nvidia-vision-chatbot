@@ -12,6 +12,8 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.ResponseBody.Companion.toResponseBody
 
 class WebSearchToolTest {
 
@@ -187,7 +189,7 @@ class WebSearchToolTest {
                     .code(200)
                     .message("OK")
                     .header("Content-Type", "application/rss+xml")
-                    .body(okhttp3.ResponseBody.create(okhttp3.MediaType.parse("application/rss+xml"), rssResponse))
+                    .body(rssResponse.toResponseBody("application/rss+xml".toMediaType()))
                     .build()
             }
             .build()
@@ -226,14 +228,14 @@ class WebSearchToolTest {
 
         val mockClient = okhttp3.OkHttpClient.Builder()
             .addInterceptor { chain ->
-                val url = chain.request().url().toString()
+                val url = chain.request().url.toString()
                 if (url.contains("bing.com")) {
                     okhttp3.Response.Builder()
                         .request(chain.request())
                         .protocol(okhttp3.Protocol.HTTP_1_1)
                         .code(503)
                         .message("Service Unavailable")
-                        .body(okhttp3.ResponseBody.create(okhttp3.MediaType.parse("text/plain"), "Bing down"))
+                        .body("Bing down".toResponseBody("text/plain".toMediaType()))
                         .build()
                 } else if (url.contains("duckduckgo.com")) {
                     okhttp3.Response.Builder()
@@ -242,7 +244,7 @@ class WebSearchToolTest {
                         .code(200)
                         .message("OK")
                         .header("Content-Type", "application/json")
-                        .body(okhttp3.ResponseBody.create(okhttp3.MediaType.parse("application/json"), ddgJson))
+                        .body(ddgJson.toResponseBody("application/json".toMediaType()))
                         .build()
                 } else {
                     okhttp3.Response.Builder()
@@ -250,7 +252,7 @@ class WebSearchToolTest {
                         .protocol(okhttp3.Protocol.HTTP_1_1)
                         .code(404)
                         .message("Not Found")
-                        .body(okhttp3.ResponseBody.create(okhttp3.MediaType.parse("text/plain"), "Not Found"))
+                        .body("Not Found".toResponseBody("text/plain".toMediaType()))
                         .build()
                 }
             }
@@ -281,7 +283,7 @@ class WebSearchToolTest {
 
         val mockClient = okhttp3.OkHttpClient.Builder()
             .addInterceptor { chain ->
-                val url = chain.request().url().toString()
+                val url = chain.request().url.toString()
                 if (url.contains("wikipedia.org")) {
                     okhttp3.Response.Builder()
                         .request(chain.request())
@@ -289,7 +291,7 @@ class WebSearchToolTest {
                         .code(200)
                         .message("OK")
                         .header("Content-Type", "application/json")
-                        .body(okhttp3.ResponseBody.create(okhttp3.MediaType.parse("application/json"), wikiJson))
+                        .body(wikiJson.toResponseBody("application/json".toMediaType()))
                         .build()
                 } else {
                     // Bing & DDG empty
@@ -298,7 +300,7 @@ class WebSearchToolTest {
                         .protocol(okhttp3.Protocol.HTTP_1_1)
                         .code(200)
                         .message("OK")
-                        .body(okhttp3.ResponseBody.create(okhttp3.MediaType.parse("text/plain"), ""))
+                        .body("".toResponseBody("text/plain".toMediaType()))
                         .build()
                 }
             }
@@ -331,7 +333,7 @@ class WebSearchToolTest {
 
         val mockClient = okhttp3.OkHttpClient.Builder()
             .addInterceptor { chain ->
-                val url = chain.request().url().toString()
+                val url = chain.request().url.toString()
                 if (url.contains("algolia.com")) {
                     okhttp3.Response.Builder()
                         .request(chain.request())
@@ -339,7 +341,7 @@ class WebSearchToolTest {
                         .code(200)
                         .message("OK")
                         .header("Content-Type", "application/json")
-                        .body(okhttp3.ResponseBody.create(okhttp3.MediaType.parse("application/json"), hnJson))
+                        .body(hnJson.toResponseBody("application/json".toMediaType()))
                         .build()
                 } else {
                     okhttp3.Response.Builder()
@@ -347,7 +349,7 @@ class WebSearchToolTest {
                         .protocol(okhttp3.Protocol.HTTP_1_1)
                         .code(200)
                         .message("OK")
-                        .body(okhttp3.ResponseBody.create(okhttp3.MediaType.parse("text/plain"), ""))
+                        .body("".toResponseBody("text/plain".toMediaType()))
                         .build()
                 }
             }
