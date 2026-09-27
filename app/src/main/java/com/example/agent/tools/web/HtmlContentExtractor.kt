@@ -114,9 +114,12 @@ object HtmlContentExtractor {
         val articleMatch = ARTICLE_REGEX.matcher(cleaned)
         val mainMatch = MAIN_REGEX.matcher(cleaned)
 
+        val articleGroup = if (articleMatch.find()) articleMatch.group(1) else null
+        val mainGroup = if (mainMatch.find()) mainMatch.group(1) else null
+
         val targetedContent = when {
-            articleMatch.find() && articleMatch.group(1).length > 200 -> articleMatch.group(1)
-            mainMatch.find() && mainMatch.group(1).length > 200 -> mainMatch.group(1)
+            articleGroup != null && articleGroup.length > 200 -> articleGroup
+            mainGroup != null && mainGroup.length > 200 -> mainGroup
             else -> cleaned
         }
 
