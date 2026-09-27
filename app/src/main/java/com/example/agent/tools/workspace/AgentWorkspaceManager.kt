@@ -43,12 +43,15 @@ class AgentWorkspaceManager(
         val trimmed = relativePath.trim()
         val workspaceRoot = getWorkspaceDir(sessionId)
 
-        val target = if (trimmed.isEmpty() || trimmed == "." || trimmed == "./") {
+        val target = if (trimmed.isEmpty() || trimmed == "." || trimmed == "./" || trimmed == "/") {
             workspaceRoot
         } else {
-            // Strip leading slashes to prevent root escapes
-            val normalizedRel = trimmed.trimStart('/', '\\')
-            File(workspaceRoot, normalizedRel).canonicalFile
+            val fileCandidate = File(trimmed)
+            if (fileCandidate.isAbsolute) {
+                fileCandidate.canonicalFile
+            } else {
+                File(workspaceRoot, trimmed).canonicalFile
+            }
         }
 
         val rootPath = workspaceRoot.canonicalPath

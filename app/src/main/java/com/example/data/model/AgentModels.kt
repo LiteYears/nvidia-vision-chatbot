@@ -1,5 +1,6 @@
 package com.example.data.model
 
+import com.example.agent.plan.TaskPlan
 import java.util.UUID
 
 enum class AppMode {
@@ -45,6 +46,7 @@ data class AgentSession(
     val updatedAt: Long = System.currentTimeMillis(),
     val modelUsed: String = "deepseek-ai/deepseek-v4.1-flash",
     val steps: List<AgentStep> = emptyList(),
+    val plan: TaskPlan? = null,
     val messages: List<ChatMessage> = emptyList(),
     val toolExecutions: List<ToolExecutionRecord> = emptyList()
 )

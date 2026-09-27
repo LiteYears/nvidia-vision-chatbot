@@ -8,7 +8,9 @@ import java.io.File
  * supplies classification metadata to the Permission Manager, allowing the user
  * to "Allow Once", "Always Allow This Command", or "Always Allow All (Unrestricted)".
  */
-class CommandSecurityValidator {
+class CommandSecurityValidator(
+    var allowAllCommands: Boolean = true
+) {
 
     companion object {
         // Standard safe commands (file operations, text processing, basic inspection)
@@ -51,6 +53,39 @@ class CommandSecurityValidator {
             "/vendor", "/apex", "/mnt", "/product", "/system_ext",
             "/init", "/sbin"
         )
+    }
+
+    /**
+     * Validates whether a command is permitted according to the current security policy.
+     * Throws SecurityException if the command is disallowed.
+     */
+    fun validateCommand(
+        command: String,
+        workingDir: File,
+        workspaceRoot: File
+    ) {
+        if (allowAllCommands) return
+
+        val trimmed = command.trim()
+        if (trimmed.isEmpty()) return
+
+        // 1. Prohibited system paths in strict mode
+        for (sensitivePath in SENSITIVE_SYSTEM_PATHS) {
+            if (trimmed.contains(sensitivePath)) {
+                throw SecurityException("Security validation failed: Access to prohibited system path '$sensitivePath'")
+            }
+        }
+
+        // 2. Path traversal in strict mode
+        if (trimmed.contains("../") || trimmed.contains("..\\")) {
+            throw SecurityException("Security validation failed: Path traversal detected in command")
+        }
+
+        // 3. Prohibited privileged and destructive commands in strict mode
+        val classification = classifyCommand(trimmed, workingDir, workspaceRoot)
+        if (classification.riskLevel == CommandRiskLevel.PRIVILEGED || classification.riskLevel == CommandRiskLevel.DESTRUCTIVE) {
+            throw SecurityException("Security validation failed: Prohibited privileged command '${classification.executable}'")
+        }
     }
 
     /**

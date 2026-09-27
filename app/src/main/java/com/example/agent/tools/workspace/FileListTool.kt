@@ -41,7 +41,9 @@ class FileListTool(
 
     override suspend fun execute(arguments: Map<String, Any?>): ToolResult {
         val callId = UUID.randomUUID().toString()
-        val requestedPath = arguments["path"]?.toString()?.trim() ?: "."
+        val rawPath = arguments["path"]?.toString()?.trim() ?: "."
+        val isRootPath = rawPath.isEmpty() || rawPath == "." || rawPath == "./" || rawPath == "/"
+        val requestedPath = if (isRootPath) "." else rawPath
         val isRecursive = when (val r = arguments["recursive"]) {
             is Boolean -> r
             is String -> r.equals("true", ignoreCase = true)
@@ -89,7 +91,7 @@ class FileListTool(
         }
 
         if (filesList.isEmpty()) {
-            val cleanRel = if (requestedPath == "." || requestedPath.isEmpty()) "workspace root" else "'$requestedPath'"
+            val cleanRel = if (isRootPath) "workspace root" else "'$requestedPath'"
             return ToolResult.success(
                 callId = callId,
                 toolName = definition.name,
@@ -99,7 +101,7 @@ class FileListTool(
 
         val sortedFiles = filesList.sortedWith(compareBy({ !it.isDirectory }, { it.name }))
         val formatted = buildString {
-            val headerRel = if (requestedPath == "." || requestedPath.isEmpty()) "." else requestedPath
+            val headerRel = if (isRootPath) "." else requestedPath
             appendLine("Workspace files in \"$headerRel\" (${sortedFiles.size} items):")
             for (file in sortedFiles) {
                 val rel = workspaceManager.getRelativePath(file)

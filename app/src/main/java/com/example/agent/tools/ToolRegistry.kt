@@ -1,8 +1,10 @@
 package com.example.agent.tools
 
+import com.example.agent.capability.RuntimeCapabilityDetector
 import com.example.agent.tools.builtin.CalculatorTool
 import com.example.agent.tools.builtin.WebSearchTool
 import com.example.agent.tools.command.RunCommandTool
+import com.example.agent.tools.python.PythonExecuteTool
 import com.example.agent.tools.workspace.AgentWorkspaceManager
 import com.example.agent.tools.workspace.FileDeleteTool
 import com.example.agent.tools.workspace.FileListTool
@@ -96,7 +98,17 @@ class ToolRegistry {
         sb.append("}\n")
         sb.append("```\n")
         sb.append("When you output a tool call, the tool will be executed and the structured result returned back to you.\n")
-        sb.append("If no tool is required, respond directly with your analysis and roadmap without tool_call tags.\n")
+        sb.append("If no tool is required, respond directly with your analysis and roadmap without tool_call tags.\n\n")
+
+        sb.append(RuntimeCapabilityDetector().formatCapabilitiesForPrompt())
+        sb.append("\n### AUTONOMOUS CODING & DEBUGGING FLOW\n")
+        sb.append("When asked to write, run, debug, or fix scripts:\n")
+        sb.append("1. Write the code to a file using `file_write` (e.g. `script.py`).\n")
+        sb.append("2. Execute it using `python_execute` (with `script_path`: \"script.py\").\n")
+        sb.append("3. If an error or traceback occurs, inspect the line number and exception details.\n")
+        sb.append("4. Fix the code by overwriting the file with `file_write`.\n")
+        sb.append("5. Re-run with `python_execute` to verify the fix.\n")
+        sb.append("6. Only conclude when the script runs cleanly and yields the expected results.\n")
 
         return sb.toString()
     }
@@ -128,9 +140,7 @@ class ToolRegistry {
          * Creates a default ToolRegistry pre-configured with built-in tools.
          */
         fun defaultRegistry(
-            workspaceManager: AgentWorkspaceManager = AgentWorkspaceManager.getInstance(),
-            settingsManager: com.example.data.preferences.SettingsManager? = null,
-            authorizer: com.example.agent.tools.command.CommandAuthorizer? = null
+            workspaceManager: AgentWorkspaceManager = AgentWorkspaceManager.getInstance()
         ): ToolRegistry {
             return ToolRegistry().apply {
                 register(CalculatorTool())
@@ -139,13 +149,8 @@ class ToolRegistry {
                 register(FileReadTool(workspaceManager))
                 register(FileWriteTool(workspaceManager))
                 register(FileDeleteTool(workspaceManager))
-                register(
-                    RunCommandTool(
-                        workspaceManager = workspaceManager,
-                        settingsManager = settingsManager,
-                        authorizer = authorizer
-                    )
-                )
+                register(RunCommandTool(workspaceManager))
+                register(PythonExecuteTool(workspaceManager))
             }
         }
     }

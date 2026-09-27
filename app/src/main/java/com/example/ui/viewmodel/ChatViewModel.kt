@@ -9,6 +9,9 @@ import android.speech.tts.TextToSpeech
 import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.agent.plan.SubtaskStatus
+import com.example.agent.plan.TaskPlan
+import com.example.agent.plan.TaskPlanner
 import com.example.agent.tools.ToolCall
 import com.example.agent.tools.ToolCallParser
 import com.example.agent.tools.ToolRegistry
@@ -28,6 +31,7 @@ import com.example.data.preferences.SettingsManager
 import com.example.data.rag.RagDocument
 import com.example.data.rag.RagEngine
 import com.example.data.remote.NvidiaApiClient
+import com.example.data.repository.AgentPlanRepository
 import com.example.data.repository.ChatRepository
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -37,12 +41,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import com.example.agent.tools.command.CommandAuthorizer
-import com.example.agent.tools.command.CommandClassification
-import com.example.agent.tools.command.CommandPermissionDecision
-import com.example.agent.tools.command.CommandPermissionPolicy
-import com.example.agent.tools.command.PendingCommandPermission
-import kotlinx.coroutines.CompletableDeferred
 import java.io.ByteArrayOutputStream
 import java.util.Locale
 import java.util.UUID
@@ -84,29 +82,24 @@ data class ChatUiState(
     val agentSessions: List<AgentSession> = emptyList(),
     val agentInputText: String = "",
     val isAgentLoading: Boolean = false,
-    val agentErrorMessage: String? = null,
-    val pendingCommandPermission: PendingCommandPermission? = null,
-    val isCommandPermissionsDialogOpen: Boolean = false,
-    val isAlwaysAllowAllCommands: Boolean = false,
-    val commandPermissionPolicy: String = CommandPermissionPolicy.ASK_FOR_SENSITIVE.id,
-    val alwaysAllowedCommands: Set<String> = emptySet()
+    val agentErrorMessage: String? = null
 )
 
-class ChatViewModel(application: Application) : AndroidViewModel(application), CommandAuthorizer {
+class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private val database = ChatDatabase.getDatabase(application)
     private val settingsManager = SettingsManager(application)
     private val apiClient = NvidiaApiClient { settingsManager.getEffectiveApiKey() }
     private val repository = ChatRepository(database.chatDao(), settingsManager, apiClient)
+    private val agentPlanRepository = AgentPlanRepository(database.agentPlanDao())
+    private val taskPlanner = TaskPlanner()
     private val workspaceManager = AgentWorkspaceManager(File(application.filesDir, "agent_workspaces"))
-    private val toolRegistry = ToolRegistry.defaultRegistry(
-        workspaceManager = workspaceManager,
-        settingsManager = settingsManager,
-        authorizer = this
-    )
+    private val toolRegistry = ToolRegistry.defaultRegistry(workspaceManager)
 
     fun getToolRegistry(): ToolRegistry = toolRegistry
     fun getWorkspaceManager(): AgentWorkspaceManager = workspaceManager
+    fun getAgentPlanRepository(): AgentPlanRepository = agentPlanRepository
+    fun getTaskPlanner(): TaskPlanner = taskPlanner
 
     private val _uiState = MutableStateFlow(
         ChatUiState(
@@ -118,10 +111,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), C
             systemPrompt = settingsManager.getSystemPrompt(),
             temperature = settingsManager.getTemperature(),
             topP = settingsManager.getTopP(),
-            maxTokens = settingsManager.getMaxTokens(),
-            isAlwaysAllowAllCommands = settingsManager.isAlwaysAllowAllCommands(),
-            commandPermissionPolicy = settingsManager.getCommandPermissionPolicy(),
-            alwaysAllowedCommands = settingsManager.getAlwaysAllowedCommands()
+            maxTokens = settingsManager.getMaxTokens()
         )
     )
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
@@ -136,6 +126,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), C
         viewModelScope.launch {
             repository.allConversations.collectLatest { convs ->
                 _uiState.update { it.copy(conversations = convs) }
+            }
+        }
+
+        // Load persisted Agent sessions and task plans
+        viewModelScope.launch {
+            try {
+                val savedSessions = agentPlanRepository.getAllAgentSessions()
+                if (savedSessions.isNotEmpty()) {
+                    _uiState.update { it.copy(agentSessions = savedSessions) }
+                }
+            } catch (_: Exception) {
             }
         }
 
@@ -635,6 +636,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), C
                 agentErrorMessage = null
             )
         }
+        viewModelScope.launch {
+            try {
+                val plan = agentPlanRepository.getPlan(session.id)
+                if (plan != null && _uiState.value.currentAgentSession?.id == session.id) {
+                    val updated = _uiState.value.currentAgentSession!!.copy(plan = plan)
+                    _uiState.update { state ->
+                        state.copy(
+                            currentAgentSession = updated,
+                            agentSessions = state.agentSessions.map { if (it.id == updated.id) updated else it }
+                        )
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
     }
 
     fun deleteAgentSession(sessionId: String) {
@@ -646,6 +662,49 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), C
                 agentSessions = updatedSessions,
                 currentAgentSession = newCurrent
             )
+        }
+        viewModelScope.launch {
+            try {
+                agentPlanRepository.deleteAgentSession(sessionId)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    fun retrySubtask(subtaskId: String) {
+        val current = _uiState.value.currentAgentSession ?: return
+        val plan = current.plan ?: return
+        val updatedPlan = taskPlanner.retrySubtask(plan, subtaskId)
+        updateSessionPlan(updatedPlan)
+    }
+
+    fun verifySubtask(subtaskId: String) {
+        val current = _uiState.value.currentAgentSession ?: return
+        val plan = current.plan ?: return
+        val updatedPlan = taskPlanner.verifyAndCompleteSubtask(plan, subtaskId, "Verified objective achieved")
+        updateSessionPlan(updatedPlan)
+    }
+
+    private fun updateSessionPlan(plan: TaskPlan) {
+        _uiState.update { cur ->
+            val curSession = cur.currentAgentSession ?: return@update cur
+            val updatedStatus = if (plan.isCompleted) AgentTaskStatus.COMPLETED else curSession.status
+            val s = curSession.copy(
+                plan = plan,
+                status = updatedStatus,
+                updatedAt = System.currentTimeMillis()
+            )
+            cur.copy(
+                currentAgentSession = s,
+                agentSessions = cur.agentSessions.map { if (it.id == curSession.id) s else it }
+            )
+        }
+        viewModelScope.launch {
+            try {
+                agentPlanRepository.savePlan(plan)
+                _uiState.value.currentAgentSession?.let { agentPlanRepository.saveAgentSession(it) }
+            } catch (_: Exception) {
+            }
         }
     }
 
@@ -716,6 +775,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), C
             timestamp = now + 1
         )
 
+        val initialPlan = taskPlanner.createInitialPlan(sessionId, trimmedGoal, MAX_AUTONOMOUS_TOOL_STEPS)
+
         val newSession = AgentSession(
             id = sessionId,
             goal = trimmedGoal,
@@ -724,6 +785,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), C
             updatedAt = now,
             modelUsed = state.selectedModel,
             steps = initialSteps,
+            plan = initialPlan,
             messages = listOf(userGoalMessage, streamingAssistantMessage)
         )
 
@@ -737,16 +799,24 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), C
             )
         }
 
+        viewModelScope.launch {
+            try {
+                agentPlanRepository.saveAgentSession(newSession)
+            } catch (_: Exception) {
+            }
+        }
+
         agentGenerationJob = viewModelScope.launch {
             val toolsPrompt = toolRegistry.formatToolsForPrompt()
-            val agentSystemPrompt = "You are an autonomous NVIDIA Vision Agent. The user has set the following objective/goal:\n\n\"$trimmedGoal\"\n\n" +
-                "Provide a structured task roadmap. Outline:\n" +
-                "1. Objective Analysis & Scope\n" +
-                "2. Strategic Milestones\n" +
-                "3. Key Considerations & Trade-offs\n" +
-                "4. Immediate Next Steps\n\n" +
+            val agentSystemPrompt = "You are an autonomous engineering agent with coding and execution tools.\n\n" +
+                "USER OBJECTIVE: \"$trimmedGoal\"\n\n" +
                 "$toolsPrompt\n\n" +
-                "Keep your response concise, well-structured, and formatted with clean Markdown headings and bullet points."
+                "EXECUTION GUIDELINES:\n" +
+                "- If the goal requires creating, running, debugging, or fixing code, invoke the necessary tools immediately.\n" +
+                "- For Python tasks: Use 'file_write' to save scripts in workspace, then execute using 'python_execute'.\n" +
+                "- If execution produces an error or traceback, observe the diagnostics, update the file using 'file_write', and re-run with 'python_execute'.\n" +
+                "- Never use 'run_command' to run 'python', as Android shell does not contain python; always use 'python_execute'.\n" +
+                "- Only deliver your final response once the code execution has verified the desired output."
 
             executeAgentSessionTurn(
                 session = newSession,
@@ -821,7 +891,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), C
     }
 
     companion object {
-        private const val MAX_AUTONOMOUS_TOOL_STEPS = 6
+        private const val MAX_AUTONOMOUS_TOOL_STEPS = 10
     }
 
     private fun updateAgentSessionStatus(status: AgentTaskStatus) {
@@ -878,19 +948,32 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), C
             .filterNot { it.id == userMessage.id }
             .toMutableList()
 
+        var currentPlan = session.plan ?: taskPlanner.createInitialPlan(session.id, session.goal, MAX_AUTONOMOUS_TOOL_STEPS)
+        updateSessionPlan(currentPlan)
+
         var currentTurnMessage = userMessage
         var toolStepCount = 0
         var loopActive = true
 
-        while (loopActive && toolStepCount < MAX_AUTONOMOUS_TOOL_STEPS) {
+        while (loopActive && toolStepCount < MAX_AUTONOMOUS_TOOL_STEPS && !currentPlan.isStepLimitExceeded) {
+            // Ensure an active subtask is assigned and set to RUNNING
+            if (currentPlan.activeSubtask == null || currentPlan.activeSubtask?.status == SubtaskStatus.COMPLETED) {
+                currentPlan = taskPlanner.startNextSubtask(currentPlan)
+                updateSessionPlan(currentPlan)
+            }
+            val activeSubtask = currentPlan.activeSubtask
+
             // 1. STATE: THINKING
             updateAgentSessionStatus(AgentTaskStatus.THINKING)
+
+            val planPromptSnippet = taskPlanner.formatPlanForPrompt(currentPlan)
+            val fullSystemPrompt = "$systemPrompt\n\n$planPromptSnippet"
 
             val attemptResult = repository.requestAiCompletion(
                 history = historyMessages,
                 userMessage = currentTurnMessage,
                 modelName = state.selectedModel,
-                systemPrompt = systemPrompt,
+                systemPrompt = fullSystemPrompt,
                 temperature = state.temperature,
                 topP = state.topP,
                 maxTokens = state.maxTokens
@@ -903,19 +986,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), C
             }
 
             val rawResponse = attemptResult.getOrThrow()
+
+            // Dynamic agent plan update detection
+            val dynamicPlan = taskPlanner.parsePlanFromAgentOutput(rawResponse, currentPlan)
+            if (dynamicPlan != null) {
+                currentPlan = dynamicPlan
+                updateSessionPlan(currentPlan)
+            }
+
             val toolCall = ToolCallParser.parse(rawResponse)
 
             if (toolCall != null) {
                 toolStepCount++
+                currentPlan = taskPlanner.incrementStep(currentPlan)
 
                 // 2. STATE: USING_TOOL
                 updateAgentSessionStatus(AgentTaskStatus.USING_TOOL)
 
                 val preToolNarrative = ToolCallParser.stripToolCalls(rawResponse)
                 val intermediateContent = if (preToolNarrative.isNotBlank()) {
-                    "$preToolNarrative\n\n*(Step $toolStepCount/$MAX_AUTONOMOUS_TOOL_STEPS: Using tool '${toolCall.toolName}')*"
+                    "$preToolNarrative\n\n*(Step ${currentPlan.stepCount}/${currentPlan.maxSteps}: Subtask: ${activeSubtask?.description ?: "Executing"} | Tool: '${toolCall.toolName}')*"
                 } else {
-                    "*(Step $toolStepCount/$MAX_AUTONOMOUS_TOOL_STEPS: Using tool '${toolCall.toolName}')*"
+                    "*(Step ${currentPlan.stepCount}/${currentPlan.maxSteps}: Subtask: ${activeSubtask?.description ?: "Executing"} | Tool: '${toolCall.toolName}')*"
                 }
 
                 updateAssistantStreamingContent(assistantMessageId, intermediateContent)
@@ -936,6 +1028,26 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), C
                 // Store tool execution record in active session
                 addToolExecutionToSession(record)
 
+                if (toolResult.isSuccess) {
+                    // Update relevant subtask with intermediate result without marking it COMPLETED
+                    currentPlan = taskPlanner.recordToolSuccess(
+                        plan = currentPlan,
+                        subtaskId = activeSubtask?.id,
+                        toolName = toolCall.toolName,
+                        toolResult = toolResult.result ?: ""
+                    )
+                    updateSessionPlan(currentPlan)
+                } else {
+                    // Record failure and allow retry or alternative
+                    currentPlan = taskPlanner.recordToolFailure(
+                        plan = currentPlan,
+                        subtaskId = activeSubtask?.id,
+                        toolName = toolCall.toolName,
+                        error = toolResult.error ?: "Unknown error"
+                    )
+                    updateSessionPlan(currentPlan)
+                }
+
                 // 3. STATE: OBSERVING
                 updateAgentSessionStatus(AgentTaskStatus.OBSERVING)
                 delay(120L)
@@ -946,14 +1058,24 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), C
                     appendLine("Status: ${if (record.isSuccess) "SUCCESS" else "FAILURE"}")
                     if (record.isSuccess) {
                         appendLine("Result: ${record.result}")
+                        appendLine("\n[SUBTASK STATUS: Objective for \"${activeSubtask?.description}\" is currently RUNNING with output above. Note: A successful tool operation does not mark the subtask COMPLETED; you must verify that the subtask's objective was actually achieved.]")
+                        if (record.toolName == "file_list" && record.result?.contains("empty") == true) {
+                            appendLine("\n[WORKSPACE NOTE: The workspace is empty. Create any needed script files with 'file_write'.]")
+                        }
                     } else {
                         appendLine("Error: ${record.error}")
+                        appendLine("\n[SUBTASK STATUS: Subtask \"${activeSubtask?.description}\" failed with tool ${record.toolName}. You may retry, use a different tool, or choose another approach.]")
+                        if (record.error?.contains("CAPABILITY_UNAVAILABLE") == true) {
+                            appendLine("\n[RECOVERY INSTRUCTION: The requested executable is not available in the Android shell. Switch to 'python_execute' for Python execution. Do NOT attempt shell package managers (apt, pkg, curl).]")
+                        } else if (record.error?.contains("SyntaxError") == true || record.error?.contains("Traceback") == true || record.error?.contains("Error Classification") == true) {
+                            appendLine("\n[DIAGNOSTIC GUIDANCE: A Python error occurred. Inspect the traceback and exception message above, modify the code with 'file_write', and re-run with 'python_execute' to verify the fix.]")
+                        }
                     }
-                    appendLine("Autonomous tool step $toolStepCount of $MAX_AUTONOMOUS_TOOL_STEPS complete.")
-                    if (toolStepCount >= MAX_AUTONOMOUS_TOOL_STEPS) {
-                        appendLine("Maximum tool steps reached. Deliver your final complete answer to the user now without any tool calls.")
+                    appendLine("Autonomous plan step ${currentPlan.stepCount} of ${currentPlan.maxSteps} executed.")
+                    if (currentPlan.isStepLimitExceeded) {
+                        appendLine("Maximum plan step limit reached. Deliver your final complete answer to the user now without any further tool calls.")
                     } else {
-                        appendLine("If you require another tool, output a ```tool_call``` block. Otherwise, deliver your final answer to conclude the task.")
+                        appendLine("If you require another tool, output a ```tool_call``` block. Once the subtask is verified or finished, deliver your answer or next plan steps.")
                     }
                 }
 
@@ -983,6 +1105,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), C
                 // Model provided its final answer (no tool call requested)
                 loopActive = false
 
+                // Verify active subtask
+                currentPlan = taskPlanner.verifyAndCompleteSubtask(
+                    plan = currentPlan,
+                    subtaskId = activeSubtask?.id,
+                    verificationNotes = "Verified by agent completion"
+                )
+                if (currentPlan.allSubtasksCompleted) {
+                    currentPlan = taskPlanner.checkAndCompleteOverallPlan(currentPlan)
+                }
+                updateSessionPlan(currentPlan)
+
                 streamAgentResponse(
                     assistantMessageId = assistantMessageId,
                     streamingAssistantMessage = streamingAssistantMessage,
@@ -993,21 +1126,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), C
             }
         }
 
-        // Fallback: If loop exited due to MAX_AUTONOMOUS_TOOL_STEPS limit
+        // Fallback: If loop exited due to step limit
         if (loopActive) {
             updateAgentSessionStatus(AgentTaskStatus.THINKING)
             val finalPrompt = ChatMessage(
                 id = UUID.randomUUID().toString(),
                 conversationId = session.id,
                 role = MessageRole.USER,
-                content = "You have completed $toolStepCount autonomous tool steps. Summarize all findings and provide your final response to the user now.",
+                content = "You have completed ${currentPlan.stepCount} autonomous plan steps (limit: ${currentPlan.maxSteps}). Summarize all findings and verify your subtasks to conclude.",
                 modelUsed = state.selectedModel
             )
             val finalResult = repository.requestAiCompletion(
                 history = historyMessages,
                 userMessage = finalPrompt,
                 modelName = state.selectedModel,
-                systemPrompt = systemPrompt,
+                systemPrompt = "$systemPrompt\n\n${taskPlanner.formatPlanForPrompt(currentPlan)}",
                 temperature = state.temperature,
                 topP = state.topP,
                 maxTokens = state.maxTokens
@@ -1015,7 +1148,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), C
 
             val finalReply = finalResult.getOrElse {
                 val lastTool = _uiState.value.currentAgentSession?.toolExecutions?.lastOrNull()
-                "Completed $toolStepCount autonomous tool steps. Last output: ${lastTool?.result ?: "Success"}."
+                "Completed ${currentPlan.stepCount} autonomous plan steps. Last output: ${lastTool?.result ?: "Success"}."
             }
 
             streamAgentResponse(
@@ -1129,96 +1262,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application), C
                 agentSessions = cur.agentSessions.map { if (it.id == curSession.id) s else it }
             )
         }
-    }
-
-    // --- Command Permission Authorization & Management ---
-
-    override suspend fun requestPermission(
-        command: String,
-        workingDir: String,
-        classification: CommandClassification
-    ): CommandPermissionDecision {
-        val deferred = CompletableDeferred<CommandPermissionDecision>()
-        _uiState.update {
-            it.copy(
-                pendingCommandPermission = PendingCommandPermission(
-                    id = UUID.randomUUID().toString(),
-                    command = command,
-                    workingDir = workingDir,
-                    riskLevel = classification.riskLevel,
-                    details = classification.description,
-                    executable = classification.executable,
-                    onDecision = { decision ->
-                        if (deferred.isActive) {
-                            deferred.complete(decision)
-                        }
-                    }
-                )
-            )
-        }
-
-        return try {
-            deferred.await()
-        } catch (e: Exception) {
-            CommandPermissionDecision.DENY
-        } finally {
-            _uiState.update { it.copy(pendingCommandPermission = null) }
-        }
-    }
-
-    fun onCommandPermissionDecision(decision: CommandPermissionDecision) {
-        val pending = _uiState.value.pendingCommandPermission ?: return
-        pending.onDecision(decision)
-        _uiState.update {
-            it.copy(
-                isAlwaysAllowAllCommands = settingsManager.isAlwaysAllowAllCommands(),
-                alwaysAllowedCommands = settingsManager.getAlwaysAllowedCommands(),
-                commandPermissionPolicy = settingsManager.getCommandPermissionPolicy()
-            )
-        }
-    }
-
-    fun setCommandPermissionsDialogOpen(isOpen: Boolean) {
-        _uiState.update { it.copy(isCommandPermissionsDialogOpen = isOpen) }
-    }
-
-    fun setAlwaysAllowAllCommands(enabled: Boolean) {
-        settingsManager.setAlwaysAllowAllCommands(enabled)
-        val policy = if (enabled) CommandPermissionPolicy.ALWAYS_ALLOW_ALL.id else CommandPermissionPolicy.ASK_FOR_SENSITIVE.id
-        settingsManager.setCommandPermissionPolicy(policy)
-        _uiState.update {
-            it.copy(
-                isAlwaysAllowAllCommands = enabled,
-                commandPermissionPolicy = policy
-            )
-        }
-    }
-
-    fun setCommandPermissionPolicy(policy: CommandPermissionPolicy) {
-        settingsManager.setCommandPermissionPolicy(policy.id)
-        val isUnrestricted = policy == CommandPermissionPolicy.ALWAYS_ALLOW_ALL
-        settingsManager.setAlwaysAllowAllCommands(isUnrestricted)
-        _uiState.update {
-            it.copy(
-                commandPermissionPolicy = policy.id,
-                isAlwaysAllowAllCommands = isUnrestricted
-            )
-        }
-    }
-
-    fun removeAlwaysAllowedCommand(executable: String) {
-        settingsManager.removeAlwaysAllowedCommand(executable)
-        _uiState.update { it.copy(alwaysAllowedCommands = settingsManager.getAlwaysAllowedCommands()) }
-    }
-
-    fun addAlwaysAllowedCommand(executable: String) {
-        settingsManager.addAlwaysAllowedCommand(executable)
-        _uiState.update { it.copy(alwaysAllowedCommands = settingsManager.getAlwaysAllowedCommands()) }
-    }
-
-    fun clearAllAlwaysAllowedCommands() {
-        settingsManager.clearAlwaysAllowedCommands()
-        _uiState.update { it.copy(alwaysAllowedCommands = emptySet()) }
     }
 
     override fun onCleared() {

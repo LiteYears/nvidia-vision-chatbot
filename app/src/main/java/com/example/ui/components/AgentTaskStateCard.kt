@@ -21,11 +21,16 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Flag
 import androidx.compose.material.icons.outlined.HourglassTop
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
+import androidx.compose.material.icons.outlined.RadioButtonUnchecked
 import androidx.compose.material.icons.outlined.SmartToy
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -43,8 +48,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.agent.plan.Subtask
+import com.example.agent.plan.SubtaskStatus
+import com.example.agent.plan.TaskPlan
 import com.example.data.model.AgentSession
 import com.example.data.model.AgentStep
 import com.example.data.model.AgentTaskStatus
@@ -57,6 +67,8 @@ fun AgentTaskStateCard(
     session: AgentSession,
     onTogglePause: () -> Unit = {},
     onMarkCompleted: () -> Unit = {},
+    onRetrySubtask: (String) -> Unit = {},
+    onVerifySubtask: (String) -> Unit = {},
     isAlwaysAllowCommands: Boolean = true,
     onOpenCommandControl: () -> Unit = {},
     modifier: Modifier = Modifier
@@ -273,6 +285,16 @@ fun AgentTaskStateCard(
                         )
                     }
                 }
+            }
+
+            // Structured Task Plan Checklist (compact, ordered, persistent)
+            session.plan?.let { plan ->
+                Spacer(modifier = Modifier.height(8.dp))
+                TaskPlanChecklist(
+                    plan = plan,
+                    onRetrySubtask = onRetrySubtask,
+                    onVerifySubtask = onVerifySubtask
+                )
             }
             
             Spacer(modifier = Modifier.height(8.dp))
@@ -576,3 +598,346 @@ private fun StateArrow() {
         )
     )
 }
+
+/**
+ * Compact checklist showing the structured task plan, subtasks progress,
+ * and maximum step execution safeguard.
+ */
+@Composable
+fun TaskPlanChecklist(
+    plan: TaskPlan,
+    onRetrySubtask: (String) -> Unit = {},
+    onVerifySubtask: (String) -> Unit = {},
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.65f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)),
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("agent_task_plan_checklist")
+    ) {
+        Column(modifier = Modifier.padding(10.dp)) {
+            // Header Row: PLAN title, completed count badge, and step limit indicator
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.CheckCircle,
+                        contentDescription = "Plan",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Text(
+                        text = "PLAN",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp,
+                            letterSpacing = 0.8.sp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    )
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    // Completed counter badge
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = if (plan.allSubtasksCompleted) {
+                            Color(0xFF4ADE80).copy(alpha = 0.18f)
+                        } else {
+                            MaterialTheme.colorScheme.surfaceVariant
+                        }
+                    ) {
+                        Text(
+                            text = "${plan.completedCount}/${plan.totalCount} Done",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 10.sp,
+                                color = if (plan.allSubtasksCompleted) Color(0xFF4ADE80) else MaterialTheme.colorScheme.onSurfaceVariant
+                            ),
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+
+                    // Max Step limit badge
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = if (plan.isStepLimitExceeded) {
+                            Color(0xFFF87171).copy(alpha = 0.18f)
+                        } else {
+                            MaterialTheme.colorScheme.surfaceVariant
+                        }
+                    ) {
+                        Text(
+                            text = "Step ${plan.stepCount}/${plan.maxSteps}",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.Medium,
+                                fontSize = 10.sp,
+                                color = if (plan.isStepLimitExceeded) Color(0xFFF87171) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                            ),
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Subtasks checklist items
+            Column(
+                verticalArrangement = Arrangement.spacedBy(5.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                plan.subtasks.forEachIndexed { index, subtask ->
+                    SubtaskChecklistItem(
+                        index = index + 1,
+                        subtask = subtask,
+                        isActive = subtask.id == plan.currentSubtaskId,
+                        onRetry = { onRetrySubtask(subtask.id) },
+                        onVerify = { onVerifySubtask(subtask.id) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SubtaskChecklistItem(
+    index: Int,
+    subtask: Subtask,
+    isActive: Boolean,
+    onRetry: () -> Unit,
+    onVerify: () -> Unit
+) {
+    val isDone = subtask.status == SubtaskStatus.COMPLETED
+    val isRunning = subtask.status == SubtaskStatus.RUNNING
+    val isFailed = subtask.status == SubtaskStatus.FAILED
+    val isPending = subtask.status == SubtaskStatus.PENDING
+
+    val statusColor = when (subtask.status) {
+        SubtaskStatus.COMPLETED -> Color(0xFF4ADE80)
+        SubtaskStatus.RUNNING -> Color(0xFF38BDF8)
+        SubtaskStatus.FAILED -> Color(0xFFF87171)
+        SubtaskStatus.PENDING -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+    }
+
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = when {
+            isRunning -> Color(0xFF38BDF8).copy(alpha = 0.08f)
+            isFailed -> Color(0xFFF87171).copy(alpha = 0.08f)
+            else -> Color.Transparent
+        },
+        border = if (isRunning) BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.35f)) else null,
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("subtask_item_${subtask.id}")
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    // Checkbox / State indicator
+                    Box(
+                        modifier = Modifier
+                            .size(18.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(
+                                when {
+                                    isDone -> Color(0xFF4ADE80).copy(alpha = 0.2f)
+                                    isRunning -> Color(0xFF38BDF8).copy(alpha = 0.2f)
+                                    isFailed -> Color(0xFFF87171).copy(alpha = 0.2f)
+                                    else -> Color.Transparent
+                                }
+                            )
+                            .border(
+                                width = 1.dp,
+                                color = statusColor,
+                                shape = RoundedCornerShape(4.dp)
+                            )
+                            .testTag("subtask_checkbox_${subtask.id}"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        when {
+                            isDone -> {
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = "Completed",
+                                    tint = Color(0xFF4ADE80),
+                                    modifier = Modifier
+                                        .size(12.dp)
+                                        .testTag("subtask_status_completed_${subtask.id}")
+                                )
+                            }
+                            isRunning -> {
+                                Icon(
+                                    imageVector = Icons.Outlined.HourglassTop,
+                                    contentDescription = "Running",
+                                    tint = Color(0xFF38BDF8),
+                                    modifier = Modifier
+                                        .size(11.dp)
+                                        .testTag("subtask_status_running_${subtask.id}")
+                                )
+                            }
+                            isFailed -> {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Failed",
+                                    tint = Color(0xFFF87171),
+                                    modifier = Modifier
+                                        .size(11.dp)
+                                        .testTag("subtask_status_failed_${subtask.id}")
+                                )
+                            }
+                            isPending -> {
+                                Box(
+                                    modifier = Modifier
+                                        .size(0.dp)
+                                        .testTag("subtask_status_pending_${subtask.id}")
+                                )
+                            }
+                        }
+                    }
+
+                    // Subtask Description
+                    Text(
+                        text = subtask.description,
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontWeight = if (isRunning) FontWeight.SemiBold else FontWeight.Normal,
+                            color = when {
+                                isDone -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f)
+                                isRunning -> MaterialTheme.colorScheme.onSurface
+                                isFailed -> Color(0xFFF87171)
+                                else -> MaterialTheme.colorScheme.onSurface
+                            },
+                            textDecoration = if (isDone) TextDecoration.LineThrough else TextDecoration.None,
+                            fontSize = 12.sp
+                        ),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                // Status Badge & Action buttons
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    if (isFailed) {
+                        // Retry button
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = Color(0xFFF87171).copy(alpha = 0.15f),
+                            border = BorderStroke(1.dp, Color(0xFFF87171).copy(alpha = 0.4f)),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable { onRetry() }
+                                .testTag("subtask_retry_button_${subtask.id}")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = "Retry",
+                                    tint = Color(0xFFF87171),
+                                    modifier = Modifier.size(11.dp)
+                                )
+                                Text(
+                                    text = "Retry",
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontSize = 9.5.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Color(0xFFF87171)
+                                    )
+                                )
+                            }
+                        }
+                    } else if (isRunning) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = Color(0xFF38BDF8).copy(alpha = 0.15f)
+                        ) {
+                            Text(
+                                text = "ACTIVE",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF38BDF8),
+                                    letterSpacing = 0.4.sp
+                                ),
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                            )
+                        }
+
+                        // Manual verify button
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = Color(0xFF4ADE80).copy(alpha = 0.15f),
+                            border = BorderStroke(1.dp, Color(0xFF4ADE80).copy(alpha = 0.4f)),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable { onVerify() }
+                                .testTag("subtask_verify_button_${subtask.id}")
+                        ) {
+                            Text(
+                                text = "Verify",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color(0xFF4ADE80)
+                                ),
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Optional Result / Error snippet preview
+            if (!subtask.result.isNullOrBlank()) {
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 26.dp, top = 3.dp, bottom = 2.dp)
+                ) {
+                    Text(
+                        text = subtask.result,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontSize = 10.sp,
+                            color = if (isFailed) Color(0xFFF87171) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                            fontFamily = FontFamily.Monospace
+                        ),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
