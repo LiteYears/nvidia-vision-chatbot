@@ -47,6 +47,39 @@ class DefaultSearchProvider(
         private val BING_ALGO_REGEX = Pattern.compile("<li class=\"b_algo\"[^>]*>(.*?)</li>", Pattern.DOTALL)
         private val BING_H2_LINK_REGEX = Pattern.compile("<h2[^>]*><a[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a></h2>", Pattern.DOTALL)
         private val BING_P_REGEX = Pattern.compile("<p[^>]*>(.*?)</p>", Pattern.DOTALL)
+        private val IPV4_REGEX = Pattern.compile("\\b(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\b")
+    }
+
+    fun extractIpAddress(query: String): String? {
+        val m = IPV4_REGEX.matcher(query)
+        return if (m.find()) m.group(0) else null
+    }
+
+    fun isIpOrNetworkQuery(query: String): Boolean {
+        if (extractIpAddress(query) != null) return true
+        val q = query.lowercase()
+        return q.contains("whois") || q.contains("rdap") || q.contains("ip address") ||
+            q.contains("origin of ip") || q.contains("owner of ip") || q.contains("location of ip") ||
+            q.contains("asn lookup") || q.contains("netrange") || q.contains("cidr")
+    }
+
+    fun isWikipediaAppropriate(query: String): Boolean {
+        if (isIpOrNetworkQuery(query)) return false
+        val q = query.lowercase()
+        if (q.contains("cve-") || q.contains("vulnerability") || q.contains("exploit") || q.contains("advisory")) return false
+        if (q.contains("version") || q.contains("changelog") || q.contains("release notes") || q.contains("download")) return false
+        if (q.contains("github.com") || q.contains("npm") || q.contains("pypi") || q.contains("crates.io")) return false
+        if (q.contains("pricing") || q.contains("weather") || q.contains("stock price") || q.contains("exchange rate")) return false
+        return true
+    }
+
+    fun isTechOrDevQuery(query: String): Boolean {
+        val q = query.lowercase()
+        return q.contains("code") || q.contains("python") || q.contains("cuda") || q.contains("gpu") ||
+            q.contains("nvidia") || q.contains("library") || q.contains("api") || q.contains("framework") ||
+            q.contains("architecture") || q.contains("risc-v") || q.contains("arm") || q.contains("benchmark") ||
+            q.contains("compiler") || q.contains("linux") || q.contains("android") || q.contains("specs") ||
+            q.contains("github") || q.contains("package") || q.contains("onnx") || q.contains("tensorrt")
     }
 
     override suspend fun search(query: String, maxResults: Int): Result<SearchResponse> =
@@ -61,12 +94,20 @@ class DefaultSearchProvider(
             val limit = maxResults.coerceIn(1, 5)
             val collected = mutableListOf<SearchResultItem>()
             val seenUrls = mutableSetOf<String>()
+            var wikiCount = 0
             var lastNetworkException: Exception? = null
 
             fun addDistinctResults(items: List<SearchResultItem>) {
                 for (item in items) {
+                    val host = try { java.net.URI(item.url).host?.lowercase() ?: "" } catch (_: Exception) { "" }
+                    val isWiki = host.contains("wikipedia.org")
+                    if (isWiki && (!isWikipediaAppropriate(trimmedQuery) || wikiCount >= 1)) {
+                        continue
+                    }
+
                     val normalizedUrl = item.url.trim().lowercase().removeSuffix("/")
                     if (normalizedUrl.isNotBlank() && seenUrls.add(normalizedUrl) && item.title.isNotBlank()) {
+                        if (isWiki) wikiCount++
                         collected.add(item)
                         if (collected.size >= limit) break
                     }
@@ -74,21 +115,49 @@ class DefaultSearchProvider(
             }
 
             // ==========================================
-            // 1. PRIMARY: Bing Search (Free RSS & HTML)
+            // 1. DOMAIN SPECIFIC: IP & WHOIS Registries
             // ==========================================
-            try {
-                val bingResults = queryBing(trimmedQuery, limit)
-                addDistinctResults(bingResults)
-            } catch (e: SocketTimeoutException) {
-                lastNetworkException = e
-            } catch (e: UnknownHostException) {
-                lastNetworkException = e
-            } catch (e: Exception) {
-                lastNetworkException = e
+            val ipMatch = extractIpAddress(trimmedQuery)
+            if (ipMatch != null || isIpOrNetworkQuery(trimmedQuery)) {
+                try {
+                    val targetIp = ipMatch ?: "8.8.8.8"
+                    val ipResults = queryIpRegistries(targetIp, limit)
+                    addDistinctResults(ipResults)
+                } catch (e: Exception) {
+                    if (lastNetworkException == null) lastNetworkException = e
+                }
             }
 
             // ==========================================
-            // 2. FALLBACK 1: DuckDuckGo Instant Answer
+            // 2. PRIMARY: Multi-Source Web Search (Bing RSS/Web)
+            // ==========================================
+            if (collected.size < limit) {
+                try {
+                    val bingResults = queryBing(trimmedQuery, limit - collected.size)
+                    addDistinctResults(bingResults)
+                } catch (e: SocketTimeoutException) {
+                    lastNetworkException = e
+                } catch (e: UnknownHostException) {
+                    lastNetworkException = e
+                } catch (e: Exception) {
+                    lastNetworkException = e
+                }
+            }
+
+            // ==========================================
+            // 3. SPECIALIZED: Tech / Developer Search (HackerNews / Algolia)
+            // ==========================================
+            if (collected.size < limit && isTechOrDevQuery(trimmedQuery)) {
+                try {
+                    val hnResults = queryHackerNews(trimmedQuery, limit - collected.size)
+                    addDistinctResults(hnResults)
+                } catch (e: Exception) {
+                    if (lastNetworkException == null) lastNetworkException = e
+                }
+            }
+
+            // ==========================================
+            // 4. FALLBACK 1: DuckDuckGo Instant Answer
             // ==========================================
             if (collected.size < limit) {
                 try {
@@ -100,11 +169,11 @@ class DefaultSearchProvider(
             }
 
             // ==========================================
-            // 3. FALLBACK 2: Wikipedia Search API
+            // 5. FALLBACK 2: Wikipedia (ONLY if appropriate, max 1 result)
             // ==========================================
-            if (collected.size < limit) {
+            if (collected.size < limit && isWikipediaAppropriate(trimmedQuery) && wikiCount == 0) {
                 try {
-                    val wikiResults = queryWikipedia(trimmedQuery, limit - collected.size)
+                    val wikiResults = queryWikipedia(trimmedQuery, 1)
                     addDistinctResults(wikiResults)
                 } catch (e: Exception) {
                     if (lastNetworkException == null) lastNetworkException = e
@@ -112,7 +181,7 @@ class DefaultSearchProvider(
             }
 
             // ==========================================
-            // 4. FALLBACK 3: HackerNews Tech Web Search
+            // 6. FALLBACK 3: HackerNews Tech Web Search for any remaining
             // ==========================================
             if (collected.size < limit) {
                 try {
@@ -144,6 +213,122 @@ class DefaultSearchProvider(
         }
 
     /**
+     * Domain Specific: Queries authoritative IP, ASN, and WHOIS / RDAP registries.
+     * Excludes Wikipedia and general search noise for IP address and network queries.
+     */
+    fun queryIpRegistries(ip: String, limit: Int): List<SearchResultItem> {
+        val results = mutableListOf<SearchResultItem>()
+
+        // 1. IP Geolocation, ISP, and ASN registry via IP-API
+        try {
+            val url = "http://ip-api.com/json/$ip"
+            val request = Request.Builder()
+                .url(url)
+                .header("User-Agent", USER_AGENT)
+                .header("Accept", "application/json")
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string()
+                    if (!body.isNullOrBlank()) {
+                        val json = JSONObject(body)
+                        if (json.optString("status") == "success") {
+                            val country = json.optString("country")
+                            val region = json.optString("regionName")
+                            val city = json.optString("city")
+                            val isp = json.optString("isp")
+                            val org = json.optString("org")
+                            val asn = json.optString("as")
+                            val lat = json.optDouble("lat", 0.0)
+                            val lon = json.optDouble("lon", 0.0)
+
+                            val snippet = "IP: $ip | ISP: $isp | Org: $org | ASN: $asn | Location: $city, $region, $country ($lat, $lon). Authoritative GeoIP & Autonomous System registry record."
+                            results.add(
+                                SearchResultItem(
+                                    title = "IP Geolocation & ASN Registry: $ip ($isp)",
+                                    url = "https://ipinfo.io/$ip",
+                                    snippet = cleanSnippet(snippet)
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+
+        // 2. ARIN / RIR RDAP allocation registry
+        try {
+            val url = "https://rdap.arin.net/registry/ip/$ip"
+            val request = Request.Builder()
+                .url(url)
+                .header("User-Agent", USER_AGENT)
+                .header("Accept", "application/rdap+json,application/json")
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string()
+                    if (!body.isNullOrBlank()) {
+                        val json = JSONObject(body)
+                        val handle = json.optString("handle")
+                        val name = json.optString("name")
+                        val start = json.optString("startAddress")
+                        val end = json.optString("endAddress")
+                        val cidrs = json.optJSONArray("cidr0_cidrs")
+                        val cidrPrefix = if (cidrs != null && cidrs.length() > 0) {
+                            val c = cidrs.getJSONObject(0)
+                            "${c.optString("v4prefix")}/${c.optInt("length")}"
+                        } else if (start.isNotBlank() && end.isNotBlank()) {
+                            "$start - $end"
+                        } else ""
+
+                        val snippet = "Authoritative RIR Registry allocation for $ip. NetRange: $start - $end (CIDR: $cidrPrefix), Handle: $handle, Cust/Org Name: $name. Network delegation record."
+                        results.add(
+                            SearchResultItem(
+                                title = "ARIN / RIR RDAP IP Registry: $handle ($name)",
+                                url = "https://rdap.arin.net/registry/ip/$ip",
+                                snippet = cleanSnippet(snippet)
+                            )
+                        )
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+
+        // 3. Fallback ARIN WHOIS REST endpoint if RDAP was empty
+        if (results.none { it.url.contains("arin.net") }) {
+            results.add(
+                SearchResultItem(
+                    title = "ARIN WHOIS IP Registry: $ip",
+                    url = "https://whois.arin.net/rest/ip/$ip",
+                    snippet = "Official American Registry for Internet Numbers (ARIN) WHOIS registry record for IP network block containing $ip."
+                )
+            )
+        }
+
+        // 4. Hurricane Electric BGP Routing & Peering Toolkit
+        results.add(
+            SearchResultItem(
+                title = "Hurricane Electric BGP Routing Toolkit: $ip",
+                url = "https://bgp.he.net/ip/$ip",
+                snippet = "Autonomous system number (ASN), BGP routing prefixes, reverse DNS PTR records, and upstream peering transit information for host $ip."
+            )
+        )
+
+        // 5. AbuseIPDB Network Threat & Abuse Registry
+        results.add(
+            SearchResultItem(
+                title = "AbuseIPDB IP Intelligence & Abuse Report: $ip",
+                url = "https://www.abuseipdb.com/check/$ip",
+                snippet = "Abuse reports, blacklist verification, spam confidence score, and network security history for host IP $ip."
+            )
+        )
+
+        return results.take(limit)
+    }
+
+    /**
      * Primary: Queries Bing Search using the free RSS endpoint with an HTML fallback.
      */
     private fun queryBing(query: String, limit: Int): List<SearchResultItem> {
@@ -155,9 +340,24 @@ class DefaultSearchProvider(
         return queryBingHtml(query, limit)
     }
 
+    private fun isSpamOrIrrelevant(title: String, url: String, query: String): Boolean {
+        val u = url.lowercase()
+        if (u.contains("xhamster") || u.contains("xvideos") || u.contains("xnxx") ||
+            u.contains("porn") || u.contains("poki.com") || u.contains("playhop.com") ||
+            u.contains("y8.com") || u.contains("crazygames.com") || u.contains("friv.com") ||
+            u.contains("lidl.com")
+        ) {
+            return true
+        }
+        val hasArabic = title.any { it in '\u0600'..'\u06FF' }
+        val queryHasArabic = query.any { it in '\u0600'..'\u06FF' }
+        if (hasArabic && !queryHasArabic) return true
+        return false
+    }
+
     private fun queryBingRss(query: String, limit: Int): List<SearchResultItem> {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
-        val url = "https://www.bing.com/search?q=$encodedQuery&format=rss"
+        val url = "https://www.bing.com/search?q=$encodedQuery&format=rss&setlang=en-US&cc=US&adlt=strict"
 
         val request = Request.Builder()
             .url(url)
@@ -169,11 +369,11 @@ class DefaultSearchProvider(
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) return emptyList()
             val xml = response.body?.string() ?: return emptyList()
-            return parseBingRssXml(xml, limit)
+            return parseBingRssXml(xml, query, limit)
         }
     }
 
-    private fun parseBingRssXml(xml: String, limit: Int): List<SearchResultItem> {
+    private fun parseBingRssXml(xml: String, query: String, limit: Int): List<SearchResultItem> {
         val items = mutableListOf<SearchResultItem>()
         val itemMatcher = BING_ITEM_REGEX.matcher(xml)
 
@@ -192,7 +392,7 @@ class DefaultSearchProvider(
             val link = decodeBingClickUrl(decodeHtml(rawLink).trim())
             val snippet = cleanSnippet(stripHtmlTags(decodeHtml(rawDesc)))
 
-            if (title.isNotBlank() && link.startsWith("http")) {
+            if (title.isNotBlank() && link.startsWith("http") && !isSpamOrIrrelevant(title, link, query)) {
                 items.add(
                     SearchResultItem(
                         title = title,
@@ -207,7 +407,7 @@ class DefaultSearchProvider(
 
     private fun queryBingHtml(query: String, limit: Int): List<SearchResultItem> {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
-        val url = "https://www.bing.com/search?q=$encodedQuery"
+        val url = "https://www.bing.com/search?q=$encodedQuery&setlang=en-US&cc=US&adlt=strict"
 
         val request = Request.Builder()
             .url(url)
@@ -219,11 +419,11 @@ class DefaultSearchProvider(
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) return emptyList()
             val html = response.body?.string() ?: return emptyList()
-            return parseBingHtml(html, limit)
+            return parseBingHtml(html, query, limit)
         }
     }
 
-    private fun parseBingHtml(html: String, limit: Int): List<SearchResultItem> {
+    private fun parseBingHtml(html: String, query: String, limit: Int): List<SearchResultItem> {
         val results = mutableListOf<SearchResultItem>()
         val algoMatcher = BING_ALGO_REGEX.matcher(html)
 
@@ -240,7 +440,7 @@ class DefaultSearchProvider(
                 val link = decodeBingClickUrl(decodeHtml(rawLink).trim())
                 val snippet = cleanSnippet(stripHtmlTags(decodeHtml(rawSnippet)))
 
-                if (title.isNotBlank() && link.startsWith("http")) {
+                if (title.isNotBlank() && link.startsWith("http") && !isSpamOrIrrelevant(title, link, query)) {
                     results.add(SearchResultItem(title, link, snippet.ifBlank { title }))
                 }
             }

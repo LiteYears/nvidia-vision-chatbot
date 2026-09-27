@@ -63,7 +63,7 @@ class FilePatchTool(
 
     override suspend fun execute(arguments: Map<String, Any?>): ToolResult {
         val callId = UUID.randomUUID().toString()
-        val requestedPath = arguments["path"]?.toString()?.trim()
+        val requestedPath = (arguments["path"] ?: arguments["file"] ?: arguments["file_path"] ?: arguments["filePath"] ?: arguments["filename"])?.toString()?.trim()
 
         if (requestedPath.isNullOrBlank()) {
             return ToolResult.failure(
@@ -73,9 +73,9 @@ class FilePatchTool(
             )
         }
 
-        val targetContent = arguments["target_content"]?.toString()
-        val replacementContent = arguments["replacement_content"]?.toString()
-        val diffBlock = arguments["diff"]?.toString()
+        val targetContent = (arguments["target_content"] ?: arguments["target"] ?: arguments["search"] ?: arguments["old_str"] ?: arguments["old_content"] ?: arguments["find"])?.toString()
+        val replacementContent = (arguments["replacement_content"] ?: arguments["replacement"] ?: arguments["replace"] ?: arguments["new_str"] ?: arguments["new_content"] ?: arguments["substitute"])?.toString()
+        val diffBlock = (arguments["diff"] ?: arguments["patch"] ?: arguments["hunk"])?.toString()
         val allowMultiple = when (val a = arguments["allow_multiple"]) {
             is Boolean -> a
             is String -> a.equals("true", ignoreCase = true)
@@ -180,29 +180,49 @@ class FilePatchTool(
         // 1. Try exact match
         var matchIndex = normalizedOriginal.indexOf(normalizedTarget)
 
-        // 2. If exact match fails, try whitespace-trimmed line matching
+        // 2. Check if target had line number prefixes (e.g. "4: ...")
+        if (matchIndex < 0) {
+            val targetNoLineNumbers = normalizedTarget.lines().joinToString("\n") { line ->
+                line.replaceFirst(Regex("""^\s*\d+[:|]\s*"""), "")
+            }
+            if (targetNoLineNumbers != normalizedTarget) {
+                val idx = normalizedOriginal.indexOf(targetNoLineNumbers)
+                if (idx >= 0) {
+                    matchIndex = idx
+                }
+            }
+        }
+
+        // 3. If exact match fails, try fuzzy line matching with indentation tolerance
         if (matchIndex < 0) {
             val fuzzyMatch = findFuzzyMatch(normalizedOriginal, normalizedTarget)
             if (fuzzyMatch != null) {
+                val origIndent = fuzzyMatch.matchedText.lines().firstOrNull()?.takeWhile { it == ' ' || it == '\t' } ?: ""
+                val adjustedReplacement = if (origIndent.isNotEmpty() && !normalizedReplacement.startsWith(" ") && !normalizedReplacement.startsWith("\t")) {
+                    normalizedReplacement.lines().joinToString("\n") { origIndent + it }
+                } else {
+                    normalizedReplacement
+                }
+
                 val replaced = normalizedOriginal.substring(0, fuzzyMatch.startIndex) +
-                    normalizedReplacement +
+                    adjustedReplacement +
                     normalizedOriginal.substring(fuzzyMatch.endIndex)
 
                 val linesRemoved = fuzzyMatch.matchedText.lines().size
-                val linesAdded = normalizedReplacement.lines().size
+                val linesAdded = adjustedReplacement.lines().size
                 return PatchApplicationResult(
                     isSuccess = true,
                     errorMessage = null,
                     newContent = replaced,
                     linesRemoved = linesRemoved,
                     linesAdded = linesAdded,
-                    changePreview = formatDiffPreview(fuzzyMatch.matchedText, normalizedReplacement)
+                    changePreview = formatDiffPreview(fuzzyMatch.matchedText, adjustedReplacement)
                 )
             }
 
             return PatchApplicationResult(
                 isSuccess = false,
-                errorMessage = "target_content was not found in the file. Ensure you provide exact lines with sufficient surrounding context.",
+                errorMessage = "target_content was not found in the file. Tip: Call 'file_read' to inspect the exact lines, or use 'file_write' to update the complete file.",
                 newContent = originalContent,
                 linesRemoved = 0,
                 linesAdded = 0
@@ -373,26 +393,46 @@ class FilePatchTool(
 
     private fun findFuzzyMatch(original: String, target: String): FuzzyMatch? {
         val origLines = original.lines()
-        val targetLines = target.lines().map { it.trimEnd() }.filter { it.isNotEmpty() }
+        val rawTargetLines = target.lines().map { it.replaceFirst(Regex("""^\s*\d+[:|]\s*"""), "") }
+        val targetLines = rawTargetLines.filter { it.isNotEmpty() }
         if (targetLines.isEmpty()) return null
 
+        // 1. Try matching with trailing whitespace trimmed (exact indentation)
+        val tTrimEnd = targetLines.map { it.trimEnd() }
         for (i in 0..origLines.size - targetLines.size) {
             var match = true
-            for (j in targetLines.indices) {
-                if (origLines[i + j].trimEnd() != targetLines[j]) {
+            for (j in tTrimEnd.indices) {
+                if (origLines[i + j].trimEnd() != tTrimEnd[j]) {
                     match = false
                     break
                 }
             }
             if (match) {
-                // Calculate character bounds in original
                 val startLineIndex = i
                 val endLineIndex = i + targetLines.size
-
                 val charStart = origLines.take(startLineIndex).sumOf { it.length + 1 }
                 val matchedSlice = origLines.subList(startLineIndex, endLineIndex).joinToString("\n")
                 val charEnd = charStart + matchedSlice.length
+                return FuzzyMatch(charStart, charEnd, matchedSlice)
+            }
+        }
 
+        // 2. Try matching with both leading and trailing whitespace trimmed (indentation tolerance)
+        val tTrimBoth = targetLines.map { it.trim() }
+        for (i in 0..origLines.size - tTrimBoth.size) {
+            var match = true
+            for (j in tTrimBoth.indices) {
+                if (origLines[i + j].trim() != tTrimBoth[j]) {
+                    match = false
+                    break
+                }
+            }
+            if (match) {
+                val startLineIndex = i
+                val endLineIndex = i + tTrimBoth.size
+                val charStart = origLines.take(startLineIndex).sumOf { it.length + 1 }
+                val matchedSlice = origLines.subList(startLineIndex, endLineIndex).joinToString("\n")
+                val charEnd = charStart + matchedSlice.length
                 return FuzzyMatch(charStart, charEnd, matchedSlice)
             }
         }

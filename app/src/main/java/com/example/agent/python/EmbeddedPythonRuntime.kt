@@ -177,9 +177,11 @@ class EmbeddedPythonRuntime(
                 isTruncated = isTruncated.get(),
                 errorType = e.errorType
             )
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             val duration = System.currentTimeMillis() - startTime
-            appendStderr("RuntimeError: ${e.message ?: e.javaClass.simpleName}\n")
+            val msg = if (e is StackOverflowError) "maximum recursion depth exceeded" else (e.message ?: e.javaClass.simpleName)
+            val errType = if (e is StackOverflowError) "RecursionError" else "RuntimeError"
+            appendStderr("$errType: $msg\n")
             PythonExecutionResult(
                 stdout = stdoutBuffer.toString(),
                 stderr = stderrBuffer.toString(),
@@ -187,7 +189,7 @@ class EmbeddedPythonRuntime(
                 durationMs = duration,
                 isTimedOut = false,
                 isTruncated = isTruncated.get(),
-                errorType = "RuntimeError"
+                errorType = errType
             )
         }
     }
@@ -1870,6 +1872,9 @@ class PythonInterpreter(
             is PyBuiltinFunc -> return callee.invoke(args, kwargs)
             is UserDefinedFunction -> {
                 checkDeadline()
+                if (callStack.size >= 100) {
+                    throw PythonRuntimeException("RecursionError", "maximum recursion depth exceeded in comparison", line)
+                }
                 callStack.add(PythonTracebackFrame(callee.filename, callee.body.firstOrNull()?.line ?: line, callee.name))
                 val localScope = callee.closureScope.toMutableMap()
 
@@ -1961,6 +1966,10 @@ class PythonInterpreter(
     // -------------------------------------------------------------
 
     private fun initBuiltins() {
+        globalScope["__name__"] = "__main__"
+        globalScope["__file__"] = filename
+        globalScope["__doc__"] = null
+
         globalScope["print"] = PyBuiltinFunc("print") { args, kwargs ->
             val sep = kwargs["sep"]?.toString() ?: " "
             val end = kwargs["end"]?.toString() ?: "\n"

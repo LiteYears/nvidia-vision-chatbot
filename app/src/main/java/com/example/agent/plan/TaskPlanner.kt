@@ -347,6 +347,129 @@ class TaskPlanner {
     }
 
     /**
+     * Determines if a successful tool execution fulfills and advances a subtask.
+     * When appropriate, transitions the completed subtask to COMPLETED and sets
+     * the next pending subtask to RUNNING.
+     */
+    fun advanceSubtaskOnToolSuccess(
+        plan: TaskPlan,
+        subtaskId: String?,
+        toolName: String,
+        toolResult: String
+    ): TaskPlan {
+        var updatedPlan = recordToolSuccess(plan, subtaskId, toolName, toolResult)
+        val active = updatedPlan.subtasks.find { it.id == (subtaskId ?: updatedPlan.currentSubtaskId) }
+            ?: return updatedPlan
+
+        val descLower = active.description.lowercase()
+        val toolLower = toolName.lowercase()
+
+        val isFulfillable = when (toolLower) {
+            "file_write", "file_patch", "archive_extract" -> {
+                descLower.contains("write") || descLower.contains("create") ||
+                    descLower.contains("prepare") || descLower.contains("analyze") ||
+                    descLower.contains("patch") || descLower.contains("modify") ||
+                    descLower.contains("fix") || descLower.contains("repair") ||
+                    descLower.contains("update") || descLower.contains("edit") ||
+                    descLower.contains("correct") || descLower.contains("solution") ||
+                    descLower.contains("extract")
+            }
+            "python_execute", "run_command" -> {
+                descLower.contains("execute") || descLower.contains("run") ||
+                    descLower.contains("command") || descLower.contains("test") ||
+                    descLower.contains("script") || descLower.contains("verify") ||
+                    descLower.contains("check")
+            }
+            "web_search" -> {
+                descLower.contains("search") || descLower.contains("query") ||
+                    descLower.contains("find") || descLower.contains("identify") ||
+                    descLower.contains("gather") || descLower.contains("formulate") ||
+                    descLower.contains("lookup") || descLower.contains("look up")
+            }
+            "web_open" -> {
+                descLower.contains("open") || descLower.contains("read") ||
+                    descLower.contains("browse") || descLower.contains("research") ||
+                    descLower.contains("article") || descLower.contains("gather") ||
+                    descLower.contains("inspect") || descLower.contains("retrieve") ||
+                    descLower.contains("content") || descLower.contains("extract")
+            }
+            "file_list", "file_tree", "file_search", "file_read" -> {
+                descLower.contains("list") || descLower.contains("tree") ||
+                    descLower.contains("search") || descLower.contains("inspect") ||
+                    descLower.contains("read") || descLower.contains("open") ||
+                    descLower.contains("find") || descLower.contains("clarify")
+            }
+            "calculator" -> {
+                descLower.contains("calculate") || descLower.contains("compute") ||
+                    descLower.contains("math")
+            }
+            else -> false
+        }
+
+        if (isFulfillable) {
+            val completionNotes = "Verified: Tool '$toolName' executed successfully"
+            updatedPlan = verifyAndCompleteSubtask(updatedPlan, active.id, completionNotes)
+
+            // If preceding pending subtask was fulfilled (e.g. if Subtask 0 was analyze and Subtask 1 was file_write)
+            if (toolLower == "file_write" || toolLower == "file_patch") {
+                val pendingWrite = updatedPlan.subtasks.find {
+                    it.status == SubtaskStatus.PENDING &&
+                        (it.description.contains("file_write", ignoreCase = true) ||
+                         it.description.contains("write script", ignoreCase = true) ||
+                         it.description.contains("modify code", ignoreCase = true) ||
+                         it.description.contains("fix", ignoreCase = true))
+                }
+                if (pendingWrite != null) {
+                    updatedPlan = verifyAndCompleteSubtask(updatedPlan, pendingWrite.id, "Verified: Code updated via '$toolName'")
+                }
+
+                // If an execution subtask had previously failed, reset it back to RUNNING so it gets re-run and re-verified
+                val failedExecution = updatedPlan.subtasks.find {
+                    it.status == SubtaskStatus.FAILED &&
+                        (it.description.contains("execute", ignoreCase = true) ||
+                         it.description.contains("run", ignoreCase = true) ||
+                         it.description.contains("test", ignoreCase = true))
+                }
+                if (failedExecution != null) {
+                    updatedPlan = retrySubtask(updatedPlan, failedExecution.id)
+                }
+            }
+
+            // If there is a next pending subtask, transition it to RUNNING
+            val nextPending = updatedPlan.subtasks.firstOrNull { it.status == SubtaskStatus.PENDING }
+            if (nextPending != null && updatedPlan.activeSubtask == null) {
+                updatedPlan = startSubtask(updatedPlan, nextPending.id)
+            }
+        }
+
+        return updatedPlan
+    }
+
+    /**
+     * Checks if there are pending action subtasks (e.g. execution, file write, web search)
+     * that must still be performed before the plan can be considered done.
+     */
+    fun hasPendingActionSubtasks(plan: TaskPlan): Boolean {
+        return plan.subtasks.any { subtask ->
+            (subtask.status == SubtaskStatus.PENDING || subtask.status == SubtaskStatus.RUNNING || subtask.status == SubtaskStatus.FAILED) &&
+                !isSynthesisOrFinalSubtask(subtask.description)
+        }
+    }
+
+    /**
+     * Identifies if a subtask is purely the final synthesis / verification / completion step.
+     */
+    fun isSynthesisOrFinalSubtask(description: String): Boolean {
+        val d = description.lowercase()
+        return d.contains("synthesize") || d.contains("final deliverable") ||
+            d.contains("finalize") || d.contains("complete objective") ||
+            d.contains("create report") || d.contains("deliverable") ||
+            (d.contains("verify") && (d.contains("report") || d.contains("deliverable") || d.contains("criteria") || d.contains("output") || d.contains("accuracy") || d.contains("result"))) ||
+            (d.contains("inspect") && (d.contains("output") || d.contains("execution") || d.contains("result"))) ||
+            d == "complete"
+    }
+
+    /**
      * Formats the task plan into a compact, structured prompt block for the LLM.
      */
     fun formatPlanForPrompt(plan: TaskPlan): String {
@@ -372,11 +495,11 @@ class TaskPlanner {
             }
             appendLine()
             appendLine("PLANNING GUIDELINES:")
-            appendLine("- Before executing a tool, know which subtask you are addressing.")
-            appendLine("- A successful tool output DOES NOT complete a subtask; you must verify that the objective was truly achieved.")
-            appendLine("- If a tool fails, observe diagnostics, then retry or choose an alternative subtask/tool.")
-            appendLine("- You can dynamically update your plan by outputting a ```plan checklist in your response.")
-            appendLine("- When all subtasks are verified, conclude the task and provide your final response.")
+            appendLine("- Always execute the tool corresponding to the CURRENT ACTIVE SUBTASK.")
+            appendLine("- You MUST output a ```tool_call``` block whenever active or pending subtasks require actions (e.g. creating, running, debugging, or searching).")
+            appendLine("- If a tool fails, observe diagnostics, then modify code with file_patch or file_write and re-run with python_execute.")
+            appendLine("- Do not provide conversational status updates or next-step descriptions without the tool call.")
+            appendLine("- Only provide a final text response when all actions are executed, verified, and complete.")
             appendLine("============================")
         }
     }
@@ -401,6 +524,22 @@ class TaskPlanner {
             )
         }
 
+        // Code repair / bug fix / modify existing code / error correction (when not creating a new script from scratch)
+        val isCreatingNew = lower.contains("create a python") || lower.contains("create a script") || lower.contains("create python") || lower.contains("write a python") || lower.contains("write a script")
+        if (!isCreatingNew && (lower.contains("fix") || lower.contains("repair") || lower.contains("syntax error") ||
+            (lower.contains("modify") && (lower.contains(".py") || lower.contains("file") || lower.contains("code") || lower.contains("script"))) ||
+            (lower.contains("open") && (lower.contains(".py") || lower.contains("error") || lower.contains("fix") || lower.contains("run"))) ||
+            lower.contains("debug") || lower.contains("bug"))
+        ) {
+            return listOf(
+                Subtask(description = "Inspect existing file and identify errors using file_read", orderIndex = 0),
+                Subtask(description = "Modify code to fix issue using file_patch or file_write", orderIndex = 1),
+                Subtask(description = "Execute and test modified code using python_execute", orderIndex = 2),
+                Subtask(description = "Inspect execution output and verify error is resolved", orderIndex = 3),
+                Subtask(description = "Synthesize final deliverable", orderIndex = 4)
+            )
+        }
+
         // Python code / script / run
         if (lower.contains("python") || lower.contains("script") || lower.contains("code") || lower.contains("write a program")) {
             return listOf(
@@ -412,14 +551,17 @@ class TaskPlanner {
             )
         }
 
-        // Research / Search / Benchmark
-        if (lower.contains("research") || lower.contains("search") || lower.contains("find") || lower.contains("compare")) {
+        // Research / Search / Benchmark / IP address & WHOIS lookup
+        if (lower.contains("research") || lower.contains("search") || lower.contains("find") ||
+            lower.contains("compare") || lower.contains("ip address") || lower.contains("whois") ||
+            lower.contains("origin") || lower.contains("location of ip") || lower.contains("owner of ip") ||
+            lower.contains("lookup") || lower.contains("look up") || lower.contains("investigate")
+        ) {
             return listOf(
-                Subtask(description = "Identify research targets and query parameters", orderIndex = 0),
-                Subtask(description = "Perform search and gather technical data", orderIndex = 1),
-                Subtask(description = "Analyze and cross-reference findings", orderIndex = 2),
-                Subtask(description = "Synthesize deliverable report", orderIndex = 3),
-                Subtask(description = "Verify findings satisfy goal criteria", orderIndex = 4)
+                Subtask(description = "Formulate targeted query and search relevant sources using web_search", orderIndex = 0),
+                Subtask(description = "Inspect search results and retrieve authoritative content using web_open", orderIndex = 1),
+                Subtask(description = "Extract facts, cross-reference sources, or perform follow-up search if needed", orderIndex = 2),
+                Subtask(description = "Synthesize verified findings with source citations and complete report", orderIndex = 3)
             )
         }
 

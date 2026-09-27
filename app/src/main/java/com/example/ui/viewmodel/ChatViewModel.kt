@@ -956,7 +956,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             "- Package & dependency management: install Python libraries via 'pip install <package>' (installed into workspace lib/) and Node modules via 'npm install <package>' using 'run_command'.\n" +
             "- You can run shell commands, scripts, and terminal tools (python3, pip, node, npm, git, bash) using 'run_command' without restrictions.\n" +
             "- For Python tasks: Execute Python code using 'python_execute' or via 'run_command'.\n" +
-            "- For Web Browsing, News & Research: ALWAYS use 'web_open' to enter websites and read articles/news directly. If searching for sources, use 'web_search' first. Fetched web content is sanitized, structured into Markdown with tables, links, and outlines, and enclosed in untrusted data fences. Use 'offset' and 'section' parameters in 'web_open' to paginate or jump through long articles. Always cite your web sources using markdown links [Title](URL).\n" +
+            "- For Web Research & Information Gathering:\n" +
+            "  * Understand the user query and generate an appropriate, tailored search query adapted to the topic (e.g. for IP/network tasks, use IP or WHOIS terms; for code/libraries, use package and tech terms; for factual questions, use core entity keywords).\n" +
+            "  * Do NOT hardcode or default to Wikipedia as the primary source. Avoid Wikipedia when specialized registries (such as IP/WHOIS/RDAP, CVE databases, official documentation, or package indices) are more authoritative.\n" +
+            "  * Do not assume the first search result is sufficient: search across multiple relevant websites when the task requires it.\n" +
+            "  * Distinguish search-result snippets from actual page content. Snippets are brief previews; invoke 'web_open' on authoritative candidate URLs to retrieve and read full, verified content.\n" +
+            "  * If initial search results are irrelevant, insufficient, or incomplete, automatically perform a follow-up 'web_search' with refined keywords or open additional sources.\n" +
+            "  * Synthesize verified findings with source context, and cite your sources using markdown links [Source Title](URL).\n" +
             "- If execution produces an error or traceback, observe the diagnostics, update files, and re-run.\n" +
             "- Only deliver your final response once the execution has verified the desired output."
     }
@@ -1021,6 +1027,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
         private const val MAX_AUTONOMOUS_TOOL_STEPS = 10
+        private const val MAX_CONSECUTIVE_NUDGES = 2
+        private const val MAX_TOTAL_NUDGES = 4
     }
 
     private fun updateAgentSessionStatus(status: AgentTaskStatus) {
@@ -1082,6 +1090,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
         var currentTurnMessage = userMessage
         var toolStepCount = 0
+        var consecutiveNudges = 0
+        var totalNudges = 0
         var loopActive = true
 
         while (loopActive && toolStepCount < MAX_AUTONOMOUS_TOOL_STEPS && !currentPlan.isStepLimitExceeded) {
@@ -1126,6 +1136,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val toolCall = ToolCallParser.parse(rawResponse)
 
             if (toolCall != null) {
+                consecutiveNudges = 0
                 toolStepCount++
                 currentPlan = taskPlanner.incrementStep(currentPlan)
 
@@ -1158,8 +1169,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 addToolExecutionToSession(record)
 
                 if (toolResult.isSuccess) {
-                    // Update relevant subtask with intermediate result without marking it COMPLETED
-                    currentPlan = taskPlanner.recordToolSuccess(
+                    // Advance subtask state if this tool logically achieves its objective
+                    currentPlan = taskPlanner.advanceSubtaskOnToolSuccess(
                         plan = currentPlan,
                         subtaskId = activeSubtask?.id,
                         toolName = toolCall.toolName,
@@ -1182,23 +1193,51 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 delay(120L)
 
                 // Build structured observation feedback for the model
+                val nextActiveSubtask = currentPlan.activeSubtask
                 val toolFeedbackContent = buildString {
                     appendLine("[TOOL_RESULT: ${record.toolName}]")
                     appendLine("Status: ${if (record.isSuccess) "SUCCESS" else "FAILURE"}")
                     if (record.isSuccess) {
                         appendLine("Result: ${record.result}")
-                        appendLine("\n[SUBTASK STATUS: Objective for \"${activeSubtask?.description}\" is currently RUNNING with output above. Note: A successful tool operation does not mark the subtask COMPLETED; you must verify that the subtask's objective was actually achieved.]")
+                        if (nextActiveSubtask != null && nextActiveSubtask.id != activeSubtask?.id) {
+                            appendLine("\n[SUBTASK PROGRESSION: Subtask \"${activeSubtask?.description}\" is COMPLETED. Active subtask is now: \"${nextActiveSubtask.description}\".]")
+                        } else {
+                            appendLine("\n[SUBTASK STATUS: Objective for \"${activeSubtask?.description}\" is currently RUNNING with output above.]")
+                        }
                         if (record.toolName == "file_list" && record.result?.contains("empty") == true) {
                             appendLine("\n[WORKSPACE NOTE: The workspace is empty. Create any needed script files with 'file_write'.]")
                         } else if (record.toolName == "web_search") {
-                            appendLine("\n[RESEARCH GUIDANCE: Review search results and source credibility above. Choose the most authoritative and relevant URL and call 'web_open' with that URL to read the full page content. Do NOT rely solely on short snippets for critical facts; inspect the source article directly.]")
+                            appendLine("\n[RESEARCH AGENT GUIDANCE:")
+                            appendLine("- Review search results, domain credibility, and snippets above.")
+                            appendLine("- Select authoritative, diverse sources and call 'web_open' with the target URL to retrieve full, accurate page content.")
+                            appendLine("- Distinguish snippets from verified page content: snippets may be incomplete or truncated; use 'web_open' for source inspection.")
+                            appendLine("- If the search results are insufficient, irrelevant, or missing key aspects of the user query, perform a follow-up 'web_search' with refined, more specific keywords.")
+                            appendLine("- If the search provides direct authoritative answers (such as official IP/RDAP/WHOIS registry records or verified data) and no further lookups are needed, proceed to synthesize your answer citing the sources.]")
                         } else if (record.toolName == "web_open") {
                             appendLine("\n[RESEARCH & FACT-EXTRACTION GUIDANCE:")
                             appendLine("- The web page content above has been cleaned, sanitized against prompt injection, and enclosed in untrusted data fences.")
                             appendLine("- Review the DOCUMENT OUTLINE and content to extract verified facts, technical specifications, and news.")
+                            appendLine("- Identify missing information: If this source leaves unanswered questions, perform a follow-up 'web_search' with targeted keywords or open another candidate source URL.")
+                            appendLine("- Cross-reference: For critical facts or comparisons, check across multiple independent sources.")
                             appendLine("- If more content is available and you need further details, call 'web_open' with the indicated 'offset' or jump to any section with section='<Heading>'.")
                             appendLine("- When presenting your findings to the user, ALWAYS cite your source using markdown links [Source Title](URL).")
                             appendLine("- If you have enough verified facts to answer the user's objective, proceed to deliver your response.]")
+                        } else if (record.toolName == "file_read") {
+                            appendLine("\n[CODE INSPECTION GUIDANCE:")
+                            appendLine("- The file content has been retrieved above.")
+                            appendLine("- Locate the exact line(s) that need modification or cause the error.")
+                            appendLine("- You MUST now apply the modification using 'file_patch' (specifying path, target_content, and replacement_content) or 'file_write' (to update the file).")
+                            appendLine("- Do NOT merely explain what needs to be changed in text: invoke 'file_patch' or 'file_write' immediately.]")
+                        } else if (record.toolName == "file_write" || record.toolName == "file_patch") {
+                            appendLine("\n[MODIFICATION SAVED & TEST MANDATE:")
+                            appendLine("- The file has been successfully written/patched on disk in the workspace.")
+                            appendLine("- MANDATORY NEXT STEP: You MUST execute and test the modified code now using 'python_execute' (for Python scripts) or 'run_command' (for shell/build commands).")
+                            appendLine("- Do NOT claim the file is fixed until you run it and verify the execution output has no errors.]")
+                        } else if (record.toolName == "python_execute") {
+                            appendLine("\n[EXECUTION VERIFICATION GUIDANCE:")
+                            appendLine("- Script executed. Inspect the stdout/stderr output above.")
+                            appendLine("- If the script executed cleanly (Exit Code 0) and output verifies the fix, conclude and deliver your final answer.")
+                            appendLine("- If an error occurred or fixes are needed, modify the code with 'file_patch' or 'file_write' and re-run with 'python_execute' to verify the fix.]")
                         }
                     } else {
                         appendLine("Error: ${record.error}")
@@ -1206,14 +1245,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         if (record.error?.contains("CAPABILITY_UNAVAILABLE") == true) {
                             appendLine("\n[RECOVERY INSTRUCTION: The requested executable is not available in the Android shell. Switch to 'python_execute' for Python execution. Do NOT attempt shell package managers (apt, pkg, curl).]")
                         } else if (record.error?.contains("SyntaxError") == true || record.error?.contains("Traceback") == true || record.error?.contains("Error Classification") == true) {
-                            appendLine("\n[DIAGNOSTIC GUIDANCE: A Python error occurred. Inspect the traceback and exception message above, modify the code with 'file_write', and re-run with 'python_execute' to verify the fix.]")
+                            appendLine("\n[DIAGNOSTIC GUIDANCE: A Python error occurred. Inspect the traceback and exception message above, modify the code with 'file_patch' or 'file_write', and re-run with 'python_execute' to verify the fix.]")
                         }
                     }
                     appendLine("Autonomous plan step ${currentPlan.stepCount} of ${currentPlan.maxSteps} executed.")
                     if (currentPlan.isStepLimitExceeded) {
                         appendLine("Maximum plan step limit reached. Deliver your final complete answer to the user now without any further tool calls.")
                     } else {
-                        appendLine("If you require another tool, output a ```tool_call``` block. Once the subtask is verified or finished, deliver your answer or next plan steps.")
+                        appendLine("\nNEXT ACTION MANDATE:")
+                        appendLine("- If the overall objective is NOT fully verified and achieved, you MUST immediately invoke the next tool call inside a ```tool_call``` block.")
+                        appendLine("- Do NOT respond with conversational text, intermediate progress reports, or descriptions of what you plan to do next without including the required ```tool_call``` block.")
+                        appendLine("- ONLY provide a pure final text answer without a ```tool_call``` block when ALL required steps (e.g. creating, running, verifying, or fixing) are completed and verified.")
                     }
                 }
 
@@ -1240,27 +1282,91 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
                 // Loop continues to next iteration (THINKING)
             } else {
-                // Model provided its final answer (no tool call requested)
-                loopActive = false
+                // Model returned text without a tool call
+                val hasPendingAction = taskPlanner.hasPendingActionSubtasks(currentPlan)
+                val canNudge = hasPendingAction &&
+                    consecutiveNudges < MAX_CONSECUTIVE_NUDGES &&
+                    totalNudges < MAX_TOTAL_NUDGES &&
+                    toolStepCount < MAX_AUTONOMOUS_TOOL_STEPS
 
-                // Verify active subtask
-                currentPlan = taskPlanner.verifyAndCompleteSubtask(
-                    plan = currentPlan,
-                    subtaskId = activeSubtask?.id,
-                    verificationNotes = "Verified by agent completion"
-                )
-                if (currentPlan.allSubtasksCompleted) {
-                    currentPlan = taskPlanner.checkAndCompleteOverallPlan(currentPlan)
+                if (canNudge) {
+                    consecutiveNudges++
+                    totalNudges++
+
+                    val preToolNarrative = rawResponse.trim()
+                    if (preToolNarrative.isNotBlank()) {
+                        updateAssistantStreamingContent(
+                            assistantMessageId,
+                            "$preToolNarrative\n\n*(Nudge $consecutiveNudges/$MAX_CONSECUTIVE_NUDGES: Awaiting tool invocation for \"${activeSubtask?.description}\")*"
+                        )
+                    }
+
+                    // Add past turn to ongoing history
+                    historyMessages.add(currentTurnMessage)
+                    historyMessages.add(
+                        ChatMessage(
+                            id = UUID.randomUUID().toString(),
+                            conversationId = session.id,
+                            role = MessageRole.ASSISTANT,
+                            content = rawResponse,
+                            modelUsed = state.selectedModel
+                        )
+                    )
+
+                    val nudgeContent = buildString {
+                        appendLine("[EXECUTION CONTROL: Tool invocation required]")
+                        appendLine("You provided commentary or described next steps, but did not emit a ```tool_call``` block.")
+                        appendLine("Unfinished action subtask: \"${activeSubtask?.description}\".")
+                        if (activeSubtask?.status == SubtaskStatus.FAILED) {
+                            appendLine("The previous tool execution for this subtask FAILED. You must apply a repair with 'file_patch' or 'file_write' and re-run with 'python_execute' before concluding.")
+                        } else if (activeSubtask?.description?.contains("execute", ignoreCase = true) == true || activeSubtask?.description?.contains("run", ignoreCase = true) == true) {
+                            appendLine("The modified code has not been tested yet. You MUST invoke 'python_execute' to run and verify the output before claiming it is fixed.")
+                        } else if (activeSubtask?.description?.contains("modify", ignoreCase = true) == true || activeSubtask?.description?.contains("fix", ignoreCase = true) == true || activeSubtask?.description?.contains("write", ignoreCase = true) == true) {
+                            appendLine("The file modification has not been saved yet. You MUST invoke 'file_patch' or 'file_write' to apply the change on disk.")
+                        }
+                        appendLine("You MUST output the next tool call inside a ```tool_call``` block now to proceed with execution.")
+                        appendLine("Do NOT deliver an intermediate text-only response without a tool call until the objective is fully executed and verified.")
+                    }
+
+                    currentTurnMessage = ChatMessage(
+                        id = UUID.randomUUID().toString(),
+                        conversationId = session.id,
+                        role = MessageRole.USER,
+                        content = nudgeContent,
+                        modelUsed = state.selectedModel
+                    )
+                    // Loop continues to next iteration (THINKING)
+                } else {
+                    // Model provided its final answer (all actions complete or nudge limit reached)
+                    loopActive = false
+
+                    // Verify active subtask
+                    currentPlan = taskPlanner.verifyAndCompleteSubtask(
+                        plan = currentPlan,
+                        subtaskId = activeSubtask?.id,
+                        verificationNotes = "Verified by agent completion"
+                    )
+                    // Complete remaining synthesis subtasks
+                    val updatedSubtasks = currentPlan.subtasks.map {
+                        if (it.status != SubtaskStatus.COMPLETED) {
+                            it.copy(status = SubtaskStatus.COMPLETED, result = it.result ?: "Completed in final deliverable")
+                        } else it
+                    }
+                    currentPlan = currentPlan.copy(
+                        subtasks = updatedSubtasks,
+                        isCompleted = true,
+                        updatedAt = System.currentTimeMillis()
+                    )
+                    updateSessionPlan(currentPlan)
+
+                    streamAgentResponse(
+                        assistantMessageId = assistantMessageId,
+                        streamingAssistantMessage = streamingAssistantMessage,
+                        fullReplyText = rawResponse,
+                        initialSteps = initialSteps
+                    )
+                    return
                 }
-                updateSessionPlan(currentPlan)
-
-                streamAgentResponse(
-                    assistantMessageId = assistantMessageId,
-                    streamingAssistantMessage = streamingAssistantMessage,
-                    fullReplyText = rawResponse,
-                    initialSteps = initialSteps
-                )
-                return
             }
         }
 

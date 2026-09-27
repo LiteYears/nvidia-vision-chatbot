@@ -52,7 +52,7 @@ class FileReadTool(
 
     override suspend fun execute(arguments: Map<String, Any?>): ToolResult {
         val callId = UUID.randomUUID().toString()
-        val requestedPath = arguments["path"]?.toString()?.trim()
+        val requestedPath = (arguments["path"] ?: arguments["file"] ?: arguments["file_path"] ?: arguments["filePath"] ?: arguments["filename"])?.toString()?.trim()
 
         if (requestedPath.isNullOrBlank()) {
             return ToolResult.failure(
