@@ -37,7 +37,12 @@ class DefaultWebPageReader(
         private const val MAX_BODY_BYTES = 2L * 1024 * 1024
     }
 
-    override suspend fun open(url: String, maxChars: Int): Result<WebPageContent> =
+    override suspend fun open(
+        url: String,
+        maxChars: Int,
+        offset: Int,
+        section: String?
+    ): Result<WebPageContent> =
         withContext(Dispatchers.IO) {
             // 1. Security & syntax validation
             val validation = UrlSecurityValidator.validate(url)
@@ -131,12 +136,16 @@ class DefaultWebPageReader(
                         rawHtml = rawHtml,
                         sourceUrl = validUrl,
                         finalUrl = finalUrl,
-                        maxChars = maxChars
+                        maxChars = maxChars,
+                        offset = offset,
+                        section = section
                     )
 
                     val resolvedContent = if (pageContent.content.isBlank()) {
                         val fallback = buildString {
                             if (pageContent.title.isNotBlank()) appendLine("# ${pageContent.title}\n")
+                            if (pageContent.siteName.isNotBlank()) appendLine("- **Site**: ${pageContent.siteName}")
+                            if (pageContent.publishedDate.isNotBlank()) appendLine("- **Published**: ${pageContent.publishedDate}")
                             if (pageContent.metadata.isNotEmpty()) {
                                 pageContent.metadata.forEach { (k, v) -> appendLine("- **$k**: $v") }
                             }

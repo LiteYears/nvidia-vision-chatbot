@@ -13,7 +13,15 @@ data class WebPageContent(
     val content: String,
     val metadata: Map<String, String> = emptyMap(),
     val isTruncated: Boolean = false,
-    val totalExtractedChars: Int = 0
+    val totalExtractedChars: Int = 0,
+    val siteName: String = "",
+    val publishedDate: String = "",
+    val author: String = "",
+    val tableOfContents: List<String> = emptyList(),
+    val keyLinks: List<Pair<String, String>> = emptyList(),
+    val offset: Int = 0,
+    val nextOffset: Int? = null,
+    val activeSection: String? = null
 )
 
 /**
@@ -21,5 +29,10 @@ data class WebPageContent(
  * Isolated behind an interface to allow hermetic testing and pluggable parsers.
  */
 interface WebPageReader {
-    suspend fun open(url: String, maxChars: Int = 4000): Result<WebPageContent>
+    suspend fun open(
+        url: String,
+        maxChars: Int = 4000,
+        offset: Int = 0,
+        section: String? = null
+    ): Result<WebPageContent>
 }
