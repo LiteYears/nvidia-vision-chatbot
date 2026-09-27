@@ -41,19 +41,26 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
+import androidx.compose.material.icons.outlined.FolderZip
+import androidx.compose.material3.OutlinedButton
+import com.example.ui.viewmodel.UploadedZipInfo
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun AgentGoalWelcomeView(
     goalInput: String,
     onGoalInputChange: (String) -> Unit,
     onSubmitGoal: (String) -> Unit,
+    onUploadZip: (() -> Unit)? = null,
+    lastUploadedZip: UploadedZipInfo? = null,
     isLoading: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val exampleGoals = listOf(
+        "Inspect and improve uploaded codebase",
         "Optimize inference latency on NVIDIA Jetson",
         "Plan multi-modal vision pipeline architecture",
-        "Formulate strategy for edge AI deployment"
+        "Fix bugs and patch code sections"
     )
 
     Column(
@@ -203,6 +210,66 @@ fun AgentGoalWelcomeView(
                             contentDescription = null,
                             modifier = Modifier.size(16.dp)
                         )
+                    }
+                }
+
+                if (onUploadZip != null) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = onUploadZip,
+                        enabled = !isLoading,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(40.dp),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.FolderZip,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                text = "Upload Codebase (.ZIP)",
+                                style = MaterialTheme.typography.labelLarge.copy(
+                                    fontWeight = FontWeight.Medium,
+                                    fontSize = 13.sp
+                                )
+                            )
+                        }
+                    }
+                }
+
+                if (lastUploadedZip != null) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.FolderZip,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                text = "Loaded: ${lastUploadedZip.fileName} (${lastUploadedZip.totalFiles} files in workspace)",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    fontSize = 11.5.sp
+                                )
+                            )
+                        }
                     }
                 }
             }

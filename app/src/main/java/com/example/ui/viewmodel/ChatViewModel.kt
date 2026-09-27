@@ -41,6 +41,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import android.content.ContentResolver
+import android.provider.OpenableColumns
 import java.io.ByteArrayOutputStream
 import java.util.Locale
 import java.util.UUID
@@ -82,7 +86,15 @@ data class ChatUiState(
     val agentSessions: List<AgentSession> = emptyList(),
     val agentInputText: String = "",
     val isAgentLoading: Boolean = false,
-    val agentErrorMessage: String? = null
+    val agentErrorMessage: String? = null,
+    val lastUploadedZip: UploadedZipInfo? = null
+)
+
+data class UploadedZipInfo(
+    val fileName: String,
+    val totalFiles: Int,
+    val totalBytes: Long,
+    val extractedPaths: List<String>
 )
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
@@ -172,7 +184,112 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(selectedImageUri = null, selectedImageBase64 = null) }
     }
 
+    private fun getFileNameFromUri(uri: Uri): String {
+        var name = "archive.zip"
+        try {
+            if (uri.scheme == ContentResolver.SCHEME_CONTENT) {
+                val cursor = getApplication<Application>().contentResolver.query(uri, null, null, null, null)
+                cursor?.use {
+                    if (it.moveToFirst()) {
+                        val nameIndex = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (nameIndex != -1) {
+                            val displayName = it.getString(nameIndex)
+                            if (!displayName.isNullOrBlank()) {
+                                name = displayName
+                            }
+                        }
+                    }
+                }
+            } else if (uri.scheme == ContentResolver.SCHEME_FILE || uri.path != null) {
+                val path = uri.path
+                if (path != null) {
+                    name = File(path).name
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return name
+    }
+
+    fun onUploadZipFile(uri: Uri, targetSubdir: String = ".") {
+        _uiState.update { it.copy(isAgentLoading = true, agentErrorMessage = null) }
+        viewModelScope.launch {
+            try {
+                val fileName = getFileNameFromUri(uri)
+                val inputStream = getApplication<Application>().contentResolver.openInputStream(uri)
+                if (inputStream == null) {
+                    _uiState.update {
+                        it.copy(
+                            isAgentLoading = false,
+                            agentErrorMessage = "Failed to open input stream for $fileName"
+                        )
+                    }
+                    return@launch
+                }
+
+                val extractResult = withContext(Dispatchers.IO) {
+                    inputStream.use { stream ->
+                        workspaceManager.extractZipStream(
+                            inputStream = stream,
+                            targetSubdir = targetSubdir,
+                            overwrite = true
+                        )
+                    }
+                }
+
+                if (extractResult.isSuccess) {
+                    val zipInfo = UploadedZipInfo(
+                        fileName = fileName,
+                        totalFiles = extractResult.totalFiles,
+                        totalBytes = extractResult.totalBytes,
+                        extractedPaths = extractResult.extractedPaths
+                    )
+
+                    val previewList = if (extractResult.extractedPaths.size <= 10) {
+                        extractResult.extractedPaths.joinToString("\n- ") { it }
+                    } else {
+                        extractResult.extractedPaths.take(10).joinToString("\n- ") { it } +
+                            "\n... and ${extractResult.extractedPaths.size - 10} more files"
+                    }
+
+                    val prepopulatedPrompt = "I have uploaded the project codebase '$fileName' (${extractResult.totalFiles} files extracted into workspace).\n" +
+                        "Key extracted files:\n- $previewList\n\n" +
+                        "Please analyze the codebase architecture, review the key source files, and tell me what logical improvements, bug fixes, or enhancements you can make."
+
+                    _uiState.update {
+                        it.copy(
+                            currentMode = AppMode.AGENT,
+                            isAgentLoading = false,
+                            lastUploadedZip = zipInfo,
+                            agentInputText = prepopulatedPrompt
+                        )
+                    }
+                } else {
+                    _uiState.update {
+                        it.copy(
+                            isAgentLoading = false,
+                            agentErrorMessage = "Failed to extract $fileName: ${extractResult.error}"
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        isAgentLoading = false,
+                        agentErrorMessage = "Error extracting zip archive: ${e.message}"
+                    )
+                }
+            }
+        }
+    }
+
     fun onSelectDocumentUri(uri: Uri) {
+        val fileName = getFileNameFromUri(uri)
+        if (fileName.endsWith(".zip", ignoreCase = true)) {
+            onUploadZipFile(uri)
+            return
+        }
+
         _uiState.update { it.copy(isRagIndexing = true, errorMessage = null) }
         viewModelScope.launch {
             val result = RagEngine.indexDocument(getApplication(), uri)
@@ -807,19 +924,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         agentGenerationJob = viewModelScope.launch {
-            val toolsPrompt = toolRegistry.formatToolsForPrompt()
-            val agentSystemPrompt = "You are an autonomous engineering agent with coding and execution tools.\n\n" +
-                "USER OBJECTIVE: \"$trimmedGoal\"\n\n" +
-                "$toolsPrompt\n\n" +
-                "EXECUTION GUIDELINES:\n" +
-                "- If the goal requires creating, running, debugging, or fixing code, invoke the necessary tools immediately.\n" +
-                "- You operate with Claude Code-level capabilities: full filesystem access, standard pre-created directories (src/, scripts/, data/, output/, docs/, lib/, tests/, bin/), and support for all file types (including binary/images/archives via base64).\n" +
-                "- Package & dependency management: install Python libraries via 'pip install <package>' (installed into workspace lib/) and Node modules via 'npm install <package>' using 'run_command'.\n" +
-                "- You can run shell commands, scripts, and terminal tools (python3, pip, node, npm, git, bash) using 'run_command' without restrictions.\n" +
-                "- For Python tasks: Execute Python code using 'python_execute' or via 'run_command'.\n" +
-                "- For Web Browsing, News & Research: ALWAYS use 'web_open' to enter websites and read articles/news directly. If searching for sources, use 'web_search' first.\n" +
-                "- If execution produces an error or traceback, observe the diagnostics, update files, and re-run.\n" +
-                "- Only deliver your final response once the execution has verified the desired output."
+            val agentSystemPrompt = buildAgentSystemPrompt(trimmedGoal)
 
             executeAgentSessionTurn(
                 session = newSession,
@@ -830,6 +935,24 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 initialSteps = initialSteps
             )
         }
+    }
+
+    private fun buildAgentSystemPrompt(goal: String): String {
+        val toolsPrompt = toolRegistry.formatToolsForPrompt()
+        return "You are an autonomous engineering agent with coding and execution tools.\n\n" +
+            "USER OBJECTIVE: \"$goal\"\n\n" +
+            "$toolsPrompt\n\n" +
+            "EXECUTION GUIDELINES:\n" +
+            "- If the goal requires creating, running, debugging, or fixing code, invoke the necessary tools immediately.\n" +
+            "- You operate with Claude Code-level capabilities: full filesystem access, standard pre-created directories (src/, scripts/, data/, output/, docs/, lib/, tests/, bin/), and support for all file types (including binary/images/archives via base64).\n" +
+            "- When modifying, fixing, or updating existing source code files, prefer 'file_patch' over rewriting entire files with 'file_write'. 'file_patch' applies targeted surgical diffs (exact/fuzzy target_content & replacement_content, search/replace blocks, or unified diff hunks) accurately without truncating large files.\n" +
+            "- When working with uploaded code repositories or archives, unpack them using 'archive_extract' (or inspect workspace contents with 'file_list'), examine source files with 'file_read', and make precise modifications using 'file_patch'.\n" +
+            "- Package & dependency management: install Python libraries via 'pip install <package>' (installed into workspace lib/) and Node modules via 'npm install <package>' using 'run_command'.\n" +
+            "- You can run shell commands, scripts, and terminal tools (python3, pip, node, npm, git, bash) using 'run_command' without restrictions.\n" +
+            "- For Python tasks: Execute Python code using 'python_execute' or via 'run_command'.\n" +
+            "- For Web Browsing, News & Research: ALWAYS use 'web_open' to enter websites and read articles/news directly. If searching for sources, use 'web_search' first.\n" +
+            "- If execution produces an error or traceback, observe the diagnostics, update files, and re-run.\n" +
+            "- Only deliver your final response once the execution has verified the desired output."
     }
 
     fun sendAgentFollowUp(overrideText: String? = null) {
@@ -877,10 +1000,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         agentGenerationJob = viewModelScope.launch {
-            val toolsPrompt = toolRegistry.formatToolsForPrompt()
-            val agentSystemPrompt = "You are an autonomous NVIDIA Vision Agent working on the goal: \"${currentSession.goal}\".\n\n" +
-                "$toolsPrompt\n\n" +
-                "Respond to user inquiries and task adjustments concisely with technical precision."
+            val agentSystemPrompt = buildAgentSystemPrompt(currentSession.goal)
 
             executeAgentSessionTurn(
                 session = updatedSession,

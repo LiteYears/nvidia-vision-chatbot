@@ -7,9 +7,11 @@ import com.example.agent.tools.builtin.WebSearchTool
 import com.example.agent.tools.command.RunCommandTool
 import com.example.agent.tools.python.PythonExecuteTool
 import com.example.agent.tools.workspace.AgentWorkspaceManager
+import com.example.agent.tools.workspace.ArchiveExtractTool
 import com.example.agent.tools.workspace.DirectoryCreateTool
 import com.example.agent.tools.workspace.FileDeleteTool
 import com.example.agent.tools.workspace.FileListTool
+import com.example.agent.tools.workspace.FilePatchTool
 import com.example.agent.tools.workspace.FileReadTool
 import com.example.agent.tools.workspace.FileSearchTool
 import com.example.agent.tools.workspace.FileTreeTool
@@ -130,6 +132,8 @@ class ToolRegistry {
         sb.append("\n### CLAUDE CODE-LEVEL WORKSPACE & EXECUTION ARCHITECTURE\n")
         sb.append("- Standard folders are pre-created: `src/` (code), `scripts/` (runners), `data/` (inputs), `output/` (artifacts), `docs/` (documentation), `lib/` (packages), `tests/` (testing), `bin/` (executables).\n")
         sb.append("- All file types are supported: text, source code, JSON/CSV/YAML data, and binary files/images/archives (using `encoding: 'base64'` in `file_read` / `file_write`).\n")
+        sb.append("- Targeted code edits & diffs: ALWAYS use `file_patch` to modify, fix, or improve specific functions and code sections without rewriting entire files.\n")
+        sb.append("- Project ZIP Archives: unpack project codebases using `archive_extract` (e.g. `path: 'project.zip'`). Once extracted, inspect with `file_tree` and patch with `file_patch`.\n")
         sb.append("- Package management:\n")
         sb.append("  * Python: run `pip install <package>` (or `pip list`) via `run_command`. Packages install to `lib/` and are automatically discoverable.\n")
         sb.append("  * Node.js: run `npm init -y`, `npm install <package>`, and `npm run <cmd>` via `run_command`.\n")
@@ -176,8 +180,10 @@ class ToolRegistry {
                 register(FileSearchTool(workspaceManager))
                 register(FileReadTool(workspaceManager))
                 register(FileWriteTool(workspaceManager))
+                register(FilePatchTool(workspaceManager))
                 register(FileDeleteTool(workspaceManager))
                 register(DirectoryCreateTool(workspaceManager))
+                register(ArchiveExtractTool(workspaceManager))
                 register(RunCommandTool(workspaceManager))
                 register(PythonExecuteTool(workspaceManager))
             }

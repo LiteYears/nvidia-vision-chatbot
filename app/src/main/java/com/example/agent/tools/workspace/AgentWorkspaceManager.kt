@@ -280,6 +280,108 @@ node_modules/
     }
 
     /**
+     * Extracts a ZIP archive from an InputStream into a target directory inside the workspace.
+     * Enforces path safety to protect against Zip-Slip vulnerabilities.
+     */
+    fun extractZipStream(
+        inputStream: java.io.InputStream,
+        destinationDir: File = getWorkspaceDir(),
+        archiveName: String = "project.zip",
+        overwrite: Boolean = true
+    ): ZipExtractResult {
+        if (!destinationDir.exists()) {
+            destinationDir.mkdirs()
+        }
+        val canonicalDest = destinationDir.canonicalFile
+        val canonicalDestPath = canonicalDest.canonicalPath
+        val extractedPaths = mutableListOf<String>()
+        var totalBytes = 0L
+
+        return try {
+            java.util.zip.ZipInputStream(inputStream).use { zis ->
+                var entry = zis.nextEntry
+                while (entry != null) {
+                    val name = entry.name.replace('\\', '/')
+                    // Skip root directory or macOS noise
+                    if (name.startsWith("__MACOSX") || name.endsWith(".DS_Store")) {
+                        zis.closeEntry()
+                        entry = zis.nextEntry
+                        continue
+                    }
+
+                    val targetFile = File(canonicalDest, name).canonicalFile
+                    val targetPath = targetFile.canonicalPath
+
+                    // Zip-Slip security check: target must be inside destinationDir
+                    if (!targetPath.startsWith(canonicalDestPath + File.separator) && targetPath != canonicalDestPath) {
+                        throw SecurityException("Malicious zip entry detected attempting path traversal: '$name'")
+                    }
+
+                    if (entry.isDirectory) {
+                        targetFile.mkdirs()
+                    } else {
+                        targetFile.parentFile?.mkdirs()
+                        if (overwrite || !targetFile.exists()) {
+                            FileOutputStream(targetFile).use { fos ->
+                                val buffer = ByteArray(8192)
+                                var readCount: Int
+                                while (zis.read(buffer).also { readCount = it } != -1) {
+                                    fos.write(buffer, 0, readCount)
+                                    totalBytes += readCount
+                                }
+                            }
+                            val rel = getRelativePath(targetFile)
+                            extractedPaths.add(rel)
+                        }
+                    }
+                    zis.closeEntry()
+                    entry = zis.nextEntry
+                }
+            }
+
+            ZipExtractResult(
+                archiveName = archiveName,
+                totalFiles = extractedPaths.size,
+                totalBytes = totalBytes,
+                extractedPaths = extractedPaths,
+                isSuccess = true
+            )
+        } catch (e: Exception) {
+            ZipExtractResult(
+                archiveName = archiveName,
+                totalFiles = extractedPaths.size,
+                totalBytes = totalBytes,
+                extractedPaths = extractedPaths,
+                isSuccess = false,
+                errorMessage = e.message ?: e.javaClass.simpleName
+            )
+        }
+    }
+
+    /**
+     * Extracts a local ZIP file located inside the workspace into a destination directory.
+     */
+    fun extractZipFile(
+        zipFile: File,
+        destinationDir: File = getWorkspaceDir(),
+        overwrite: Boolean = true
+    ): ZipExtractResult {
+        if (!zipFile.exists() || !zipFile.isFile) {
+            return ZipExtractResult(
+                archiveName = zipFile.name,
+                totalFiles = 0,
+                totalBytes = 0L,
+                extractedPaths = emptyList(),
+                isSuccess = false,
+                errorMessage = "ZIP archive file not found: '${zipFile.path}'"
+            )
+        }
+        return FileInputStream(zipFile).use { fis ->
+            extractZipStream(fis, destinationDir, zipFile.name, overwrite)
+        }
+    }
+
+    /**
      * Deletes an entire session workspace (e.g. on explicit task deletion).
      */
     fun deleteWorkspace(sessionId: String): Boolean {
@@ -411,3 +513,13 @@ data class FileTypeInfo(
     val isBinary: Boolean,
     val description: String
 )
+
+data class ZipExtractResult(
+    val archiveName: String,
+    val totalFiles: Int,
+    val totalBytes: Long,
+    val extractedPaths: List<String>,
+    val isSuccess: Boolean,
+    val errorMessage: String? = null
+)
+

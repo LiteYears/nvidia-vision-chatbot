@@ -139,6 +139,15 @@ fun ChatScreen(
         }
     }
 
+    // Zip archive picker launcher for Agent Codebase Upload
+    val zipPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            viewModel.onUploadZipFile(uri)
+        }
+    }
+
     // Clear messages confirmation dialog state
     var showClearDialog by remember { mutableStateOf(false) }
 
@@ -149,6 +158,17 @@ fun ChatScreen(
                 context,
                 "Indexed '${doc.name}' (${doc.chunks.size} knowledge segments for RAG)",
                 Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    LaunchedEffect(uiState.lastUploadedZip) {
+        val zip = uiState.lastUploadedZip
+        if (zip != null) {
+            Toast.makeText(
+                context,
+                "Extracted '${zip.fileName}' (${zip.totalFiles} files). Ready in Agent mode!",
+                Toast.LENGTH_LONG
             ).show()
         }
     }
@@ -612,6 +632,17 @@ fun ChatScreen(
                             onSubmitGoal = { goal ->
                                 viewModel.createAgentSession(goal)
                             },
+                            onUploadZip = {
+                                zipPickerLauncher.launch(
+                                    arrayOf(
+                                        "application/zip",
+                                        "application/x-zip-compressed",
+                                        "application/octet-stream",
+                                        "*/*"
+                                    )
+                                )
+                            },
+                            lastUploadedZip = uiState.lastUploadedZip,
                             isLoading = uiState.isAgentLoading
                         )
                     } else {
@@ -729,7 +760,20 @@ fun ChatScreen(
                     "application/pdf",
                     "application/json",
                     "application/msword",
-                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "application/zip",
+                    "application/x-zip-compressed",
+                    "application/octet-stream"
+                )
+            )
+        },
+        onPickZip = {
+            zipPickerLauncher.launch(
+                arrayOf(
+                    "application/zip",
+                    "application/x-zip-compressed",
+                    "application/octet-stream",
+                    "*/*"
                 )
             )
         },
