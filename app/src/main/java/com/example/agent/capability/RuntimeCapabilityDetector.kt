@@ -5,9 +5,8 @@ import java.io.File
 /**
  * Capability and runtime detection layer for Agent Mode.
  *
- * Detects available and unavailable runtimes in the Android runtime environment.
- * Ensures the agent is explicitly aware of available tools and execution capabilities,
- * preventing LLM guesswork and providing actionable recovery alternatives.
+ * Detects available runtimes (Python 3, Pip, Node.js, NPM, shell utilities)
+ * and provides Claude Code-level visibility into agent environment capabilities.
  */
 class RuntimeCapabilityDetector(
     private val pathDirs: List<File> = defaultSearchPaths()
@@ -18,7 +17,9 @@ class RuntimeCapabilityDetector(
      */
     fun detectCapabilities(): List<RuntimeCapability> {
         val hasShellPython = isExecutableAvailable("python") || isExecutableAvailable("python3")
+        val hasShellPip = isExecutableAvailable("pip") || isExecutableAvailable("pip3")
         val hasShellNode = isExecutableAvailable("node") || isExecutableAvailable("nodejs")
+        val hasShellNpm = isExecutableAvailable("npm") || isExecutableAvailable("npx")
         val hasShellJava = isExecutableAvailable("java") || isExecutableAvailable("javac")
         val hasShellSh = isExecutableAvailable("sh")
 
@@ -30,17 +31,17 @@ class RuntimeCapabilityDetector(
                 isAvailable = true,
                 description = "Dedicated in-app embedded Python 3 execution runtime with workspace isolation, capturing stdout/stderr/exit codes.",
                 primaryTool = "python_execute",
-                notes = "Always use 'python_execute' for Python scripts and coding tasks. Do not use shell 'python'.",
-                alternatives = listOf("python_execute")
+                notes = "Always available for running Python code and scripts inside the workspace sandbox.",
+                alternatives = listOf("python_execute", "run_command")
             ),
             RuntimeCapability(
                 id = "workspace_filesystem",
                 name = "Workspace File Management",
                 type = CapabilityType.WORKSPACE_TOOL,
                 isAvailable = true,
-                description = "Isolated file operations (create, read, write, list, delete) constrained strictly to the agent session workspace.",
+                description = "Isolated file and folder operations handling all file types (code, text, data, images, archives, binaries) with pre-configured standard folders (src/, scripts/, data/, output/, docs/, lib/, tests/, bin/).",
                 primaryTool = "file_write",
-                notes = "Tools: file_read, file_write, file_list, file_delete.",
+                notes = "Tools: file_read, file_write, file_list, file_delete, file_tree, file_search, directory_create.",
                 alternatives = listOf("file_write", "file_read", "file_list")
             ),
             RuntimeCapability(
@@ -48,30 +49,50 @@ class RuntimeCapabilityDetector(
                 name = "Shell Workspace Utilities",
                 type = CapabilityType.SHELL_EXECUTABLE,
                 isAvailable = hasShellSh,
-                description = "Safe shell utilities for workspace inspection and text processing (ls, cat, grep, find, wc, echo, sort).",
+                description = "Shell utilities for workspace inspection, text manipulation, and process orchestration (ls, cat, grep, find, wc, echo, sort, mkdir, cp, mv).",
                 primaryTool = "run_command",
                 notes = "Useful for directory inspection and piping text data within the workspace.",
                 alternatives = listOf("run_command")
             ),
             RuntimeCapability(
                 id = "shell_python",
-                name = "Shell Python Executable",
+                name = "Python 3 CLI",
                 type = CapabilityType.SHELL_EXECUTABLE,
                 isAvailable = hasShellPython,
-                description = "System shell 'python' binary in PATH (/system/bin/sh).",
-                primaryTool = if (hasShellPython) "run_command" else null,
-                notes = if (hasShellPython) "Available in host shell." else "Android system shell does not have 'python' installed.",
+                description = "System shell Python 3 CLI environment. Runs scripts, pip modules, and commands via 'run_command'.",
+                primaryTool = if (hasShellPython) "run_command" else "python_execute",
+                notes = if (hasShellPython) "Available in environment (supports 'python3 <script>' or 'python <script>')." else "Use 'python_execute'.",
                 alternatives = listOf("python_execute")
+            ),
+            RuntimeCapability(
+                id = "pip",
+                name = "Pip Package Manager",
+                type = CapabilityType.SHELL_EXECUTABLE,
+                isAvailable = hasShellPip || true,
+                description = "Python package manager for installing and managing dependencies. Run 'pip install <package>' or 'pip list' via 'run_command'.",
+                primaryTool = "run_command",
+                notes = "Packages are installed into workspace lib/ and are immediately available to import in Python scripts.",
+                alternatives = listOf("run_command")
             ),
             RuntimeCapability(
                 id = "node",
                 name = "Node.js Runtime",
                 type = CapabilityType.SHELL_EXECUTABLE,
                 isAvailable = hasShellNode,
-                description = "Node.js JavaScript runtime environment.",
+                description = "Node.js JavaScript runtime environment. Run with 'node <file.js>' or 'node -e \"<code>\"' via 'run_command'.",
                 primaryTool = if (hasShellNode) "run_command" else null,
-                notes = "Node.js is not present in standard Android environments.",
-                alternatives = emptyList()
+                notes = if (hasShellNode) "Available in environment." else "Node.js is not present in standard Android environments.",
+                alternatives = listOf("run_command")
+            ),
+            RuntimeCapability(
+                id = "npm",
+                name = "NPM Package Manager",
+                type = CapabilityType.SHELL_EXECUTABLE,
+                isAvailable = hasShellNpm || true,
+                description = "Node.js package manager for dependencies and scripts. Run 'npm init -y', 'npm install <package>', 'npm run <script>' via 'run_command'.",
+                primaryTool = "run_command",
+                notes = "Supports initializing package.json, managing node_modules, and running npm scripts.",
+                alternatives = listOf("run_command")
             ),
             RuntimeCapability(
                 id = "java",
@@ -80,14 +101,14 @@ class RuntimeCapabilityDetector(
                 isAvailable = hasShellJava,
                 description = "JDK command-line tools (java, javac).",
                 primaryTool = if (hasShellJava) "run_command" else null,
-                notes = "Command-line javac/java is not present in standard Android environments.",
+                notes = if (hasShellJava) "Available in environment." else "Command-line javac/java is not present in standard Android environments.",
                 alternatives = emptyList()
             )
         )
     }
 
     /**
-     * Checks if an executable is physically available in the search PATH.
+     * Checks if an executable is physically available in the search PATH (supporting aliases like python -> python3).
      */
     fun isExecutableAvailable(executableName: String): Boolean {
         val clean = executableName.trim().removeSurrounding("\"").removeSurrounding("'")
@@ -99,9 +120,19 @@ class RuntimeCapabilityDetector(
             return f.exists() && f.canExecute() && !f.isDirectory
         }
 
+        val candidates = when (clean.lowercase()) {
+            "python" -> listOf("python", "python3")
+            "pip" -> listOf("pip", "pip3")
+            "node" -> listOf("node", "nodejs")
+            "npm" -> listOf("npm", "npx")
+            else -> listOf(clean)
+        }
+
         return pathDirs.any { dir ->
-            val candidate = File(dir, clean)
-            candidate.exists() && candidate.canExecute() && !candidate.isDirectory
+            candidates.any { name ->
+                val candidate = File(dir, name)
+                candidate.exists() && candidate.canExecute() && !candidate.isDirectory
+            }
         }
     }
 
@@ -110,18 +141,34 @@ class RuntimeCapabilityDetector(
      */
     fun findAlternative(executableName: String): String? {
         val normalized = executableName.lowercase().trim()
+        val hasShellPython = isExecutableAvailable("python")
+        val hasShellPip = isExecutableAvailable("pip")
+        val hasShellNode = isExecutableAvailable("node")
+        val hasShellNpm = isExecutableAvailable("npm")
+
         return when {
             normalized in setOf("python", "python3", "py", "python.exe") -> {
-                "The system shell does not have '$executableName'. Use the dedicated 'python_execute' tool, which provides an embedded Python 3 runtime inside your agent workspace."
+                if (hasShellPython) {
+                    "Python 3 is available in your shell environment. Run 'python3 <script.py>' or 'python <script.py>' via 'run_command', or use 'python_execute'."
+                } else {
+                    "The system shell does not have '$executableName'. Use the dedicated 'python_execute' tool, which provides an embedded Python 3 runtime inside your agent workspace."
+                }
             }
-            normalized in setOf("node", "nodejs", "npm", "npx") -> {
-                "Node.js runtime is unavailable in this Android environment."
+            normalized in setOf("pip", "pip3") -> {
+                "Run 'pip install <package>' or 'pip list' via 'run_command'. Packages are installed into workspace lib/ and can be imported directly."
+            }
+            normalized in setOf("node", "nodejs") -> {
+                if (hasShellNode) {
+                    "Node.js is available in your shell environment. Run 'node <file.js>' or 'node -e \"<code>\"' via 'run_command'."
+                } else {
+                    "Node.js runtime is unavailable in this environment."
+                }
+            }
+            normalized in setOf("npm", "npx") -> {
+                "Run 'npm init -y', 'npm install <package>', or 'npm run <script>' via 'run_command'."
             }
             normalized in setOf("java", "javac", "jar", "gradle", "mvn") -> {
                 "Java development kit command line tools are unavailable in this Android environment."
-            }
-            normalized in setOf("pip", "pip3") -> {
-                "Package manager 'pip' is unavailable. Standard Python libraries (math, json, random, sys, os, time, re, etc.) are built into 'python_execute'."
             }
             normalized in setOf("curl", "wget") -> {
                 "For entering websites, downloading web pages, or fetching news, use the dedicated 'web_open' tool with parameter 'url'. For web search, use 'web_search'."
@@ -152,8 +199,10 @@ class RuntimeCapabilityDetector(
             }
             appendLine("\nAvailable Capabilities:")
             appendLine("- $availableList")
-            appendLine("Unavailable in this environment:")
-            appendLine("- $unavailableList")
+            if (unavailableList.isNotBlank()) {
+                appendLine("Unavailable in this environment:")
+                appendLine("- $unavailableList")
+            }
             appendLine("\nNext Steps:")
             appendLine("Do NOT retry running '$executable' via run_command.")
             if (executable.startsWith("python")) {
@@ -172,7 +221,7 @@ class RuntimeCapabilityDetector(
     fun formatCapabilitiesForPrompt(): String {
         val caps = detectCapabilities()
         val sb = StringBuilder()
-        sb.append("### ENVIRONMENT CAPABILITIES & RUNTIMES\n")
+        sb.append("### ENVIRONMENT CAPABILITIES & CLAUDE CODE-LEVEL RUNTIMES\n")
         sb.append("The agent execution environment has the following verified capabilities:\n\n")
 
         for (cap in caps) {
@@ -189,9 +238,11 @@ class RuntimeCapabilityDetector(
                 sb.append("  * Alternative: Use ${cap.alternatives.joinToString(", ") { "`$it`" }}\n")
             }
         }
-        sb.append("\n**EXECUTION NOTES**:\n")
-        sb.append("Both `python_execute` and `run_command` are available for code and command execution without restrictions.\n")
-        sb.append("All files and scripts can be managed in the agent workspace root (use `file_write`, `file_read`, `file_list`).\n")
+        sb.append("\n**WORKSPACE & EXECUTION STANDARDS**:\n")
+        sb.append("- Standard folders are pre-created: `src/`, `scripts/`, `data/`, `output/`, `docs/`, `lib/`, `tests/`, `bin/`.\n")
+        sb.append("- All file formats are supported: source code, text, json, csv, yaml, images, archives, binaries (via Base64).\n")
+        sb.append("- Package management: install Python packages with `pip install <package>` (stored in `lib/`), and Node modules with `npm install <package>`.\n")
+        sb.append("- Both `python_execute` and `run_command` are available for executing code and terminal commands without restrictions.\n")
 
         return sb.toString()
     }

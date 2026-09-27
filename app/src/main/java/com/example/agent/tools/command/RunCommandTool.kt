@@ -21,14 +21,14 @@ class RunCommandTool(
 
     override val definition: ToolDefinition = ToolDefinition(
         name = "run_command",
-        description = "Executes shell commands, scripts, and terminal utilities. " +
+        description = "Executes shell commands, scripts, and terminal utilities (including python3, pip, node, npm, bash, git). " +
             "Returns stdout, stderr, exit code, and execution duration. " +
-            "Runs commands directly with controlled execution timeout and output buffer capture.",
+            "Automatically resolves environment paths (PATH, PYTHONPATH, NODE_PATH) so local libraries in lib/ and node_modules/ are directly accessible.",
         parameters = listOf(
             ToolParameter(
                 name = "command",
                 type = "string",
-                description = "The shell command to execute (e.g. 'ls -la', 'python script.py', 'git status', 'grep pattern file.txt'). Note: for entering websites and reading news, use 'web_open' or 'web_search'.",
+                description = "The shell command to execute (e.g. 'pip install <pkg>', 'node script.js', 'npm init -y', 'python3 script.py', 'ls -la', 'git status'). Note: for entering websites and reading news, use 'web_open' or 'web_search'.",
                 required = true
             ),
             ToolParameter(

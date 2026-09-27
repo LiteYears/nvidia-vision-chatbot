@@ -7,6 +7,7 @@ import com.example.agent.tools.builtin.WebSearchTool
 import com.example.agent.tools.command.RunCommandTool
 import com.example.agent.tools.python.PythonExecuteTool
 import com.example.agent.tools.workspace.AgentWorkspaceManager
+import com.example.agent.tools.workspace.DirectoryCreateTool
 import com.example.agent.tools.workspace.FileDeleteTool
 import com.example.agent.tools.workspace.FileListTool
 import com.example.agent.tools.workspace.FileReadTool
@@ -126,8 +127,13 @@ class ToolRegistry {
         sb.append("   - Open additional pages with `web_open` to gather missing context or cross-verify facts.\n")
         sb.append("4. SYNTHESIZE & CITE:\n")
         sb.append("   - Provide a comprehensive, factual answer citing the source URLs.\n")
-        sb.append("5. TOOL SELECTION GUIDELINE:\n")
-        sb.append("   - Always use `web_open` (not curl) for web browsing and reading web content.\n")
+        sb.append("\n### CLAUDE CODE-LEVEL WORKSPACE & EXECUTION ARCHITECTURE\n")
+        sb.append("- Standard folders are pre-created: `src/` (code), `scripts/` (runners), `data/` (inputs), `output/` (artifacts), `docs/` (documentation), `lib/` (packages), `tests/` (testing), `bin/` (executables).\n")
+        sb.append("- All file types are supported: text, source code, JSON/CSV/YAML data, and binary files/images/archives (using `encoding: 'base64'` in `file_read` / `file_write`).\n")
+        sb.append("- Package management:\n")
+        sb.append("  * Python: run `pip install <package>` (or `pip list`) via `run_command`. Packages install to `lib/` and are automatically discoverable.\n")
+        sb.append("  * Node.js: run `npm init -y`, `npm install <package>`, and `npm run <cmd>` via `run_command`.\n")
+        sb.append("  * Script execution: run with `python3 <file.py>`, `node <file.js>`, or `python_execute`.\n")
 
         return sb.toString()
     }
@@ -171,6 +177,7 @@ class ToolRegistry {
                 register(FileReadTool(workspaceManager))
                 register(FileWriteTool(workspaceManager))
                 register(FileDeleteTool(workspaceManager))
+                register(DirectoryCreateTool(workspaceManager))
                 register(RunCommandTool(workspaceManager))
                 register(PythonExecuteTool(workspaceManager))
             }

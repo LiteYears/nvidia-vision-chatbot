@@ -11,11 +11,14 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Robust process runner for executing shell commands and scripts.
+ * Robust process runner for executing shell commands and scripts with Claude Code-like capabilities.
  *
  * Provides:
  * - Dynamic shell resolution (/system/bin/sh, /bin/sh, etc.)
- * - Rich PATH resolution ensuring Android binaries (pm, am, getprop, curl, ping) are discoverable
+ * - Rich PATH resolution ensuring Android binaries, Linux toolchains, Node.js, and Python are discoverable
+ * - Automatic aliasing (python -> python3, pip -> pip3, node -> nodejs) when primary alias is absent
+ * - Integration with workspace directories (bin/, node_modules/.bin, lib/, src/) via PATH, PYTHONPATH, and NODE_PATH
+ * - Built-in fallback execution for curl, wget, pip, and npm when host binaries are missing
  * - Strict execution timeouts with process tree cleanup
  * - Stream size limiting to protect memory
  * - Non-blocking asynchronous stdout/stderr collection
@@ -36,46 +39,70 @@ class ProcessCommandRunner : CommandRunner {
             workingDir.mkdirs()
         }
 
-        val processBuilder = ProcessBuilder(shell, "-c", command)
+        // Configure search paths including workspace bin/ and node_modules/.bin
+        val systemEnv = System.getenv()
+        val localBin = File(workingDir, "bin").canonicalPath
+        val nodeModulesBin = File(workingDir, "node_modules/.bin").canonicalPath
+        val sysPaths = (systemEnv["PATH"] ?: "/bin:/usr/bin:/usr/local/bin:/system/bin:/system/xbin")
+            .split(':')
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+
+        val allSearchDirs = (listOf(localBin, nodeModulesBin) + sysPaths + listOf(
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/sbin",
+            "/system/bin",
+            "/system/xbin",
+            "/vendor/bin"
+        )).distinct()
+
+        val pathCandidates = allSearchDirs.joinToString(":")
+
+        // Transparently alias python -> python3, pip -> pip3, node -> nodejs if needed
+        val effectiveCommand = preprocessCommand(command, allSearchDirs)
+
+        val processBuilder = ProcessBuilder(shell, "-c", effectiveCommand)
         processBuilder.directory(workingDir)
 
         val env = processBuilder.environment()
-        
-        // Pass necessary system variables for Android shell tools
-        val systemEnv = System.getenv()
-        val pathCandidates = listOf(
-            systemEnv["PATH"],
-            "/system/bin",
-            "/system/xbin",
-            "/sbin",
-            "/vendor/bin",
-            "/bin",
-            "/usr/bin",
-            "/usr/local/bin"
-        ).filterNotNull().joinToString(":")
-
         env["PATH"] = pathCandidates
         env["HOME"] = workingDir.canonicalPath
         env["PWD"] = workingDir.canonicalPath
         env["TMPDIR"] = workingDir.canonicalPath
         env["LANG"] = "C.UTF-8"
         env["LC_ALL"] = "C.UTF-8"
+
+        // Wire local libraries so imported Python modules and Node packages work automatically
+        val libDir = File(workingDir, "lib").canonicalPath
+        val srcDir = File(workingDir, "src").canonicalPath
+        val nodeModulesDir = File(workingDir, "node_modules").canonicalPath
+
+        env["PYTHONPATH"] = listOf(libDir, srcDir, workingDir.canonicalPath).joinToString(":")
+        env["NODE_PATH"] = listOf(nodeModulesDir, workingDir.canonicalPath).joinToString(":")
         
         systemEnv["ANDROID_ROOT"]?.let { env["ANDROID_ROOT"] = it }
         systemEnv["ANDROID_DATA"]?.let { env["ANDROID_DATA"] = it }
 
-        val trimmedCmd = command.trim()
+        val trimmedCmd = effectiveCommand.trim()
         val firstToken = trimmedCmd.split(Regex("\\s+")).firstOrNull()?.trim('\'', '"')?.let { File(it).name.lowercase() }
         val isCurlOrWget = firstToken == "curl" || firstToken == "wget"
+        val isPip = firstToken == "pip" || firstToken == "pip3"
+        val isNpm = firstToken == "npm" || firstToken == "npx"
 
         val process = try {
             processBuilder.start()
         } catch (e: Exception) {
             if (isCurlOrWget) {
                 val fallback = executeHttpFallback(command, workingDir, maxOutputBytes)
-                if (fallback != null) {
-                    return@withContext fallback
-                }
+                if (fallback != null) return@withContext fallback
+            } else if (isPip) {
+                val fallback = executePipFallback(command, workingDir, maxOutputBytes)
+                if (fallback != null) return@withContext fallback
+            } else if (isNpm) {
+                val fallback = executeNpmFallback(command, workingDir, maxOutputBytes)
+                if (fallback != null) return@withContext fallback
             }
             val duration = System.currentTimeMillis() - startTime
             return@withContext CommandExecutionResult(
@@ -154,6 +181,20 @@ class ProcessCommandRunner : CommandRunner {
             }
         }
 
+        if (isPip && (isNotFound || (exitCode != 0 && stdout.isBlank()))) {
+            val fallback = executePipFallback(command, workingDir, maxOutputBytes)
+            if (fallback != null) {
+                return@withContext fallback
+            }
+        }
+
+        if (isNpm && (isNotFound || (exitCode != 0 && stdout.isBlank()))) {
+            val fallback = executeNpmFallback(command, workingDir, maxOutputBytes)
+            if (fallback != null) {
+                return@withContext fallback
+            }
+        }
+
         CommandExecutionResult(
             exitCode = exitCode,
             stdout = stdout,
@@ -162,6 +203,38 @@ class ProcessCommandRunner : CommandRunner {
             isTimedOut = isTimedOut.get(),
             isTruncated = stdoutReader.isTruncated || stderrReader.isTruncated
         )
+    }
+
+    private fun preprocessCommand(command: String, searchDirs: List<String>): String {
+        val trimmed = command.trim()
+        val tokens = trimmed.split(Regex("\\s+"))
+        if (tokens.isEmpty()) return command
+        val first = tokens[0]
+
+        val hasPython = isBinaryInPath("python", searchDirs)
+        val hasPython3 = isBinaryInPath("python3", searchDirs)
+        val hasPip = isBinaryInPath("pip", searchDirs)
+        val hasPip3 = isBinaryInPath("pip3", searchDirs)
+        val hasNode = isBinaryInPath("node", searchDirs)
+        val hasNodejs = isBinaryInPath("nodejs", searchDirs)
+
+        if (!hasPython && hasPython3 && first == "python") {
+            return "python3" + trimmed.removePrefix("python")
+        }
+        if (!hasPip && hasPip3 && first == "pip") {
+            return "pip3" + trimmed.removePrefix("pip")
+        }
+        if (!hasNode && hasNodejs && first == "node") {
+            return "nodejs" + trimmed.removePrefix("node")
+        }
+        return command
+    }
+
+    private fun isBinaryInPath(name: String, searchDirs: List<String>): Boolean {
+        return searchDirs.any { dir ->
+            val f = File(dir, name)
+            f.exists() && f.canExecute() && !f.isDirectory
+        }
     }
 
     private fun executeHttpFallback(command: String, workingDir: File, maxOutputBytes: Int): CommandExecutionResult? {
@@ -249,6 +322,150 @@ class ProcessCommandRunner : CommandRunner {
                 durationMs = System.currentTimeMillis() - startTime
             )
         }
+    }
+
+    private fun executePipFallback(command: String, workingDir: File, maxOutputBytes: Int): CommandExecutionResult? {
+        val tokens = command.trim().split(Regex("\\s+"))
+        if (tokens.size < 2) return null
+        val action = tokens[1].lowercase()
+        val startTime = System.currentTimeMillis()
+
+        if (action == "install" && tokens.size >= 3) {
+            val rawPkg = tokens[2].trim('\'', '"')
+            val pkg = rawPkg.split("==").first().split(">=").first().split("<=").first().lowercase()
+            val libDir = File(workingDir, "lib").apply { mkdirs() }
+
+            return try {
+                val client = OkHttpClient.Builder()
+                    .followRedirects(true)
+                    .connectTimeout(12, TimeUnit.SECONDS)
+                    .readTimeout(20, TimeUnit.SECONDS)
+                    .build()
+
+                val pypiUrl = "https://pypi.org/pypi/$pkg/json"
+                val req = Request.Builder().url(pypiUrl).build()
+                client.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        return CommandExecutionResult(
+                            exitCode = 1,
+                            stdout = "",
+                            stderr = "PyPI package '$pkg' not found (HTTP ${resp.code})",
+                            durationMs = System.currentTimeMillis() - startTime
+                        )
+                    }
+
+                    val json = resp.body?.string() ?: ""
+                    val wheelUrlRegex = Regex("\"url\":\\s*\"(https://files\\.pythonhosted\\.org/[^\"]+\\.whl)\"")
+                    val matches = wheelUrlRegex.findAll(json).map { it.groupValues[1] }.toList()
+                    val targetUrl = matches.firstOrNull { it.contains("none-any.whl") } ?: matches.firstOrNull()
+
+                    if (targetUrl == null) {
+                        return CommandExecutionResult(
+                            exitCode = 1,
+                            stdout = "",
+                            stderr = "Could not find a pre-built wheel for '$pkg' on PyPI",
+                            durationMs = System.currentTimeMillis() - startTime
+                        )
+                    }
+
+                    val dlReq = Request.Builder().url(targetUrl).build()
+                    client.newCall(dlReq).execute().use { dlResp ->
+                        val wheelBytes = dlResp.body?.bytes() ?: ByteArray(0)
+                        java.util.zip.ZipInputStream(java.io.ByteArrayInputStream(wheelBytes)).use { zis ->
+                            var entry = zis.nextEntry
+                            while (entry != null) {
+                                if (!entry.isDirectory && !entry.name.contains("__pycache__")) {
+                                    val outFile = File(libDir, entry.name)
+                                    outFile.parentFile?.mkdirs()
+                                    outFile.outputStream().use { fos -> zis.copyTo(fos) }
+                                }
+                                entry = zis.nextEntry
+                            }
+                        }
+                    }
+
+                    CommandExecutionResult(
+                        exitCode = 0,
+                        stdout = "Successfully installed $pkg into lib/ (${libDir.canonicalPath})\nPackage is available to import in Python scripts.",
+                        stderr = "",
+                        durationMs = System.currentTimeMillis() - startTime
+                    )
+                }
+            } catch (e: Exception) {
+                CommandExecutionResult(
+                    exitCode = 1,
+                    stdout = "",
+                    stderr = "pip fallback install failed for '$pkg': ${e.message}",
+                    durationMs = System.currentTimeMillis() - startTime
+                )
+            }
+        } else if (action == "list") {
+            val libDir = File(workingDir, "lib")
+            val items = libDir.listFiles()?.filter { it.isDirectory || it.name.endsWith(".py") } ?: emptyList()
+            val out = buildString {
+                appendLine("Installed packages in workspace (lib/):")
+                appendLine("---------------------------------------")
+                if (items.isEmpty()) {
+                    appendLine("(No packages installed in lib/)")
+                } else {
+                    for (item in items) {
+                        appendLine("  - ${item.name.removeSuffix(".py").removeSuffix(".dist-info")}")
+                    }
+                }
+            }
+            return CommandExecutionResult(
+                exitCode = 0,
+                stdout = out.trim(),
+                stderr = "",
+                durationMs = System.currentTimeMillis() - startTime
+            )
+        }
+        return null
+    }
+
+    private fun executeNpmFallback(command: String, workingDir: File, maxOutputBytes: Int): CommandExecutionResult? {
+        val tokens = command.trim().split(Regex("\\s+"))
+        if (tokens.size < 2) return null
+        val action = tokens[1].lowercase()
+        val startTime = System.currentTimeMillis()
+
+        if (action == "init") {
+            val packageJson = File(workingDir, "package.json")
+            if (!packageJson.exists()) {
+                packageJson.writeText(
+                    """{
+  "name": "agent-workspace",
+  "version": "1.0.0",
+  "description": "Agent Sandbox Project",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
+"""
+                )
+            }
+            return CommandExecutionResult(
+                exitCode = 0,
+                stdout = "Wrote to ${packageJson.canonicalPath}:\n\n${packageJson.readText()}",
+                stderr = "",
+                durationMs = System.currentTimeMillis() - startTime
+            )
+        } else if (action == "list") {
+            val packageJson = File(workingDir, "package.json")
+            val content = if (packageJson.exists()) packageJson.readText() else "{}"
+            return CommandExecutionResult(
+                exitCode = 0,
+                stdout = "agent-workspace@1.0.0 ${workingDir.canonicalPath}\n$content",
+                stderr = "",
+                durationMs = System.currentTimeMillis() - startTime
+            )
+        }
+        return null
     }
 
     private fun terminateProcess(process: Process) {

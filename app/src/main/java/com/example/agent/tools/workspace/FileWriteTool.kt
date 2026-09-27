@@ -7,10 +7,12 @@ import com.example.agent.tools.ToolResult
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.util.Base64
 import java.util.UUID
 
 /**
- * Tool for writing text files inside the agent workspace.
+ * Tool for creating and writing files of any type (text, code, data, or binary)
+ * inside the agent workspace.
  * Automatically creates any missing parent directories.
  */
 class FileWriteTool(
@@ -19,19 +21,20 @@ class FileWriteTool(
 
     override val definition: ToolDefinition = ToolDefinition(
         name = "file_write",
-        description = "Writes text content to a file inside the agent workspace. " +
+        description = "Writes content to a file inside the agent workspace. " +
+            "Supports all file types (text, source code, data, or binary via Base64). " +
             "Automatically creates missing parent directories when needed.",
         parameters = listOf(
             ToolParameter(
                 name = "path",
                 type = "string",
-                description = "Relative path of the file to create or write (e.g. 'summary.md', 'src/config.json')",
+                description = "Relative path of the file to create or write (e.g. 'summary.md', 'src/config.json', 'data/weights.bin')",
                 required = true
             ),
             ToolParameter(
                 name = "content",
                 type = "string",
-                description = "The text content to write into the file",
+                description = "The content to write into the file (text or Base64 string for binary)",
                 required = true
             ),
             ToolParameter(
@@ -40,6 +43,13 @@ class FileWriteTool(
                 description = "Whether to append to the existing file rather than overwriting it (default: false)",
                 required = false,
                 default = false
+            ),
+            ToolParameter(
+                name = "encoding",
+                type = "string",
+                description = "Content encoding: 'utf-8' (default for text/code) or 'base64' (for binary files, images, archives)",
+                required = false,
+                default = "utf-8"
             )
         )
     )
@@ -62,6 +72,7 @@ class FileWriteTool(
             is String -> a.equals("true", ignoreCase = true)
             else -> false
         }
+        val encoding = arguments["encoding"]?.toString()?.trim()?.lowercase() ?: "utf-8"
 
         val targetFile: File
         try {
@@ -99,7 +110,21 @@ class FileWriteTool(
                 }
             }
 
-            val bytes = content.toByteArray(Charsets.UTF_8)
+            val bytes: ByteArray = if (encoding == "base64") {
+                val cleaned = content.trim().replace(Regex("\\s+"), "")
+                try {
+                    Base64.getDecoder().decode(cleaned)
+                } catch (e: IllegalArgumentException) {
+                    return ToolResult.failure(
+                        callId = callId,
+                        toolName = definition.name,
+                        error = "Failed to decode Base64 content: ${e.message}"
+                    )
+                }
+            } else {
+                content.toByteArray(Charsets.UTF_8)
+            }
+
             FileOutputStream(targetFile, isAppend).use { fos ->
                 fos.write(bytes)
                 fos.flush()
@@ -108,11 +133,12 @@ class FileWriteTool(
             val relPath = workspaceManager.getRelativePath(targetFile)
             val actionWord = if (isAppend) "appended to" else "written to"
             val totalSize = targetFile.length()
+            val typeInfo = workspaceManager.getFileTypeInfo(targetFile)
 
             ToolResult.success(
                 callId = callId,
                 toolName = definition.name,
-                result = "Successfully $actionWord '$relPath' (${bytes.size} bytes written, total file size: $totalSize bytes)."
+                result = "Successfully $actionWord '$relPath' (${bytes.size} bytes written, format: ${typeInfo.category}, total size: $totalSize bytes)."
             )
         } catch (e: IOException) {
             ToolResult.failure(

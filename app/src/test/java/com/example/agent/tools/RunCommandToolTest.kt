@@ -30,7 +30,7 @@ class RunCommandToolTest {
     @Before
     fun setUp() {
         tempBaseDir = Files.createTempDirectory("run_command_test_").toFile()
-        workspaceManager = AgentWorkspaceManager(tempBaseDir)
+        workspaceManager = AgentWorkspaceManager(tempBaseDir, autoInitStandardFolders = false)
         workspaceManager.activeSessionId = "session_cmd_test"
 
         runCommandTool = RunCommandTool(workspaceManager)
@@ -350,5 +350,38 @@ class RunCommandToolTest {
             assertEquals("All commands should have STANDARD risk", com.example.agent.tools.command.CommandRiskLevel.STANDARD, classification.riskLevel)
             assertFalse("Commands should not be marked privileged or sensitive", classification.isPrivilegedOrSensitive)
         }
+    }
+
+    @Test
+    fun testNodeExecution() = runBlocking {
+        val result = runCommandTool.execute(
+            mapOf("command" to "node -e \"console.log('NODE_AGENT_RUNNER: ' + (20 + 22))\"")
+        )
+        assertTrue("Node execution should succeed: ${result.error}", result.isSuccess)
+        assertTrue(result.result!!.contains("NODE_AGENT_RUNNER: 42"))
+    }
+
+    @Test
+    fun testPython3Execution() = runBlocking {
+        val result = runCommandTool.execute(
+            mapOf("command" to "python3 -c \"print('PY3_AGENT_RUNNER: 42')\"")
+        )
+        assertTrue("Python3 execution should succeed: ${result.error}", result.isSuccess)
+        assertTrue(result.result!!.contains("PY3_AGENT_RUNNER: 42"))
+    }
+
+    @Test
+    fun testPipAndNpmCommandExecution() = runBlocking {
+        val pipResult = runCommandTool.execute(
+            mapOf("command" to "pip --version")
+        )
+        assertTrue("pip --version should succeed: ${pipResult.error}", pipResult.isSuccess)
+        assertTrue(pipResult.result!!.contains("pip"))
+
+        val npmResult = runCommandTool.execute(
+            mapOf("command" to "npm --version")
+        )
+        assertTrue("npm --version should succeed: ${npmResult.error}", npmResult.isSuccess)
+        assertTrue(npmResult.result!!.contains("."))
     }
 }

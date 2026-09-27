@@ -813,7 +813,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 "$toolsPrompt\n\n" +
                 "EXECUTION GUIDELINES:\n" +
                 "- If the goal requires creating, running, debugging, or fixing code, invoke the necessary tools immediately.\n" +
-                "- You can run shell commands, scripts, and terminal tools using 'run_command' without restrictions.\n" +
+                "- You operate with Claude Code-level capabilities: full filesystem access, standard pre-created directories (src/, scripts/, data/, output/, docs/, lib/, tests/, bin/), and support for all file types (including binary/images/archives via base64).\n" +
+                "- Package & dependency management: install Python libraries via 'pip install <package>' (installed into workspace lib/) and Node modules via 'npm install <package>' using 'run_command'.\n" +
+                "- You can run shell commands, scripts, and terminal tools (python3, pip, node, npm, git, bash) using 'run_command' without restrictions.\n" +
                 "- For Python tasks: Execute Python code using 'python_execute' or via 'run_command'.\n" +
                 "- For Web Browsing, News & Research: ALWAYS use 'web_open' to enter websites and read articles/news directly. If searching for sources, use 'web_search' first.\n" +
                 "- If execution produces an error or traceback, observe the diagnostics, update files, and re-run.\n" +

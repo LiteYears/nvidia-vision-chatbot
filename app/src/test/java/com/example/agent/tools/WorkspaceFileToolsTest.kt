@@ -29,7 +29,7 @@ class WorkspaceFileToolsTest {
     @Before
     fun setUp() {
         tempBaseDir = Files.createTempDirectory("agent_workspace_test_").toFile()
-        workspaceManager = AgentWorkspaceManager(tempBaseDir)
+        workspaceManager = AgentWorkspaceManager(tempBaseDir, autoInitStandardFolders = false)
         workspaceManager.activeSessionId = "session_test_1"
 
         listTool = FileListTool(workspaceManager)
@@ -347,5 +347,117 @@ class WorkspaceFileToolsTest {
         assertTrue(promptStr.contains("file_read"))
         assertTrue(promptStr.contains("file_write"))
         assertTrue(promptStr.contains("file_delete"))
+        assertTrue(promptStr.contains("directory_create"))
+    }
+
+    @Test
+    fun testStandardDirectoriesAutoCreationAndStructure() {
+        val stdBaseDir = Files.createTempDirectory("agent_std_test_").toFile()
+        try {
+            val stdManager = AgentWorkspaceManager(stdBaseDir, autoInitStandardFolders = true)
+            val workspace = stdManager.getWorkspaceDir("test_session_std")
+
+            assertTrue("Workspace directory must exist", workspace.exists())
+            for (sub in AgentWorkspaceManager.STANDARD_DIRECTORIES) {
+                val subDir = File(workspace, sub)
+                assertTrue("Standard folder '$sub' must exist in workspace", subDir.exists() && subDir.isDirectory)
+            }
+
+            val readme = File(workspace, "README.md")
+            assertTrue("README.md must be pre-created", readme.exists() && readme.isFile)
+            assertTrue(readme.readText().contains("Agent Workspace Sandbox"))
+
+            val gitignore = File(workspace, ".gitignore")
+            assertTrue(".gitignore must be pre-created", gitignore.exists() && gitignore.isFile)
+            assertTrue(gitignore.readText().contains("node_modules/"))
+        } finally {
+            stdBaseDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun testAllFileTypesBinaryReadWriteBase64AndHex() = runBlocking {
+        // Sample 8-byte PNG file header
+        val pngHeaderBytes = byteArrayOf(0x89.toByte(), 0x50.toByte(), 0x4e.toByte(), 0x47.toByte(), 0x0d.toByte(), 0x0a.toByte(), 0x1a.toByte(), 0x0a.toByte())
+        val pngBase64 = java.util.Base64.getEncoder().encodeToString(pngHeaderBytes)
+
+        // Write binary file with encoding: "base64"
+        val writeRes = writeTool.execute(
+            mapOf(
+                "path" to "data/icon.png",
+                "content" to pngBase64,
+                "encoding" to "base64"
+            )
+        )
+        assertTrue("Writing binary file must succeed: ${writeRes.error}", writeRes.isSuccess)
+        assertTrue(writeRes.result!!.contains("Successfully written"))
+
+        // Read binary file with encoding: "base64"
+        val readB64Res = readTool.execute(
+            mapOf(
+                "path" to "data/icon.png",
+                "encoding" to "base64"
+            )
+        )
+        assertTrue(readB64Res.isSuccess)
+        assertEquals(pngBase64, readB64Res.result)
+
+        // Read binary file with encoding: "auto" (structured binary inspection)
+        val readAutoRes = readTool.execute(
+            mapOf("path" to "data/icon.png")
+        )
+        assertTrue(readAutoRes.isSuccess)
+        assertTrue(readAutoRes.result!!.contains("[BINARY FILE]"))
+        assertTrue(readAutoRes.result!!.contains("image/png"))
+        assertTrue(readAutoRes.result!!.contains("89 50 4e 47"))
+
+        // Read binary file with encoding: "hex"
+        val readHexRes = readTool.execute(
+            mapOf(
+                "path" to "data/icon.png",
+                "encoding" to "hex"
+            )
+        )
+        assertTrue(readHexRes.isSuccess)
+        assertTrue(readHexRes.result!!.contains("89 50 4e 47 0d 0a 1a 0a"))
+    }
+
+    @Test
+    fun testDirectoryCreateTool() = runBlocking {
+        val dirTool = com.example.agent.tools.workspace.DirectoryCreateTool(workspaceManager)
+
+        val createRes = dirTool.execute(mapOf("path" to "src/components/widgets"))
+        assertTrue("Directory creation should succeed: ${createRes.error}", createRes.isSuccess)
+        assertTrue(createRes.result!!.contains("Successfully created directory"))
+
+        val createdDir = workspaceManager.resolvePath("src/components/widgets")
+        assertTrue("Directory must physically exist", createdDir.exists() && createdDir.isDirectory)
+
+        // Re-creating should gracefully report it already exists
+        val reCreateRes = dirTool.execute(mapOf("path" to "src/components/widgets"))
+        assertTrue(reCreateRes.isSuccess)
+        assertTrue(reCreateRes.result!!.contains("already exists"))
+    }
+
+    @Test
+    fun testFileTypeCategoryInspection() {
+        val pyInfo = workspaceManager.getFileTypeInfo(File("test.py"))
+        assertEquals(com.example.agent.tools.workspace.FileCategory.SOURCE_CODE, pyInfo.category)
+        assertFalse(pyInfo.isBinary)
+
+        val jsonInfo = workspaceManager.getFileTypeInfo(File("data.json"))
+        assertEquals(com.example.agent.tools.workspace.FileCategory.DATA, jsonInfo.category)
+
+        val pngInfo = workspaceManager.getFileTypeInfo(File("image.png"))
+        assertEquals(com.example.agent.tools.workspace.FileCategory.IMAGE, pngInfo.category)
+        assertTrue(pngInfo.isBinary)
+
+        val zipInfo = workspaceManager.getFileTypeInfo(File("archive.zip"))
+        assertEquals(com.example.agent.tools.workspace.FileCategory.ARCHIVE, zipInfo.category)
+        assertTrue(zipInfo.isBinary)
+
+        val sqliteInfo = workspaceManager.getFileTypeInfo(File("app.db"))
+        assertEquals(com.example.agent.tools.workspace.FileCategory.DATA, sqliteInfo.category)
+        assertTrue(sqliteInfo.isBinary)
     }
 }

@@ -47,7 +47,7 @@ class PythonExecutionAndCapabilityTest {
     @Before
     fun setUp() {
         tempBaseDir = Files.createTempDirectory("agent_py_test_").toFile()
-        workspaceManager = AgentWorkspaceManager(tempBaseDir)
+        workspaceManager = AgentWorkspaceManager(tempBaseDir, autoInitStandardFolders = false)
         workspaceManager.activeSessionId = "session_python_cuj"
 
         pythonTool = PythonExecuteTool(workspaceManager)
@@ -203,21 +203,19 @@ class PythonExecutionAndCapabilityTest {
         // Alternative resolution
         val altPy = capabilityDetector.findAlternative("python")
         assertNotNull(altPy)
-        assertTrue("Alternative for python must suggest python_execute", altPy!!.contains("python_execute"))
+        assertTrue("Alternative for python must mention python", altPy!!.contains("python", ignoreCase = true))
 
-        val structuredError = capabilityDetector.buildCapabilityUnavailableError("python", "python script.py")
+        val structuredError = capabilityDetector.buildCapabilityUnavailableError("ruby", "ruby script.rb")
         assertTrue(structuredError.contains("[CAPABILITY_UNAVAILABLE]"))
-        assertTrue(structuredError.contains("python_execute"))
     }
 
     @Test
-    fun testRunCommandReturnsStructuredCapabilityUnavailableForPython() = runBlocking {
-        // When agent or user runs "python script.py" in run_command
-        val result = runCommandTool.execute(mapOf("command" to "python script.py"))
-        assertFalse("Running python in run_command must fail", result.isSuccess)
+    fun testRunCommandReturnsStructuredCapabilityUnavailableForMissingTool() = runBlocking {
+        // When agent or user runs a missing tool in run_command
+        val result = runCommandTool.execute(mapOf("command" to "nonexistent_compiler_xyz script.abc"))
+        assertFalse("Running missing tool in run_command must fail", result.isSuccess)
         assertNotNull(result.error)
         assertTrue("Error must be structured CAPABILITY_UNAVAILABLE: ${result.error}", result.error!!.contains("[CAPABILITY_UNAVAILABLE]"))
-        assertTrue("Error must direct to python_execute: ${result.error}", result.error!!.contains("python_execute"))
         assertFalse("Must not pretend it succeeded", result.isSuccess)
     }
 
