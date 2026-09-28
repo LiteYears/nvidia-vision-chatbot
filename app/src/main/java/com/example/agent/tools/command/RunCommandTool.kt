@@ -121,12 +121,26 @@ class RunCommandTool(
             )
         }
 
-        val primaryExecutable = rawCommand.trim().split(Regex("\\s+")).firstOrNull()?.trim('\'', '"') ?: ""
-        val cleanExec = if (primaryExecutable.contains('/')) File(primaryExecutable).name else primaryExecutable
+        // Sanitize command input (strip prompt prefixes, comments, terminal transcripts)
+        val sanitizedCommand = sanitizeCommand(rawCommand)
+        if (sanitizedCommand.isBlank() || isOnlyComments(sanitizedCommand)) {
+            return ToolResult.success(
+                callId = callId,
+                toolName = definition.name,
+                result = "Exit Code: 0 (Duration: 0ms)\nCommand: $rawCommand\nWorking Directory: $workingDirArg\n\n(Command executed successfully with no output)"
+            )
+        }
+
+        val nonCommentLine = sanitizedCommand.lines()
+            .map { it.trim() }
+            .firstOrNull { it.isNotBlank() && !it.startsWith("#") } ?: sanitizedCommand
+        val primaryExecutable = nonCommentLine.split(Regex("\\s+")).firstOrNull()?.trim('\'', '"') ?: ""
+        val rawExec = if (primaryExecutable.contains('/')) File(primaryExecutable).name else primaryExecutable
+        val cleanExec = if (rawExec.isBlank() || rawExec == "#" || rawExec.contains('@') || rawExec.endsWith('$')) "bash" else rawExec
 
         // 3. Execute via modular CommandRunner
         val execResult = commandRunner.run(
-            command = rawCommand,
+            command = sanitizedCommand,
             workingDir = resolvedWorkingDir,
             timeoutMs = timeoutMs,
             maxOutputBytes = maxOutputBytes
@@ -156,9 +170,13 @@ class RunCommandTool(
             }
             ToolResult.failure(callId = callId, toolName = definition.name, error = errorMsg.trim())
         } else if (execResult.exitCode != 0 && !(execResult.isTruncated && execResult.exitCode == 141)) {
-            val isUnavailable = execResult.exitCode == 127 ||
+            val isKnownShellOrBuiltin = cleanExec in setOf("bash", "sh", "zsh", "cat", "echo", "mkdir", "cd", "python", "python3")
+            val isUnavailable = !isKnownShellOrBuiltin && !capabilityDetector.isExecutableAvailable(cleanExec) && (
+                execResult.exitCode == 127 ||
                 execResult.stderr.contains("inaccessible or not found", ignoreCase = true) ||
-                (execResult.stderr.contains("not found", ignoreCase = true) && !capabilityDetector.isExecutableAvailable(cleanExec))
+                execResult.stderr.contains("not found", ignoreCase = true) ||
+                execResult.stderr.contains("command not found", ignoreCase = true)
+            )
 
             if (isUnavailable) {
                 val capError = capabilityDetector.buildCapabilityUnavailableError(cleanExec, rawCommand, execResult.stderr)
@@ -230,5 +248,48 @@ class RunCommandTool(
             "java", "javac", "gradle", "mvn",
             "pip", "pip3", "ruby", "perl", "php"
         )
+    }
+
+    private fun sanitizeCommand(raw: String): String {
+        var s = raw.trim()
+        val transcriptIndex = s.indexOf("[stdout]")
+        if (transcriptIndex >= 0) {
+            s = s.substring(0, transcriptIndex).trim()
+        }
+        val exitCodeIndex = s.indexOf("Exit Code:")
+        if (exitCodeIndex >= 0) {
+            s = s.substring(0, exitCodeIndex).trim()
+        }
+        val processExitedIndex = s.indexOf("[Process exited")
+        if (processExitedIndex >= 0) {
+            s = s.substring(0, processExitedIndex).trim()
+        }
+
+        // Strip leading prompt prefixes from lines: ubuntu@termux:~$, user@host:~/dir$, $, #, >
+        val promptRegex = Regex("""(?m)^[ \t]*(?:[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+:[^$#\r\n]*[\$#]|[\$#>])[ \t]*""")
+        s = s.replace(promptRegex, "").trim()
+
+        val commandKeywords = listOf("cat <<", "python3 ", "python ", "pip ", "pip3 ", "echo ", "mkdir ", "cd ", "pytest ", "npm ", "node ", "git ", "curl ", "bash ", "sh ")
+        val lines = s.lines().toMutableList()
+        for (i in lines.indices) {
+            val line = lines[i].trim()
+            if (line.startsWith("#")) {
+                for (kw in commandKeywords) {
+                    val kwIdx = line.indexOf(kw)
+                    if (kwIdx > 0) {
+                        lines[i] = line.substring(kwIdx)
+                        break
+                    }
+                }
+            }
+        }
+        return lines.joinToString("\n").trim()
+    }
+
+    private fun isOnlyComments(cmd: String): Boolean {
+        val nonComment = cmd.lines()
+            .map { it.trim() }
+            .filter { it.isNotBlank() && !it.startsWith("#") }
+        return nonComment.isEmpty()
     }
 }

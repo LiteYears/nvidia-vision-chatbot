@@ -43,6 +43,7 @@ import com.example.data.remote.NvidiaApiClient
 import com.example.data.repository.AgentPlanRepository
 import com.example.data.repository.ChatRepository
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -1313,7 +1314,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             )
 
             var networkRetries = 0
-            while (attemptResult.isFailure && networkRetries < 3 && kotlinx.coroutines.isActive) {
+            while (attemptResult.isFailure && networkRetries < 3 && currentCoroutineContext().isActive) {
                 val err = attemptResult.exceptionOrNull()
                 val errText = err?.message ?: ""
                 val isNetwork = errText.contains("Network connection", ignoreCase = true) ||

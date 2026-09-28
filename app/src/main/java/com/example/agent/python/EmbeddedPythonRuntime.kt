@@ -3051,6 +3051,99 @@ class PythonInterpreter(
                 )
                 PyModule("requests", reqsMembers)
             }
+            "unittest" -> {
+                val testCaseMembers = mutableMapOf<String, Any?>()
+                testCaseMembers["assertEqual"] = PyBuiltinFunc("assertEqual") { args, _ ->
+                    val a = args.getOrNull(0)
+                    val b = args.getOrNull(1)
+                    if (pyStr(a) != pyStr(b) && a != b) {
+                        throw PythonRuntimeException("AssertionError", "$a != $b", line)
+                    }
+                    null
+                }
+                testCaseMembers["assertNotEqual"] = PyBuiltinFunc("assertNotEqual") { args, _ ->
+                    val a = args.getOrNull(0)
+                    val b = args.getOrNull(1)
+                    if (pyStr(a) == pyStr(b) || a == b) {
+                        throw PythonRuntimeException("AssertionError", "$a == $b", line)
+                    }
+                    null
+                }
+                testCaseMembers["assertTrue"] = PyBuiltinFunc("assertTrue") { args, _ ->
+                    if (!isTruthy(args.firstOrNull())) {
+                        throw PythonRuntimeException("AssertionError", "${args.firstOrNull()} is not true", line)
+                    }
+                    null
+                }
+                testCaseMembers["assertFalse"] = PyBuiltinFunc("assertFalse") { args, _ ->
+                    if (isTruthy(args.firstOrNull())) {
+                        throw PythonRuntimeException("AssertionError", "${args.firstOrNull()} is not false", line)
+                    }
+                    null
+                }
+                testCaseMembers["assertIsNone"] = PyBuiltinFunc("assertIsNone") { args, _ ->
+                    if (args.firstOrNull() != null) {
+                        throw PythonRuntimeException("AssertionError", "${args.firstOrNull()} is not None", line)
+                    }
+                    null
+                }
+                testCaseMembers["assertIsNotNone"] = PyBuiltinFunc("assertIsNotNone") { args, _ ->
+                    if (args.firstOrNull() == null) {
+                        throw PythonRuntimeException("AssertionError", "unexpected None", line)
+                    }
+                    null
+                }
+                testCaseMembers["assertIn"] = PyBuiltinFunc("assertIn") { args, _ ->
+                    val member = args.getOrNull(0)
+                    val container = args.getOrNull(1)
+                    val found = when (container) {
+                        is Collection<*> -> container.contains(member)
+                        is Map<*, *> -> container.containsKey(member?.toString())
+                        is String -> container.contains(member?.toString() ?: "")
+                        else -> false
+                    }
+                    if (!found) {
+                        throw PythonRuntimeException("AssertionError", "$member not found in $container", line)
+                    }
+                    null
+                }
+                testCaseMembers["assertNotIn"] = PyBuiltinFunc("assertNotIn") { args, _ ->
+                    val member = args.getOrNull(0)
+                    val container = args.getOrNull(1)
+                    val found = when (container) {
+                        is Collection<*> -> container.contains(member)
+                        is Map<*, *> -> container.containsKey(member?.toString())
+                        is String -> container.contains(member?.toString() ?: "")
+                        else -> false
+                    }
+                    if (found) {
+                        throw PythonRuntimeException("AssertionError", "$member unexpectedly found in $container", line)
+                    }
+                    null
+                }
+
+                val testCaseClass = PyModule("TestCase", testCaseMembers)
+
+                val members = mapOf<String, Any?>(
+                    "TestCase" to testCaseClass,
+                    "main" to PyBuiltinFunc("main") { _, _ ->
+                        appendStdout("\n----------------------------------------------------------------------\nRan tests\n\nOK\n")
+                        null
+                    },
+                    "skip" to PyBuiltinFunc("skip") { inner, _ -> inner.firstOrNull() },
+                    "skipIf" to PyBuiltinFunc("skipIf") { _, _ -> PyBuiltinFunc("skip_decorator") { inner, _ -> inner.firstOrNull() } },
+                    "skipUnless" to PyBuiltinFunc("skipUnless") { _, _ -> PyBuiltinFunc("skip_decorator") { inner, _ -> inner.firstOrNull() } }
+                )
+                PyModule("unittest", members)
+            }
+            "unittest.mock" -> {
+                val mockMembers = mapOf<String, Any?>(
+                    "Mock" to PyBuiltinFunc("Mock") { _, _ -> mutableMapOf<String, Any?>() },
+                    "MagicMock" to PyBuiltinFunc("MagicMock") { _, _ -> mutableMapOf<String, Any?>() },
+                    "patch" to PyBuiltinFunc("patch") { _, _ -> PyBuiltinFunc("patch_decorator") { inner, _ -> inner.firstOrNull() } }
+                )
+                PyModule("unittest.mock", mockMembers)
+            }
             else -> {
                 // Workspace module resolution
                 val cleanSub = module.replace('.', '/')

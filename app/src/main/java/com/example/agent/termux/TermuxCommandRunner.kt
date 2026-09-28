@@ -7,7 +7,6 @@ import com.example.agent.tools.workspace.AgentWorkspaceManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
@@ -17,7 +16,8 @@ import java.io.InputStream
  *
  * Runs commands via ProcessBuilder against the Android Linux kernel (/system/bin/sh),
  * passing the real Termux prefix, PATH, HOME, and Ubuntu environment variables.
- * Provides fallback to ProotCommandExecutor if process execution is restricted.
+ * Provides seamless fallback to ProotCommandExecutor if process execution is restricted
+ * or tools are not present on the host Android image.
  */
 class TermuxCommandRunner(
     private val envManager: TermuxEnvironmentManager = TermuxEnvironmentManager.getInstance(),
@@ -31,7 +31,8 @@ class TermuxCommandRunner(
         timeoutMs: Long,
         maxOutputBytes: Int
     ): CommandExecutionResult = withContext(Dispatchers.IO) {
-        val trimmed = command.trim()
+        val promptRegex = Regex("""(?m)^[ \t]*(?:[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+:[^$#\r\n]*[\$#]|[\$#>])[ \t]*""")
+        val trimmed = command.replace(promptRegex, "").trim()
         if (trimmed.isBlank()) {
             return@withContext CommandExecutionResult(0, "", "", 0)
         }
@@ -50,8 +51,6 @@ class TermuxCommandRunner(
         val workspaceRoot = workspaceManager.getWorkspaceDir()
 
         // 1. Direct handling for Ubuntu PRoot and package management commands:
-        // Tools like apt, dpkg, pkg, proot, proot-distro, pip, and python are user-space emulated
-        // within the rootless Ubuntu PRoot environment to avoid Android SELinux W^X execution restrictions.
         if (isEmbeddedUbuntuCommand(trimmed)) {
             return@withContext fallbackExecutor.execute(
                 commandLine = trimmed,
@@ -73,7 +72,6 @@ class TermuxCommandRunner(
 
             val process = pb.start()
 
-            // Asynchronously collect stdout and stderr
             val stdoutDeferred = async(Dispatchers.IO) {
                 readStreamLimited(process.inputStream, maxOutputBytes)
             }
@@ -138,7 +136,6 @@ class TermuxCommandRunner(
                 isTruncated = stdoutResult.isTruncated || stderrResult.isTruncated
             )
         } catch (e: Exception) {
-            // If process spawning fails due to OS security restriction, invoke fallback executor
             val fallbackResult = fallbackExecutor.execute(
                 commandLine = trimmed,
                 workingDir = effectiveDir,
@@ -150,10 +147,6 @@ class TermuxCommandRunner(
         }
     }
 
-    /**
-     * Determines whether a command involves Ubuntu PRoot user-space tools that should be executed
-     * via ProotCommandExecutor rather than host shell process spawning.
-     */
     private fun isEmbeddedUbuntuCommand(command: String): Boolean {
         val trimmed = command.trim()
         if (trimmed.contains("<<")) {

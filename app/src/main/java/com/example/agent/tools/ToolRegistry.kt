@@ -98,6 +98,10 @@ class ToolRegistry {
         sb.append("3. Package Management: Run `apt update`, `apt install -y <pkg>`, `pip install <pkg>` to install packages.\n")
         sb.append("4. Execution & Testing: Run `python3 script.py`, `pytest`, `node`, `bash script.sh` and inspect real stdout/stderr.\n")
         sb.append("5. System Tools: `neofetch`, `uname -a`, `whoami`, `df -h`, `free -m`, `ps aux`\n\n")
+        sb.append("AUTONOMOUS WEB BROWSING & NEWS EXTRACTION FLOW:\n")
+        sb.append("1. Search: Use `web_search` with targeted queries.\n")
+        sb.append("2. Open: Use `web_open` with target URLs to extract clean markdown, metadata, and outlines.\n")
+        sb.append("3. Paginate/Navigate: Follow relevant links, use `offset` or `section` for deep content.\n\n")
         sb.append("### AVAILABLE TOOLS\n")
         for (tool in tools.values) {
             val def = tool.definition

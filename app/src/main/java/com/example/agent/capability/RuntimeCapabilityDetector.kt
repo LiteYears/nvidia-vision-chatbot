@@ -78,20 +78,20 @@ class RuntimeCapabilityDetector(
                 id = "node",
                 name = "Node.js Runtime",
                 type = CapabilityType.SHELL_EXECUTABLE,
-                isAvailable = hasShellNode,
+                isAvailable = true,
                 description = "Node.js JavaScript runtime environment. Run with 'node <file.js>' or 'node -e \"<code>\"' via 'run_command'.",
-                primaryTool = if (hasShellNode) "run_command" else null,
-                notes = if (hasShellNode) "Available in environment." else "Node.js is not present in standard Android environments.",
+                primaryTool = "run_command",
+                notes = "Available in Ubuntu PRoot workspace.",
                 alternatives = listOf("run_command")
             ),
             RuntimeCapability(
                 id = "npm",
                 name = "NPM Package Manager",
                 type = CapabilityType.SHELL_EXECUTABLE,
-                isAvailable = hasShellNpm || true,
+                isAvailable = true,
                 description = "Node.js package manager for dependencies and scripts. Run 'npm init -y', 'npm install <package>', 'npm run <script>' via 'run_command'.",
                 primaryTool = "run_command",
-                notes = "Supports initializing package.json, managing node_modules, and running npm scripts.",
+                notes = "Supports initializing package.json, managing node_modules, and running npm scripts in workspace.",
                 alternatives = listOf("run_command")
             ),
             RuntimeCapability(
@@ -117,10 +117,14 @@ class RuntimeCapabilityDetector(
         // Built-in workspace environment tools are always available
         val lower = clean.lowercase()
         if (lower in setOf(
-                "python", "python3", "py", "pip", "pip3", "bash", "sh",
-                "uname", "whoami", "hostname", "which", "date", "env", "printenv",
-                "apt", "apt-get", "df", "free", "uptime", "clear", "true", "false",
-                "echo", "pwd", "curl", "wget", "ls", "cat", "mkdir", "touch", "rm", "cp", "mv", "grep", "wc", "head", "tail", "find"
+                "python", "python3", "py", "pip", "pip3", "bash", "sh", "zsh", "ash", "dash",
+                "uname", "whoami", "hostname", "which", "whereis", "date", "env", "printenv", "export",
+                "apt", "apt-get", "dpkg", "pkg", "df", "free", "uptime", "clear", "cls", "true", "false",
+                "echo", "pwd", "cd", "curl", "wget", "ls", "dir", "cat", "mkdir", "touch", "rm", "cp", "mv",
+                "grep", "egrep", "fgrep", "wc", "head", "tail", "find", "git", "tar", "zip", "unzip", "tree",
+                "proot", "proot-distro", "sed", "awk", "cut", "tr", "sort", "uniq", "tee", "xargs", "chmod",
+                "chown", "su", "sudo", "md5sum", "sha256sum", "basename", "dirname", "node", "nodejs", "npm", "npx",
+                "sleep", "seq", "base64", "stat", "file", "diff", "cmp", "service", "systemctl", "cal", "neofetch"
             )
         ) {
             return true

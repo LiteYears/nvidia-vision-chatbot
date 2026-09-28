@@ -199,7 +199,15 @@ fun AgentTaskStateCard(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(2.5.dp)
                         ) {
-                            Box(modifier = Modifier.size(4.dp).background(statusColor, CircleShape))
+                            val isTaskActive = session.status == AgentTaskStatus.IN_PROGRESS ||
+                                session.status == AgentTaskStatus.THINKING ||
+                                session.status == AgentTaskStatus.USING_TOOL ||
+                                session.status == AgentTaskStatus.OBSERVING
+                            ClaudePulseIndicator(
+                                color = statusColor,
+                                isRunning = isTaskActive,
+                                modifier = Modifier.size(8.dp)
+                            )
                             Text(
                                 text = session.status.displayName,
                                 style = MaterialTheme.typography.labelSmall.copy(

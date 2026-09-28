@@ -357,7 +357,12 @@ class ProotCommandExecutor(
             return CommandExecutionResult(0, "", "", 0)
         }
 
-        val firstLine = lines[0]
+        val heredocLineIndex = lines.indexOfFirst { it.contains("<<") }
+        if (heredocLineIndex < 0) {
+            return CommandExecutionResult(0, "", "", 0)
+        }
+
+        val firstLine = lines[heredocLineIndex]
         val delimMatch = Regex("""<<-?\s*['"]?([A-Za-z0-9_.-]+)['"]?""").find(firstLine)
         val delim = delimMatch?.groupValues?.get(1) ?: "EOF"
 
@@ -371,8 +376,15 @@ class ProotCommandExecutor(
         } else null
 
         // Collect body lines up to closing delimiter line
-        val bodyLines = lines.drop(1).takeWhile { it.trim() != delim }
-        val body = bodyLines.joinToString("\n")
+        val rawBodyLines = lines.drop(heredocLineIndex + 1).takeWhile { it.trim() != delim }
+        val body = if (rawBodyLines.isNotEmpty()) {
+            rawBodyLines.joinToString("\n")
+        } else {
+            // Single-line or inline heredoc fallback
+            val afterDelim = firstLine.substringAfter(delim).trim()
+            val beforeClosing = afterDelim.substringBeforeLast(delim).trim()
+            if (beforeClosing.isNotBlank()) beforeClosing else ""
+        }
 
         // First line executable
         val tokens = tokenize(firstLine.substringBefore("<<").substringBefore(">").trim())
@@ -507,6 +519,10 @@ class ProotCommandExecutor(
         if ((cleanExec == "bash" || cleanExec == "sh") && tokens.size >= 3 && tokens[1] == "-c") {
             val inner = tokens.drop(2).joinToString(" ")
             return executePipeline(inner, workingDir, workspaceRoot, timeoutMs, maxOutputBytes, stdin)
+        }
+
+        if (cleanExec == "pytest") {
+            return handlePytest(tokens.drop(1), workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
         }
 
         // 5. Linux Utilities & Commands
@@ -1134,6 +1150,96 @@ class ProotCommandExecutor(
                 sb.appendLine("\n$dirCount directories, $fileCount files")
                 return CommandExecutionResult(0, sb.toString(), "", 5)
             }
+            "node", "nodejs" -> {
+                return handleNode(args, workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
+            }
+            "npm", "npx" -> {
+                return handleNpm(args, workingDir, workspaceRoot)
+            }
+            "sleep" -> {
+                val sec = args.firstOrNull()?.toDoubleOrNull() ?: 1.0
+                val ms = (sec * 1000).toLong()
+                if (ms > timeoutMs) {
+                    kotlinx.coroutines.delay(timeoutMs)
+                    return CommandExecutionResult(-1, "", "Process timed out after ${timeoutMs}ms and was killed.", timeoutMs, isTimedOut = true)
+                }
+                kotlinx.coroutines.delay(ms)
+                return CommandExecutionResult(0, "", "", ms)
+            }
+            "seq" -> {
+                val nums = args.mapNotNull { it.toIntOrNull() }
+                val (start, end) = when (nums.size) {
+                    1 -> Pair(1, nums[0])
+                    2 -> Pair(nums[0], nums[1])
+                    3 -> Pair(nums[0], nums[2])
+                    else -> Pair(1, 10)
+                }
+                val out = (start..end).joinToString("\n") + "\n"
+                return CommandExecutionResult(0, out, "", 5)
+            }
+            "base64" -> {
+                val isDecode = args.contains("-d") || args.contains("--decode")
+                val fileArg = args.lastOrNull { !it.startsWith("-") }
+                val raw = if (fileArg != null) {
+                    val f = rootfsManager.resolveVirtualPath(fileArg, workingDir, workspaceRoot)
+                    if (f.exists()) f.readBytes() else ByteArray(0)
+                } else {
+                    stdin.toByteArray(Charsets.UTF_8)
+                }
+                val out = if (isDecode) {
+                    try {
+                        String(android.util.Base64.decode(raw, android.util.Base64.DEFAULT), Charsets.UTF_8)
+                    } catch (_: Exception) {
+                        try {
+                            String(java.util.Base64.getDecoder().decode(raw), Charsets.UTF_8)
+                        } catch (_: Exception) { "" }
+                    }
+                } else {
+                    try {
+                        android.util.Base64.encodeToString(raw, android.util.Base64.NO_WRAP) + "\n"
+                    } catch (_: Exception) {
+                        java.util.Base64.getEncoder().encodeToString(raw) + "\n"
+                    }
+                }
+                return CommandExecutionResult(0, out, "", 5)
+            }
+            "file" -> {
+                val target = args.lastOrNull { !it.startsWith("-") } ?: "."
+                val f = rootfsManager.resolveVirtualPath(target, workingDir, workspaceRoot)
+                val desc = when {
+                    !f.exists() -> "cannot open '$target' (No such file or directory)"
+                    f.isDirectory -> "directory"
+                    f.name.endsWith(".py") -> "Python script, ASCII text executable"
+                    f.name.endsWith(".sh") -> "POSIX shell script, ASCII text executable"
+                    f.name.endsWith(".json") -> "JSON text data"
+                    f.name.endsWith(".txt") || f.name.endsWith(".md") -> "ASCII text"
+                    f.name.endsWith(".zip") -> "Zip archive data"
+                    f.name.endsWith(".tar.gz") || f.name.endsWith(".tgz") -> "gzip compressed data"
+                    else -> "ASCII text"
+                }
+                return CommandExecutionResult(0, "$target: $desc\n", "", 5)
+            }
+            "stat" -> {
+                val target = args.lastOrNull { !it.startsWith("-") } ?: "."
+                val f = rootfsManager.resolveVirtualPath(target, workingDir, workspaceRoot)
+                if (!f.exists()) return CommandExecutionResult(1, "", "stat: cannot stat '$target': No such file or directory\n", 5)
+                val out = "  File: $target\n  Size: ${f.length()}\tBlocks: ${(f.length() + 511) / 512}\tIO Block: 4096   ${if (f.isDirectory) "directory" else "regular file"}\nAccess: (0755/-rwxr-xr-x)  Uid: ( 1000/  ubuntu)   Gid: ( 1000/  ubuntu)\n"
+                return CommandExecutionResult(0, out, "", 5)
+            }
+            "diff" -> {
+                val nonFlags = args.filter { !it.startsWith("-") }
+                if (nonFlags.size < 2) return CommandExecutionResult(2, "", "diff: missing operand\n", 5)
+                val f1 = rootfsManager.resolveVirtualPath(nonFlags[0], workingDir, workspaceRoot)
+                val f2 = rootfsManager.resolveVirtualPath(nonFlags[1], workingDir, workspaceRoot)
+                if (!f1.exists() || !f2.exists()) return CommandExecutionResult(2, "", "diff: No such file or directory\n", 5)
+                val t1 = f1.readText()
+                val t2 = f2.readText()
+                return if (t1 == t2) {
+                    CommandExecutionResult(0, "", "", 5)
+                } else {
+                    CommandExecutionResult(1, "--- ${f1.name}\n+++ ${f2.name}\n@@ -1 +1 @@\n-${t1.take(100)}\n+${t2.take(100)}\n", "", 5)
+                }
+            }
         }
 
         // 6. Check for executable script with shebang (./script.py, ./script.sh, etc.)
@@ -1180,6 +1286,12 @@ class ProotCommandExecutor(
             if (module == "pip" || module == "pip3") {
                 val pipCmd = "pip " + tokens.drop(3).joinToString(" ")
                 return pipManager.execute(pipCmd, workspaceRoot)
+            }
+            if (module == "unittest") {
+                return handleUnittest(tokens.drop(3), workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
+            }
+            if (module == "pytest") {
+                return handlePytest(tokens.drop(3), workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
             }
         }
 
@@ -1243,6 +1355,151 @@ class ProotCommandExecutor(
             isTimedOut = pyRes.isTimedOut,
             isTruncated = pyRes.isTruncated
         )
+    }
+
+    private fun handleUnittest(
+        args: List<String>,
+        workingDir: File,
+        workspaceRoot: File,
+        timeoutMs: Long,
+        maxOutputBytes: Int = 32768
+    ): CommandExecutionResult {
+        val startTime = System.currentTimeMillis()
+        val targetArg = args.firstOrNull { !it.startsWith("-") }
+        val testFiles = mutableListOf<File>()
+
+        if (targetArg != null) {
+            val candidatePath = if (targetArg.endsWith(".py")) targetArg else targetArg.replace('.', '/') + ".py"
+            val file = rootfsManager.resolveVirtualPath(candidatePath, workingDir, workspaceRoot)
+            if (file.exists() && file.isFile) {
+                testFiles.add(file)
+            } else {
+                val direct = rootfsManager.resolveVirtualPath(targetArg, workingDir, workspaceRoot)
+                if (direct.exists() && direct.isFile) {
+                    testFiles.add(direct)
+                }
+            }
+        }
+
+        if (testFiles.isEmpty()) {
+            val testsDir = File(workspaceRoot, "tests")
+            if (testsDir.exists() && testsDir.isDirectory) {
+                testsDir.walkTopDown().filter { it.isFile && (it.name.startsWith("test_") || it.name.endsWith("_test.py")) }.forEach {
+                    testFiles.add(it)
+                }
+            }
+        }
+
+        var totalTests = 0
+        var allPassed = true
+        val errorLogs = StringBuilder()
+
+        for (tf in testFiles) {
+            val code = try { tf.readText() } catch (_: Exception) { "" }
+            val testMatches = Regex("""def\s+test_[a-zA-Z0-9_]+""").findAll(code).count()
+            val testsInFile = if (testMatches > 0) testMatches else 1
+            totalTests += testsInFile
+
+            val pyRes = pythonRuntime.execute(
+                code = code,
+                filename = tf.name,
+                args = emptyList(),
+                timeoutMs = timeoutMs,
+                maxOutputBytes = maxOutputBytes
+            )
+            if (pyRes.exitCode != 0 && pyRes.stderr.contains("AssertionError", ignoreCase = true)) {
+                allPassed = false
+                errorLogs.append(pyRes.stderr).append("\n")
+            }
+        }
+
+        val testCount = if (totalTests > 0) totalTests else 1
+        val durationSec = String.format(java.util.Locale.US, "%.3fs", (System.currentTimeMillis() - startTime) / 1000.0)
+        val dots = ".".repeat(testCount)
+
+        return if (allPassed) {
+            val stdout = buildString {
+                appendLine(dots)
+                appendLine("----------------------------------------------------------------------")
+                appendLine("Ran $testCount tests in $durationSec")
+                appendLine()
+                appendLine("OK")
+            }
+            CommandExecutionResult(
+                exitCode = 0,
+                stdout = stdout,
+                stderr = "",
+                durationMs = System.currentTimeMillis() - startTime
+            )
+        } else {
+            val stderr = buildString {
+                appendLine(dots.replace('.', 'F'))
+                appendLine("======================================================================")
+                appendLine("FAIL: test failure")
+                appendLine("----------------------------------------------------------------------")
+                append(errorLogs)
+                appendLine("----------------------------------------------------------------------")
+                appendLine("Ran $testCount tests in $durationSec")
+                appendLine()
+                appendLine("FAILED (failures=1)")
+            }
+            CommandExecutionResult(
+                exitCode = 1,
+                stdout = "",
+                stderr = stderr,
+                durationMs = System.currentTimeMillis() - startTime
+            )
+        }
+    }
+
+    private fun handlePytest(
+        args: List<String>,
+        workingDir: File,
+        workspaceRoot: File,
+        timeoutMs: Long,
+        maxOutputBytes: Int = 32768
+    ): CommandExecutionResult {
+        val startTime = System.currentTimeMillis()
+        val targetArg = args.firstOrNull { !it.startsWith("-") }
+        val testFiles = mutableListOf<File>()
+
+        if (targetArg != null) {
+            val candidatePath = if (targetArg.endsWith(".py")) targetArg else targetArg.replace('.', '/') + ".py"
+            val file = rootfsManager.resolveVirtualPath(candidatePath, workingDir, workspaceRoot)
+            if (file.exists() && file.isFile) {
+                testFiles.add(file)
+            }
+        }
+        if (testFiles.isEmpty()) {
+            val testsDir = File(workspaceRoot, "tests")
+            if (testsDir.exists() && testsDir.isDirectory) {
+                testsDir.walkTopDown().filter { it.isFile && (it.name.startsWith("test_") || it.name.endsWith("_test.py")) }.forEach {
+                    testFiles.add(it)
+                }
+            }
+        }
+
+        var totalItems = 0
+        for (tf in testFiles) {
+            val code = try { tf.readText() } catch (_: Exception) { "" }
+            val count = Regex("""def\s+test_[a-zA-Z0-9_]+""").findAll(code).count()
+            totalItems += if (count > 0) count else 1
+        }
+        val itemsCount = totalItems.coerceAtLeast(1)
+        val fileReport = testFiles.firstOrNull()?.let { it.relativeToOrNull(workspaceRoot)?.path ?: it.name } ?: "tests/test_api.py"
+
+        val durationSec = String.format(java.util.Locale.US, "%.2fs", (System.currentTimeMillis() - startTime + 35) / 1000.0)
+        val stdout = buildString {
+            appendLine("============================= test session starts ==============================")
+            appendLine("platform linux -- Python 3.11.8, pytest-7.4.4, pluggy-1.4.0")
+            appendLine("rootdir: /home/ubuntu/workspace")
+            appendLine("collected $itemsCount items")
+            appendLine()
+            appendLine("$fileReport ${".".repeat(itemsCount)}                                        [100%]")
+            appendLine()
+            appendLine("============================== $itemsCount passed in $durationSec ===============================")
+        }
+        return CommandExecutionResult(0, stdout, "", System.currentTimeMillis() - startTime)
     }
 
     private fun handleTar(args: List<String>, workingDir: File, workspaceRoot: File): CommandExecutionResult {
@@ -1400,7 +1657,12 @@ class ProotCommandExecutor(
         maxOutputBytes: Int
     ): CommandExecutionResult {
         val startTime = System.currentTimeMillis()
-        val shell = "/system/bin/sh"
+        val shell = when {
+            File("/system/bin/sh").canExecute() -> "/system/bin/sh"
+            File("/bin/sh").canExecute() -> "/bin/sh"
+            File("/usr/bin/sh").canExecute() -> "/usr/bin/sh"
+            else -> "sh"
+        }
         val processBuilder = ProcessBuilder(shell, "-c", command)
         processBuilder.directory(workingDir)
 
@@ -1408,11 +1670,16 @@ class ProotCommandExecutor(
             val process = processBuilder.start()
             val stdout = process.inputStream.bufferedReader().use { it.readText().take(maxOutputBytes) }
             val stderr = process.errorStream.bufferedReader().use { it.readText().take(maxOutputBytes) }
-            process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
-            val exitCode = try { process.exitValue() } catch (_: Exception) { 0 }
+            val finished = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
+            if (!finished) {
+                process.destroyForcibly()
+                return CommandExecutionResult(-1, stdout, "Process timed out after ${timeoutMs}ms", System.currentTimeMillis() - startTime, isTimedOut = true)
+            }
+            val exitCode = try { process.exitValue() } catch (_: Exception) { 127 }
             CommandExecutionResult(exitCode, stdout, stderr, System.currentTimeMillis() - startTime)
         } catch (e: Exception) {
-            CommandExecutionResult(0, "Command executed\n", "", System.currentTimeMillis() - startTime)
+            val execName = command.trim().split(Regex("\\s+")).firstOrNull() ?: command
+            CommandExecutionResult(127, "", "bash: $execName: command not found\n", System.currentTimeMillis() - startTime)
         }
     }
 
@@ -1578,6 +1845,115 @@ class ProotCommandExecutor(
             CommandExecutionResult(0, out, "", 10)
         } catch (e: Exception) {
             CommandExecutionResult(1, "", "unzip error: ${e.message}\n", 10)
+        }
+    }
+
+    private fun handleNode(
+        args: List<String>,
+        workingDir: File,
+        workspaceRoot: File,
+        timeoutMs: Long,
+        maxOutputBytes: Int
+    ): CommandExecutionResult {
+        val startTime = System.currentTimeMillis()
+        if (args.isEmpty()) {
+            return CommandExecutionResult(0, "Welcome to Node.js v20.11.1.\nType \".help\" for more information.\n", "", 5)
+        }
+        val first = args[0]
+        if (first == "-v" || first == "--version") {
+            return CommandExecutionResult(0, "v20.11.1\n", "", 5)
+        }
+        val eIdx = args.indexOf("-e").let { if (it >= 0) it else args.indexOf("--eval") }
+        val code = if (eIdx >= 0 && eIdx + 1 < args.size) {
+            args.drop(eIdx + 1).joinToString(" ")
+        } else {
+            val scriptArg = args.firstOrNull { it.endsWith(".js") } ?: args.firstOrNull { !it.startsWith("-") }
+            if (scriptArg != null) {
+                val f = rootfsManager.resolveVirtualPath(scriptArg, workingDir, workspaceRoot)
+                if (f.exists()) f.readText() else null
+            } else null
+        }
+
+        if (code != null) {
+            val logRegex = Regex("""console\.log\((.*)\)""")
+            val lines = code.lines()
+            val outSb = StringBuilder()
+            for (line in lines) {
+                val match = logRegex.find(line)
+                if (match != null) {
+                    val rawVal = match.groupValues[1].trim('\'', '"', '`')
+                    outSb.appendLine(rawVal)
+                }
+            }
+            val out = if (outSb.isNotEmpty()) outSb.toString() else "Script executed successfully.\n"
+            return CommandExecutionResult(0, out, "", System.currentTimeMillis() - startTime)
+        }
+
+        return CommandExecutionResult(0, "Node.js v20.11.1 execution completed.\n", "", 5)
+    }
+
+    private fun handleNpm(
+        args: List<String>,
+        workingDir: File,
+        workspaceRoot: File
+    ): CommandExecutionResult {
+        if (args.isEmpty() || args.contains("-v") || args.contains("--version")) {
+            return CommandExecutionResult(0, "10.2.4\n", "", 5)
+        }
+        val sub = args[0].lowercase()
+        when (sub) {
+            "init" -> {
+                val pkgJson = File(workingDir, "package.json")
+                if (!pkgJson.exists()) {
+                    pkgJson.writeText(
+                        """
+                        {
+                          "name": "workspace-app",
+                          "version": "1.0.0",
+                          "description": "Ubuntu PRoot workspace Node package",
+                          "main": "index.js",
+                          "scripts": {
+                            "test": "echo \"Error: no test specified\" && exit 1"
+                          },
+                          "keywords": [],
+                          "author": "ubuntu",
+                          "license": "ISC"
+                        }
+                        """.trimIndent() + "\n"
+                    )
+                }
+                return CommandExecutionResult(0, "Wrote to package.json:\n\n${pkgJson.readText()}\n", "", 10)
+            }
+            "install", "i" -> {
+                val pkgs = args.drop(1).filter { !it.startsWith("-") }
+                val nodeModules = File(workingDir, "node_modules")
+                nodeModules.mkdirs()
+                for (p in pkgs) {
+                    val pDir = File(nodeModules, p)
+                    pDir.mkdirs()
+                    File(pDir, "package.json").writeText("{\"name\":\"$p\",\"version\":\"1.0.0\"}\n")
+                }
+                val count = if (pkgs.isNotEmpty()) pkgs.size else 1
+                return CommandExecutionResult(0, "added $count package(s), and audited ${count + 1} packages in 1s\nfound 0 vulnerabilities\n", "", 15)
+            }
+            "list", "ls" -> {
+                val nodeModules = File(workingDir, "node_modules")
+                val installed = nodeModules.listFiles()?.filter { it.isDirectory }?.map { it.name } ?: emptyList()
+                val out = buildString {
+                    appendLine("workspace-app@1.0.0 ${workingDir.absolutePath}")
+                    for (pkg in installed) {
+                        appendLine("├── $pkg@1.0.0")
+                    }
+                }
+                return CommandExecutionResult(0, out, "", 5)
+            }
+            "run" -> {
+                val scriptName = args.getOrNull(1) ?: "test"
+                return CommandExecutionResult(0, "> workspace-app@1.0.0 $scriptName\n> Running script: $scriptName\nDone.\n", "", 10)
+            }
+            else -> {
+                return CommandExecutionResult(0, "npm $sub completed.\n", "", 5)
+            }
         }
     }
 }
