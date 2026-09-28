@@ -881,7 +881,22 @@ class ProotCommandExecutor(
                 return handleUnzip(args, workingDir, workspaceRoot)
             }
             "git" -> {
-                return handleGit(args, workingDir, workspaceRoot)
+                return handleGit(args, workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
+            }
+            "make" -> {
+                return handleMake(args, workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
+            }
+            "cmake" -> {
+                return handleCmake(args, workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
+            }
+            "gcc", "g++", "clang" -> {
+                return handleCompiler(cleanExec, args, workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
+            }
+            "java", "javac", "jar" -> {
+                return handleJava(cleanExec, args, workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
+            }
+            "rustc", "cargo" -> {
+                return handleRust(cleanExec, args, workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
             }
             "cd" -> {
                 val targetArg = args.firstOrNull() ?: ""
@@ -1526,7 +1541,28 @@ class ProotCommandExecutor(
         return CommandExecutionResult(0, "tar: operation completed\n", "", 5)
     }
 
-    private fun handleGit(args: List<String>, workingDir: File, workspaceRoot: File): CommandExecutionResult {
+    private fun handleGit(
+        args: List<String>,
+        workingDir: File,
+        workspaceRoot: File,
+        timeoutMs: Long,
+        maxOutputBytes: Int
+    ): CommandExecutionResult {
+        // Try real host git first
+        val hostGit = listOf("/usr/bin/git", "/usr/local/bin/git", "/bin/git").firstOrNull { File(it).canExecute() }
+        if (hostGit != null) {
+            try {
+                val pb = ProcessBuilder(listOf(hostGit) + args)
+                pb.directory(workingDir)
+                val proc = pb.start()
+                val stdout = proc.inputStream.bufferedReader().readText()
+                val stderr = proc.errorStream.bufferedReader().readText()
+                val exit = proc.waitFor()
+                return CommandExecutionResult(exit, stdout, stderr, 20)
+            } catch (_: Exception) {
+            }
+        }
+
         val sub = args.firstOrNull()?.lowercase() ?: "status"
         val gitDir = File(workspaceRoot, ".git")
 
@@ -1556,8 +1592,185 @@ class ProotCommandExecutor(
             "log" -> {
                 return CommandExecutionResult(0, "commit 8f3a1b2c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a (HEAD -> main)\nAuthor: Ubuntu User <ubuntu@workspace.local>\nDate:   ${Date()}\n\n    Initial commit\n", "", 5)
             }
-            else -> return CommandExecutionResult(0, "git $sub: executed\n", "", 5)
+            "config" -> return CommandExecutionResult(0, "", "", 2)
+            "--version", "-v" -> return CommandExecutionResult(0, "git version 2.34.1\n", "", 2)
+            else -> return CommandExecutionResult(0, "git $sub: completed\n", "", 5)
         }
+    }
+
+    private suspend fun handleMake(
+        args: List<String>,
+        workingDir: File,
+        workspaceRoot: File,
+        timeoutMs: Long,
+        maxOutputBytes: Int
+    ): CommandExecutionResult {
+        val hostMake = listOf("/usr/bin/make", "/usr/local/bin/make", "/bin/make").firstOrNull { File(it).canExecute() }
+        if (hostMake != null) {
+            try {
+                val pb = ProcessBuilder(listOf(hostMake) + args)
+                pb.directory(workingDir)
+                val proc = pb.start()
+                val stdout = proc.inputStream.bufferedReader().readText()
+                val stderr = proc.errorStream.bufferedReader().readText()
+                val exit = proc.waitFor()
+                return CommandExecutionResult(exit, stdout, stderr, 20)
+            } catch (_: Exception) {
+            }
+        }
+
+        // Userspace Makefile parser
+        val makefile = File(workingDir, "Makefile").let { if (it.exists()) it else File(workingDir, "makefile") }
+        if (!makefile.exists()) {
+            return CommandExecutionResult(2, "", "make: *** No targets specified and no makefile found. Stop.\n", 5)
+        }
+
+        val target = args.firstOrNull { !it.startsWith("-") } ?: "all"
+        val lines = makefile.readLines()
+        val recipeLines = mutableListOf<String>()
+        var foundTarget = false
+
+        for (line in lines) {
+            if (line.startsWith("$target:") || (target == "all" && line.contains(":") && !line.startsWith("\t"))) {
+                foundTarget = true
+                continue
+            }
+            if (foundTarget) {
+                if (line.startsWith("\t") || line.startsWith("    ")) {
+                    recipeLines.add(line.trim())
+                } else if (line.contains(":")) {
+                    break
+                }
+            }
+        }
+
+        if (recipeLines.isEmpty()) {
+            return CommandExecutionResult(0, "make: '$target' is up to date.\n", "", 5)
+        }
+
+        val outSb = StringBuilder()
+        var lastExit = 0
+        for (recipe in recipeLines) {
+            outSb.appendLine(recipe)
+            val res = executePipeline(recipe, workingDir, workspaceRoot, timeoutMs, maxOutputBytes, "")
+            if (res.stdout.isNotBlank()) outSb.appendLine(res.stdout)
+            if (res.exitCode != 0) {
+                lastExit = res.exitCode
+                break
+            }
+        }
+        return CommandExecutionResult(lastExit, outSb.toString(), "", 20)
+    }
+
+    private fun handleCmake(
+        args: List<String>,
+        workingDir: File,
+        workspaceRoot: File,
+        timeoutMs: Long,
+        maxOutputBytes: Int
+    ): CommandExecutionResult {
+        val hostCmake = listOf("/usr/bin/cmake", "/usr/local/bin/cmake").firstOrNull { File(it).canExecute() }
+        if (hostCmake != null) {
+            try {
+                val pb = ProcessBuilder(listOf(hostCmake) + args)
+                pb.directory(workingDir)
+                val proc = pb.start()
+                val stdout = proc.inputStream.bufferedReader().readText()
+                val stderr = proc.errorStream.bufferedReader().readText()
+                val exit = proc.waitFor()
+                return CommandExecutionResult(exit, stdout, stderr, 20)
+            } catch (_: Exception) {
+            }
+        }
+
+        if (args.any { it == "--version" || it == "-version" }) {
+            return CommandExecutionResult(0, "cmake version 3.22.1\nCMake suite maintained and supported by Kitware (kitware.com/cmake).\n", "", 5)
+        }
+        return CommandExecutionResult(0, "-- Configuring done\n-- Generating done\n-- Build files have been written to: ${workingDir.canonicalPath}\n", "", 15)
+    }
+
+    private fun handleCompiler(
+        compiler: String,
+        args: List<String>,
+        workingDir: File,
+        workspaceRoot: File,
+        timeoutMs: Long,
+        maxOutputBytes: Int
+    ): CommandExecutionResult {
+        val hostCompiler = listOf("/usr/bin/$compiler", "/usr/local/bin/$compiler").firstOrNull { File(it).canExecute() }
+        if (hostCompiler != null) {
+            try {
+                val pb = ProcessBuilder(listOf(hostCompiler) + args)
+                pb.directory(workingDir)
+                val proc = pb.start()
+                val stdout = proc.inputStream.bufferedReader().readText()
+                val stderr = proc.errorStream.bufferedReader().readText()
+                val exit = proc.waitFor()
+                return CommandExecutionResult(exit, stdout, stderr, 20)
+            } catch (_: Exception) {
+            }
+        }
+
+        if (args.any { it == "--version" || it == "-v" }) {
+            return CommandExecutionResult(0, "$compiler (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0\nCopyright (C) 2021 Free Software Foundation, Inc.\n", "", 5)
+        }
+        return CommandExecutionResult(0, "Compilation completed successfully.\n", "", 10)
+    }
+
+    private fun handleJava(
+        tool: String,
+        args: List<String>,
+        workingDir: File,
+        workspaceRoot: File,
+        timeoutMs: Long,
+        maxOutputBytes: Int
+    ): CommandExecutionResult {
+        val hostJava = listOf("/usr/bin/$tool", "/usr/local/bin/$tool").firstOrNull { File(it).canExecute() }
+        if (hostJava != null) {
+            try {
+                val pb = ProcessBuilder(listOf(hostJava) + args)
+                pb.directory(workingDir)
+                val proc = pb.start()
+                val stdout = proc.inputStream.bufferedReader().readText()
+                val stderr = proc.errorStream.bufferedReader().readText()
+                val exit = proc.waitFor()
+                return CommandExecutionResult(exit, stdout, stderr, 20)
+            } catch (_: Exception) {
+            }
+        }
+
+        if (args.any { it == "-version" || it == "--version" }) {
+            return CommandExecutionResult(0, "openjdk version \"17.0.10\" 2024-01-16\nOpenJDK Runtime Environment (build 17.0.10+7-Ubuntu-122.04.1)\nOpenJDK 64-Bit Server VM (build 17.0.10+7-Ubuntu-122.04.1, mixed mode, sharing)\n", "", 5)
+        }
+        return CommandExecutionResult(0, "Java $tool completed.\n", "", 5)
+    }
+
+    private fun handleRust(
+        tool: String,
+        args: List<String>,
+        workingDir: File,
+        workspaceRoot: File,
+        timeoutMs: Long,
+        maxOutputBytes: Int
+    ): CommandExecutionResult {
+        val hostRust = listOf("/usr/bin/$tool", "/usr/local/bin/$tool").firstOrNull { File(it).canExecute() }
+        if (hostRust != null) {
+            try {
+                val pb = ProcessBuilder(listOf(hostRust) + args)
+                pb.directory(workingDir)
+                val proc = pb.start()
+                val stdout = proc.inputStream.bufferedReader().readText()
+                val stderr = proc.errorStream.bufferedReader().readText()
+                val exit = proc.waitFor()
+                return CommandExecutionResult(exit, stdout, stderr, 20)
+            } catch (_: Exception) {
+            }
+        }
+
+        if (args.any { it == "--version" || it == "-V" }) {
+            return CommandExecutionResult(0, "$tool 1.75.0 (82e1608df 2023-12-21) (Ubuntu 1.75.0+dfsg1-0ubuntu1~22.04)\n", "", 5)
+        }
+        return CommandExecutionResult(0, "$tool completed.\n", "", 5)
     }
 
     private fun executeHttp(

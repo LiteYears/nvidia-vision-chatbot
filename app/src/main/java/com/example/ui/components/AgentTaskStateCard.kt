@@ -1,6 +1,8 @@
 package com.example.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -44,6 +46,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
@@ -74,6 +77,11 @@ fun AgentTaskStateCard(
     modifier: Modifier = Modifier
 ) {
     var isExpanded by remember { mutableStateOf(false) }
+    val chevronRotation by animateFloatAsState(
+        targetValue = if (isExpanded) 180f else 0f,
+        animationSpec = tween(220),
+        label = "task_state_chevron"
+    )
 
     val statusColor = when (session.status) {
         AgentTaskStatus.INITIALIZING -> MaterialTheme.colorScheme.primary
@@ -238,10 +246,12 @@ fun AgentTaskStateCard(
                     }
 
                     Icon(
-                        imageVector = if (isExpanded) Icons.Outlined.KeyboardArrowUp else Icons.Outlined.KeyboardArrowDown,
+                        imageVector = Icons.Outlined.KeyboardArrowDown,
                         contentDescription = if (isExpanded) "Collapse" else "Expand",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(14.dp)
+                        modifier = Modifier
+                            .size(14.dp)
+                            .rotate(chevronRotation)
                     )
                 }
             }
@@ -913,26 +923,43 @@ private fun SubtaskChecklistItem(
                 }
             }
 
-            // Optional Result / Error snippet preview
+            // Optional Result / Error snippet preview (sanitized to remove technical exit codes)
             if (!subtask.result.isNullOrBlank()) {
-                Surface(
-                    shape = RoundedCornerShape(6.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 26.dp, top = 3.dp, bottom = 2.dp)
-                ) {
-                    Text(
-                        text = subtask.result,
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontSize = 10.sp,
-                            color = if (isFailed) Color(0xFFF87171) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
-                            fontFamily = FontFamily.Monospace
-                        ),
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
-                    )
+                val cleanResult = remember(subtask.result, isDone, isFailed) {
+                    val raw = subtask.result.lines().filter { line ->
+                        val trimmed = line.trim()
+                        !trimmed.startsWith("Exit Code:", ignoreCase = true) &&
+                        !trimmed.startsWith("Exit code:", ignoreCase = true) &&
+                        !trimmed.startsWith("Command exited with code", ignoreCase = true) &&
+                        !trimmed.matches(Regex("""(?i)^exit\s+\d+.*"""))
+                    }.joinToString("\n").trim()
+                    if (raw.isBlank()) {
+                        if (isDone) "✓ Completed successfully" else if (isFailed) "✗ Execution failed" else ""
+                    } else {
+                        raw
+                    }
+                }
+
+                if (cleanResult.isNotBlank()) {
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 26.dp, top = 3.dp, bottom = 2.dp)
+                    ) {
+                        Text(
+                            text = cleanResult,
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontSize = 10.sp,
+                                color = if (isFailed) Color(0xFFF87171) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                                fontFamily = FontFamily.Monospace
+                            ),
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                        )
+                    }
                 }
             }
         }

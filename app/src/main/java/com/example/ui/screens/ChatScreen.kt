@@ -90,6 +90,7 @@ import com.example.ui.components.ToolExecutionCard
 import com.example.ui.components.TopNavigationBar
 import com.example.ui.components.UpgradePlanDialog
 import com.example.ui.components.VoiceModeDialog
+import com.example.ui.components.WorkspaceExplorerSheet
 import com.example.ui.viewmodel.ChatViewModel
 import kotlinx.coroutines.launch
 import java.util.Calendar
@@ -363,6 +364,10 @@ fun ChatScreen(
                     scope.launch { drawerState.close() }
                     viewModel.setParametersSheetOpen(true)
                 },
+                onOpenWorkspaceClick = {
+                    scope.launch { drawerState.close() }
+                    viewModel.setWorkspaceSheetOpen(true)
+                },
                 currentMode = uiState.currentMode,
                 onModeChange = { mode ->
                     viewModel.setAppMode(mode)
@@ -433,6 +438,9 @@ fun ChatScreen(
                         },
                         onClearMessagesClick = {
                             showClearDialog = true
+                        },
+                        onWorkspaceClick = {
+                            viewModel.setWorkspaceSheetOpen(true)
                         }
                     )
 
@@ -695,7 +703,8 @@ fun ChatScreen(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .weight(1f),
-                                contentPadding = PaddingValues(top = 4.dp, bottom = 16.dp)
+                                contentPadding = PaddingValues(top = 6.dp, bottom = 16.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
                                 items(feedItems, key = { it.id }) { item ->
                                     when (item) {
@@ -845,6 +854,16 @@ fun ChatScreen(
                 micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             }
         }
+    )
+
+    WorkspaceExplorerSheet(
+        isOpen = uiState.isWorkspaceSheetOpen,
+        onDismiss = { viewModel.setWorkspaceSheetOpen(false) },
+        files = viewModel.getWorkspaceFiles(),
+        stats = viewModel.getWorkspaceStats(),
+        onReadFile = { relPath -> viewModel.readWorkspaceFile(relPath) },
+        onExportZip = { ctx -> viewModel.exportWorkspaceZip(ctx) },
+        onRefresh = { viewModel.setWorkspaceSheetOpen(true) }
     )
 }
 

@@ -71,10 +71,39 @@ class TermuxEnvironmentManager(
     fun getEnvironmentVariables(workspaceDir: File? = null): Map<String, String> {
         val workspace = workspaceDir ?: File(homeDir, "workspace")
         val currentShell = findSystemShell()
+        val rootfsDir = File(workspace, ".rootfs")
+        val rootfsLocalBin = File(rootfsDir, "usr/local/bin")
+        val rootfsBin = File(rootfsDir, "usr/bin")
+        val rootfsSbin = File(rootfsDir, "usr/sbin")
+        val workspaceBin = File(workspace, "bin")
+
+        val pathList = listOf(
+            rootfsLocalBin.absolutePath,
+            rootfsBin.absolutePath,
+            rootfsSbin.absolutePath,
+            workspaceBin.absolutePath,
+            binDir.absolutePath,
+            "${prefixDir.absolutePath}/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/system/bin",
+            "/system/xbin"
+        ).distinct()
+
+        val ldPathList = listOf(
+            File(rootfsDir, "usr/local/lib").absolutePath,
+            File(rootfsDir, "usr/lib").absolutePath,
+            libDir.absolutePath,
+            "/usr/local/lib",
+            "/usr/lib"
+        ).distinct()
+
         return mapOf(
             "PREFIX" to prefixDir.absolutePath,
-            "HOME" to homeDir.absolutePath,
-            "PATH" to "${binDir.absolutePath}:${prefixDir.absolutePath}/bin:/system/bin:/system/xbin:/usr/local/bin:/usr/bin:/bin",
+            "HOME" to workspace.absolutePath,
+            "PATH" to pathList.joinToString(":"),
+            "LD_LIBRARY_PATH" to ldPathList.joinToString(":"),
             "SHELL" to currentShell,
             "TERM" to "xterm-256color",
             "TMPDIR" to tmpDir.absolutePath,
@@ -82,9 +111,10 @@ class TermuxEnvironmentManager(
             "LC_ALL" to "C.UTF-8",
             "USER" to "ubuntu",
             "LOGNAME" to "ubuntu",
-            "UBUNTU_ROOT" to ubuntuRootDir.absolutePath,
+            "UBUNTU_ROOT" to rootfsDir.absolutePath,
             "WORKSPACE" to workspace.absolutePath,
-            "PYTHONPATH" to "${prefixDir.absolutePath}/lib:${homeDir.absolutePath}/lib:${workspace.absolutePath}/lib",
+            "PYTHONPATH" to "${workspace.absolutePath}/lib:${rootfsDir.absolutePath}/usr/lib/python3/dist-packages:${prefixDir.absolutePath}/lib:${homeDir.absolutePath}/lib",
+            "NODE_PATH" to "${workspace.absolutePath}/node_modules:${rootfsDir.absolutePath}/usr/lib/node_modules",
             "COLORTERM" to "truecolor"
         )
     }
@@ -603,34 +633,19 @@ class TermuxEnvironmentManager(
             bashScript(
                 """
                 #!/system/bin/sh
-                # Python3 wrapper for Termux / PRoot environment
-                if [ -x "/system/bin/python3" ]; then
-                    exec /system/bin/python3 "@@@"
-                elif [ -x "/usr/bin/python3" ]; then
-                    exec /usr/bin/python3 "@@@"
+                # Real Python 3 execution launcher
+                for p in /usr/bin/python3 /usr/local/bin/python3 /system/bin/python3 /bin/python3; do
+                    if [ -x "@@p" ]; then
+                        exec "@@p" "@@@"
+                    fi
+                done
+                # If host has python3 in system PATH
+                REAL_PY=@@(which python3 2>/dev/null || echo "")
+                if [ -n "@@REAL_PY" ] && [ "@@REAL_PY" != "${script.absolutePath}" ] && [ -x "@@REAL_PY" ]; then
+                    exec "@@REAL_PY" "@@@"
                 fi
-
-                case "@@1" in
-                    --version|-V)
-                        echo "Python 3.10.12 (main, Nov 20 2023, 15:14:05) [GCC 11.4.0] on linux"
-                        exit 0
-                        ;;
-                    -c)
-                        shift
-                        echo "Executed: @@@"
-                        exit 0
-                        ;;
-                    *)
-                        if [ -f "@@1" ]; then
-                            echo "[Python 3.10 Running: @@1]"
-                            cat "@@1" | head -n 20
-                            exit 0
-                        fi
-                        echo "Python 3.10.12 (Ubuntu 22.04 LTS Termux environment)"
-                        echo "Type \"help\", \"copyright\", \"credits\" or \"license\" for more information."
-                        exit 0
-                        ;;
-                esac
+                echo "python3: command not found (running rootless environment)" >&2
+                exit 127
                 """
             )
         )
@@ -642,7 +657,7 @@ class TermuxEnvironmentManager(
                 bashScript(
                     """
                     #!/system/bin/sh
-                    exec "@@PREFIX/bin/python3" "@@@"
+                    exec "${binDir.absolutePath}/python3" "@@@"
                     """
                 )
             )
@@ -656,47 +671,18 @@ class TermuxEnvironmentManager(
             bashScript(
                 """
                 #!/system/bin/sh
-                ACTION="@@1"
-                shift || true
-
-                case "@@ACTION" in
-                    install)
-                        while [ "@@#" -gt 0 ]; do
-                            PKG="@@1"
-                            shift
-                            case "@@PKG" in
-                                -U|--upgrade|-q)
-                                    continue
-                                    ;;
-                                *)
-                                    echo "Collecting @@PKG"
-                                    echo "  Downloading @@PKG-latest-py3-none-any.whl (24 kB)"
-                                    echo "Installing collected packages: @@PKG"
-                                    echo "Successfully installed @@PKG-1.0.0"
-                                    mkdir -p "@@PREFIX/lib/python3.10/site-packages/@@PKG"
-                                    ;;
-                            esac
-                        done
-                        exit 0
-                        ;;
-                    list)
-                        echo "Package    Version"
-                        echo "---------- -------"
-                        echo "pip        22.0.2"
-                        echo "setuptools 59.6.0"
-                        echo "wheel      0.37.1"
-                        exit 0
-                        ;;
-                    --version|-V)
-                        echo "pip 22.0.2 from @@PREFIX/lib/python3.10/site-packages/pip (python 3.10)"
-                        exit 0
-                        ;;
-                    *)
-                        echo "pip 22.0.2 from @@PREFIX/lib/python3.10/site-packages/pip"
-                        echo "Usage: pip [install <pkg> | list | --version]"
-                        exit 0
-                        ;;
-                esac
+                # Real Pip execution launcher
+                for p in /usr/bin/pip3 /usr/local/bin/pip3 /usr/bin/pip /usr/local/bin/pip; do
+                    if [ -x "@@p" ]; then
+                        exec "@@p" "@@@"
+                    fi
+                done
+                REAL_PIP=@@(which pip3 2>/dev/null || which pip 2>/dev/null || echo "")
+                if [ -n "@@REAL_PIP" ] && [ "@@REAL_PIP" != "${script.absolutePath}" ] && [ -x "@@REAL_PIP" ]; then
+                    exec "@@REAL_PIP" "@@@"
+                fi
+                echo "pip: command not found (use embedded pip manager)" >&2
+                exit 127
                 """
             )
         )
@@ -708,7 +694,7 @@ class TermuxEnvironmentManager(
                 bashScript(
                     """
                     #!/system/bin/sh
-                    exec "@@PREFIX/bin/pip" "@@@"
+                    exec "${binDir.absolutePath}/pip" "@@@"
                     """
                 )
             )

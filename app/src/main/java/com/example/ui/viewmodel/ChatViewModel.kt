@@ -98,7 +98,8 @@ data class ChatUiState(
     val agentInputText: String = "",
     val isAgentLoading: Boolean = false,
     val agentErrorMessage: String? = null,
-    val lastUploadedZip: UploadedZipInfo? = null
+    val lastUploadedZip: UploadedZipInfo? = null,
+    val isWorkspaceSheetOpen: Boolean = false
 )
 
 data class UploadedZipInfo(
@@ -641,6 +642,38 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun setAttachmentSheetOpen(open: Boolean) = _uiState.update { it.copy(isAttachmentSheetOpen = open) }
     fun setParametersSheetOpen(open: Boolean) = _uiState.update { it.copy(isParametersSheetOpen = open) }
     fun setAboutDialogOpen(open: Boolean) = _uiState.update { it.copy(isAboutDialogOpen = open) }
+    fun setWorkspaceSheetOpen(open: Boolean) = _uiState.update { it.copy(isWorkspaceSheetOpen = open) }
+
+    fun getWorkspaceFiles(): List<com.example.agent.tools.workspace.WorkspaceFileInfo> {
+        val sessionId = _uiState.value.currentAgentSession?.id ?: "default"
+        return workspaceManager.listWorkspaceFiles(sessionId)
+    }
+
+    fun getWorkspaceStats(): com.example.agent.tools.workspace.WorkspaceStats {
+        val sessionId = _uiState.value.currentAgentSession?.id ?: "default"
+        return workspaceManager.getWorkspaceStats(sessionId)
+    }
+
+    fun readWorkspaceFile(relativePath: String): String {
+        val sessionId = _uiState.value.currentAgentSession?.id ?: "default"
+        return workspaceManager.readWorkspaceFile(sessionId, relativePath)
+    }
+
+    fun exportWorkspaceZip(context: Context): Uri? {
+        return try {
+            val sessionId = _uiState.value.currentAgentSession?.id ?: "default"
+            val exportDir = File(context.cacheDir, "exports").apply { mkdirs() }
+            val zipFile = File(exportDir, "workspace_${sessionId.take(6)}.zip")
+            workspaceManager.exportWorkspaceToZip(sessionId, zipFile)
+            androidx.core.content.FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                zipFile
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     fun updateParameters(
         systemPrompt: String,

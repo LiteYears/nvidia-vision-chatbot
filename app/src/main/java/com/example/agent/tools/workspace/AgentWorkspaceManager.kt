@@ -280,6 +280,20 @@ node_modules/
     }
 
     /**
+     * Retrieves file type info from an extension string.
+     */
+    fun getFileTypeInfo(ext: String): FileTypeInfo {
+        val cleanExt = ext.trimStart('.').lowercase()
+        return EXTENSION_MAP[cleanExt] ?: FileTypeInfo(
+            extension = cleanExt,
+            category = FileCategory.DOCUMENT,
+            mimeType = "text/plain",
+            isBinary = false,
+            description = "File"
+        )
+    }
+
+    /**
      * Extracts a ZIP archive from an InputStream into a target directory inside the workspace.
      * Enforces path safety to protect against Zip-Slip vulnerabilities.
      */
@@ -416,6 +430,132 @@ node_modules/
         return cleaned.ifBlank { "default" }
     }
 
+    /**
+     * Recursively archives the workspace project files into a ZIP file.
+     * Skips internal temporary caches by default.
+     */
+    fun exportWorkspaceToZip(
+        sessionId: String = activeSessionId,
+        outputFile: File,
+        includeRootfs: Boolean = false,
+        excludePatterns: List<String> = listOf(".rootfs/var/cache", ".rootfs/tmp", "__pycache__", ".git")
+    ): File {
+        val root = getWorkspaceDir(sessionId)
+        if (outputFile.parentFile?.exists() == false) {
+            outputFile.parentFile?.mkdirs()
+        }
+
+        java.util.zip.ZipOutputStream(java.io.FileOutputStream(outputFile)).use { zos ->
+            fun addRecursively(current: File, baseRelPath: String) {
+                val files = current.listFiles() ?: return
+                for (file in files) {
+                    val relPath = if (baseRelPath.isEmpty()) file.name else "$baseRelPath/${file.name}"
+
+                    if (!includeRootfs && (file.name == ".rootfs" || relPath.startsWith(".rootfs/"))) {
+                        continue
+                    }
+                    if (excludePatterns.any { pattern -> relPath.contains(pattern) }) {
+                        continue
+                    }
+
+                    if (file.isDirectory) {
+                        val entry = java.util.zip.ZipEntry("$relPath/")
+                        entry.time = file.lastModified()
+                        zos.putNextEntry(entry)
+                        zos.closeEntry()
+                        addRecursively(file, relPath)
+                    } else if (file.isFile) {
+                        val entry = java.util.zip.ZipEntry(relPath)
+                        entry.time = file.lastModified()
+                        zos.putNextEntry(entry)
+                        file.inputStream().use { it.copyTo(zos) }
+                        zos.closeEntry()
+                    }
+                }
+            }
+
+            addRecursively(root, "")
+        }
+
+        return outputFile
+    }
+
+    /**
+     * Lists all project files and directories in the workspace.
+     */
+    fun listWorkspaceFiles(
+        sessionId: String = activeSessionId,
+        includeRootfs: Boolean = false
+    ): List<WorkspaceFileInfo> {
+        val root = getWorkspaceDir(sessionId)
+        val result = mutableListOf<WorkspaceFileInfo>()
+
+        fun walk(dir: File, baseRel: String) {
+            val children = dir.listFiles() ?: return
+            for (child in children) {
+                val rel = if (baseRel.isEmpty()) child.name else "$baseRel/${child.name}"
+                if (!includeRootfs && (child.name == ".rootfs" || rel.startsWith(".rootfs/"))) {
+                    continue
+                }
+                val ext = child.extension.lowercase()
+                val typeInfo = getFileTypeInfo(ext)
+                val category = if (child.isDirectory) FileCategory.UNKNOWN else typeInfo.category
+
+                result.add(
+                    WorkspaceFileInfo(
+                        name = child.name,
+                        relativePath = rel,
+                        sizeBytes = if (child.isDirectory) 0L else child.length(),
+                        isDirectory = child.isDirectory,
+                        lastModified = child.lastModified(),
+                        extension = ext,
+                        category = category
+                    )
+                )
+
+                if (child.isDirectory) {
+                    walk(child, rel)
+                }
+            }
+        }
+
+        walk(root, "")
+        return result.sortedWith(compareBy({ !it.isDirectory }, { it.relativePath.lowercase() }))
+    }
+
+    /**
+     * Returns aggregated statistics for the workspace.
+     */
+    fun getWorkspaceStats(sessionId: String = activeSessionId): WorkspaceStats {
+        val files = listWorkspaceFiles(sessionId, includeRootfs = false)
+        val fileCount = files.count { !it.isDirectory }
+        val dirCount = files.count { it.isDirectory }
+        val totalBytes = files.filter { !it.isDirectory }.sumOf { it.sizeBytes }
+        val lastMod = files.maxOfOrNull { it.lastModified } ?: System.currentTimeMillis()
+        return WorkspaceStats(sessionId, fileCount, dirCount, totalBytes, lastMod)
+    }
+
+    /**
+     * Reads the text content of a workspace file.
+     */
+    fun readWorkspaceFile(sessionId: String = activeSessionId, relativePath: String): String {
+        val file = resolvePath(relativePath, sessionId)
+        if (!file.exists() || !file.isFile) {
+            throw java.io.FileNotFoundException("File not found in workspace: $relativePath")
+        }
+        return file.readText(Charsets.UTF_8)
+    }
+
+    /**
+     * Deletes a file or directory from the workspace.
+     */
+    fun deleteWorkspaceFile(sessionId: String = activeSessionId, relativePath: String): Boolean {
+        val file = resolvePath(relativePath, sessionId)
+        return if (file.exists()) {
+            file.deleteRecursively()
+        } else false
+    }
+
     companion object {
         val STANDARD_DIRECTORIES = listOf("src", "scripts", "data", "output", "docs", "lib", "tests", "bin")
 
@@ -515,6 +655,24 @@ node_modules/
         }
     }
 }
+
+data class WorkspaceFileInfo(
+    val name: String,
+    val relativePath: String,
+    val sizeBytes: Long,
+    val isDirectory: Boolean,
+    val lastModified: Long,
+    val extension: String,
+    val category: FileCategory
+)
+
+data class WorkspaceStats(
+    val sessionId: String,
+    val totalFiles: Int,
+    val totalDirectories: Int,
+    val totalSizeBytes: Long,
+    val lastModified: Long
+)
 
 enum class FileCategory {
     SOURCE_CODE,

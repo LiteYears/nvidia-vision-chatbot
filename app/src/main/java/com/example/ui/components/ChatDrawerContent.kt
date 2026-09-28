@@ -25,6 +25,7 @@ import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.DeleteSweep
+import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.PersonOutline
 import androidx.compose.material.icons.outlined.Security
 import androidx.compose.material.icons.outlined.SmartToy
@@ -72,6 +73,7 @@ fun ChatDrawerContent(
     onOpenPlanClick: () -> Unit,
     onOpenAboutClick: () -> Unit = {},
     onOpenParametersClick: () -> Unit = {},
+    onOpenWorkspaceClick: () -> Unit = {},
     currentMode: AppMode = AppMode.CHAT,
     onModeChange: (AppMode) -> Unit = {},
     agentSessions: List<AgentSession> = emptyList(),
@@ -528,6 +530,32 @@ fun ChatDrawerContent(
                     modifier = Modifier.padding(4.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
+                    // Workspace Project Files (Browse, Preview, Export ZIP)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { onOpenWorkspaceClick() }
+                            .padding(horizontal = 10.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Folder,
+                            contentDescription = "Workspace Files",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(17.dp)
+                        )
+                        Text(
+                            text = "Workspace Files & Export",
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                fontWeight = FontWeight.Medium,
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        )
+                    }
+
                     // System Parameters & Hyperparameters
                     Row(
                         modifier = Modifier

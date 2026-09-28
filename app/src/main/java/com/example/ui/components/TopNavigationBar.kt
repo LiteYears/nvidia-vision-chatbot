@@ -16,6 +16,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.Face
+import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -42,6 +43,7 @@ fun TopNavigationBar(
     onPlanClick: () -> Unit,
     onIncognitoClick: () -> Unit,
     onClearMessagesClick: () -> Unit = {},
+    onWorkspaceClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Row(
@@ -113,6 +115,22 @@ fun TopNavigationBar(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
+            if (onWorkspaceClick != null) {
+                IconButton(
+                    onClick = onWorkspaceClick,
+                    modifier = Modifier
+                        .size(44.dp)
+                        .testTag("workspace_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Folder,
+                        contentDescription = "Workspace Files",
+                        tint = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.85f),
+                        modifier = Modifier.size(23.dp)
+                    )
+                }
+            }
+
             if (canClearMessages) {
                 IconButton(
                     onClick = onClearMessagesClick,

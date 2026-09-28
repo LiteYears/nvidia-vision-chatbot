@@ -149,38 +149,14 @@ class TermuxCommandRunner(
 
     private fun isEmbeddedUbuntuCommand(command: String): Boolean {
         val trimmed = command.trim()
-        if (trimmed.contains("<<")) {
-            return true
+        val tokens = trimmed.split(Regex("\\s+|&&|\\|\\||;")).filter { it.isNotBlank() }
+        if (tokens.isEmpty()) return false
+        val packageKeywords = setOf("apt", "apt-get", "dpkg", "pkg", "proot", "proot-distro")
+        return tokens.any { token ->
+            val clean = token.trim('\'', '"', ';', '&', '|').lowercase()
+            val baseName = if (clean.contains('/')) File(clean).name else clean
+            baseName in packageKeywords
         }
-
-        val embeddedTools = setOf(
-            "apt", "apt-get", "dpkg", "pkg",
-            "proot", "proot-distro",
-            "pip", "pip3", "neofetch"
-        )
-
-        val subCommands = trimmed.split(Regex("[;&|\n]+"))
-        for (sub in subCommands) {
-            val words = sub.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
-            if (words.isEmpty()) continue
-            var execWord = words[0].trim('\'', '"').lowercase()
-            if (execWord == "sudo" && words.size > 1) {
-                execWord = words[1].trim('\'', '"').lowercase()
-            }
-            val execName = if (execWord.contains('/')) File(execWord).name else execWord
-            if (execName in embeddedTools) {
-                return true
-            }
-            if (execName == "python" || execName == "python3" || execName == "py") {
-                val hasSystemPython = File("/system/bin/python3").exists() ||
-                    File("/system/bin/python").exists() ||
-                    File("/system/xbin/python3").exists()
-                if (!hasSystemPython) {
-                    return true
-                }
-            }
-        }
-        return false
     }
 
     private data class StreamReadResult(val text: String, val isTruncated: Boolean)

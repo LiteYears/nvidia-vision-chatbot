@@ -32,8 +32,8 @@ class SettingsManager(context: Context) {
         const val DEFAULT_TOP_P = 0.95f
         const val DEFAULT_MAX_TOKENS = 4096
 
-        // Embedded default key configured for this environment
-        private const val DEFAULT_FALLBACK_KEY = "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"
+        // Default fallback key (leave empty; secrets loaded from BuildConfig / .env)
+        private const val DEFAULT_FALLBACK_KEY = ""
     }
 
     /**
