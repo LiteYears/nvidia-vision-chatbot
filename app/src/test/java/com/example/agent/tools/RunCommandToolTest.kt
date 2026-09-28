@@ -384,4 +384,81 @@ class RunCommandToolTest {
         assertTrue("npm --version should succeed: ${npmResult.error}", npmResult.isSuccess)
         assertTrue(npmResult.result!!.contains("."))
     }
+
+    @Test
+    fun testAptPackageManagementExecution() = runBlocking {
+        // Test apt update
+        val updateResult = runCommandTool.execute(
+            mapOf("command" to "apt update")
+        )
+        assertTrue("apt update should succeed: ${updateResult.error}", updateResult.isSuccess)
+        assertNotNull(updateResult.result)
+        assertTrue("Output should indicate package list refresh", updateResult.result!!.contains("Reading package lists") || updateResult.result!!.contains("Hit:1"))
+        assertTrue("Output should indicate Exit Code: 0", updateResult.result!!.contains("Exit Code: 0"))
+
+        // Test apt update with options
+        val fixResult = runCommandTool.execute(
+            mapOf("command" to "apt update --fix-missing")
+        )
+        assertTrue("apt update --fix-missing should succeed: ${fixResult.error}", fixResult.isSuccess)
+        assertTrue("Output should indicate Exit Code: 0", fixResult.result!!.contains("Exit Code: 0"))
+
+        // Test sudo apt update
+        val sudoResult = runCommandTool.execute(
+            mapOf("command" to "sudo apt update")
+        )
+        assertTrue("sudo apt update should succeed: ${sudoResult.error}", sudoResult.isSuccess)
+        assertTrue("Output should indicate Exit Code: 0", sudoResult.result!!.contains("Exit Code: 0"))
+
+        // Test apt install
+        val installResult = runCommandTool.execute(
+            mapOf("command" to "apt install -y curl")
+        )
+        assertTrue("apt install should succeed: ${installResult.error}", installResult.isSuccess)
+        assertTrue(installResult.result!!.contains("The following NEW packages will be installed") || installResult.result!!.contains("Setting up"))
+    }
+
+    @Test
+    fun testHeredocFileCreationAndExecution() = runBlocking {
+        val script = """
+            cat << 'EOF' > greet.py
+            def greet(name):
+                return f"Hello, {name}!"
+
+            if __name__ == '__main__':
+                print(greet("Ubuntu PRoot Agent"))
+            EOF
+            python3 greet.py
+        """.trimIndent()
+
+        val result = runCommandTool.execute(mapOf("command" to script))
+        assertTrue("Heredoc script creation and execution should succeed: ${result.error}", result.isSuccess)
+        assertNotNull(result.result)
+        assertTrue("Output should contain greeting from python script", result.result!!.contains("Hello, Ubuntu PRoot Agent!"))
+        assertTrue("Exit Code should be 0", result.result!!.contains("Exit Code: 0"))
+    }
+
+    @Test
+    fun testHeredocAppendMode() = runBlocking {
+        val step1 = """
+            cat << 'EOF' > log.txt
+            Entry 1: Initializing
+            EOF
+        """.trimIndent()
+        val res1 = runCommandTool.execute(mapOf("command" to step1))
+        assertTrue("Step 1 should succeed: ${res1.error}", res1.isSuccess)
+
+        val step2 = """
+            cat << 'EOF' >> log.txt
+            Entry 2: Task completed
+            EOF
+        """.trimIndent()
+        val res2 = runCommandTool.execute(mapOf("command" to step2))
+        assertTrue("Step 2 should succeed: ${res2.error}", res2.isSuccess)
+
+        val catRes = runCommandTool.execute(mapOf("command" to "cat log.txt"))
+        assertTrue(catRes.isSuccess)
+        assertTrue(catRes.result!!.contains("Entry 1: Initializing"))
+        assertTrue(catRes.result!!.contains("Entry 2: Task completed"))
+    }
 }

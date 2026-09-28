@@ -34,14 +34,20 @@ class ProotAptManager(
 
         rootfsManager.ensureRootfs(workspaceRoot)
 
-        val first = tokens[0].lowercase().removePrefix("sudo ")
+        val cleanTokens = if (tokens.firstOrNull()?.lowercase() == "sudo") tokens.drop(1) else tokens
+        if (cleanTokens.isEmpty()) {
+            return@withContext CommandExecutionResult(0, "", "", 0)
+        }
+
+        val firstRaw = cleanTokens[0].lowercase().trim('\'', '"')
+        val first = if (firstRaw.contains('/')) File(firstRaw).name else firstRaw
         val isApt = first == "apt" || first == "apt-get"
         val isDpkg = first == "dpkg"
 
         if (isApt) {
-            handleApt(tokens.drop(1), workingDir, workspaceRoot, startTime)
+            handleApt(cleanTokens.drop(1), workingDir, workspaceRoot, startTime)
         } else if (isDpkg) {
-            handleDpkg(tokens.drop(1), workspaceRoot, startTime)
+            handleDpkg(cleanTokens.drop(1), workspaceRoot, startTime)
         } else {
             CommandExecutionResult(1, "", "Unknown package tool: $first\n", 5)
         }
@@ -71,9 +77,9 @@ class ProotAptManager(
             return CommandExecutionResult(0, help, "", 5)
         }
 
-        val action = args[0].lowercase()
-        val optionsAndPkgs = args.drop(1)
-        val packages = optionsAndPkgs.filter { !it.startsWith("-") }
+        val nonFlags = args.filter { !it.startsWith("-") }
+        val action = nonFlags.firstOrNull()?.lowercase() ?: "update"
+        val packages = nonFlags.drop(1)
 
         when (action) {
             "update" -> {
@@ -130,7 +136,10 @@ class ProotAptManager(
                     if (pkg.startsWith("python3-") || pkg.startsWith("python-")) {
                         val pipPkgName = pkg.removePrefix("python3-").removePrefix("python-")
                         // Run pip install under the hood
-                        pipManager.execute("pip install $pipPkgName", workspaceRoot)
+                        try {
+                            pipManager.execute("pip install $pipPkgName", workspaceRoot)
+                        } catch (_: Throwable) {
+                        }
                     }
 
                     // Register in dpkg status

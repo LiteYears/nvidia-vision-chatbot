@@ -681,7 +681,7 @@ fun ChatScreen(
 
                             val feedItems = remember(currentSession.messages, currentSession.toolExecutions, currentSession.reflections) {
                                 val items = mutableListOf<AgentFeedItem>()
-                                val visibleMessages = currentSession.messages.filter { it.content.isNotBlank() || it.isStreaming }
+                                val visibleMessages = currentSession.messages.filter { it.content.isNotBlank() }
                                 items.addAll(visibleMessages.map { AgentFeedItem.Message(it) })
                                 items.addAll(currentSession.reflections.map { AgentFeedItem.Reflection(it) })
                                 items.addAll(currentSession.toolExecutions.map { AgentFeedItem.Tool(it) })

@@ -480,12 +480,21 @@ class TaskPlanner {
                     descLower.contains("extract") || descLower.contains("implement") ||
                     descLower.contains("change")
             }
-            "python_execute", "run_command" -> {
+            "python_execute", "run_command", "bash", "terminal", "sh", "cmd", "exec" -> {
                 descLower.contains("execute") || descLower.contains("run") ||
                     descLower.contains("command") || descLower.contains("test") ||
                     descLower.contains("script") || descLower.contains("verify") ||
                     descLower.contains("check") || descLower.contains("compile") ||
-                    descLower.contains("build")
+                    descLower.contains("build") || descLower.contains("inspect") ||
+                    descLower.contains("locate") || descLower.contains("architecture") ||
+                    descLower.contains("explore") || descLower.contains("analyze") ||
+                    descLower.contains("create") || descLower.contains("write") ||
+                    descLower.contains("implement") || descLower.contains("modify") ||
+                    descLower.contains("setup") || descLower.contains("install") ||
+                    descLower.contains("directories") || descLower.contains("directory") ||
+                    descLower.contains("package") || descLower.contains("requirements") ||
+                    descLower.contains("fix") || descLower.contains("repair") ||
+                    descLower.contains("service") || descLower.contains("api")
             }
             "web_search" -> {
                 descLower.contains("search") || descLower.contains("query") ||

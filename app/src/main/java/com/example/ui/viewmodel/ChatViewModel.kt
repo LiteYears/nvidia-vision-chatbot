@@ -44,6 +44,7 @@ import com.example.data.repository.AgentPlanRepository
 import com.example.data.repository.ChatRepository
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -1125,12 +1126,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             "- Prior to each command, provide a brief 1-2 sentence thought, execute the terminal command, inspect the result, and finish with your verified solution."
     }
 
-    fun sendAgentFollowUp(overrideText: String? = null) {
-        val textToSend = (overrideText ?: _uiState.value.agentInputText).trim()
-        if (textToSend.isBlank()) return
+    fun retryCurrentAgentTask() {
+        sendAgentFollowUp("Please resume execution of the task from where it stopped and complete the remaining steps.")
+    }
 
+    fun sendAgentFollowUp(overrideText: String? = null) {
         val state = _uiState.value
         val currentSession = state.currentAgentSession ?: return
+        val rawInput = (overrideText ?: state.agentInputText).trim()
+        val textToSend = if (rawInput.isNotBlank()) {
+            rawInput
+        } else if (currentSession.status == AgentTaskStatus.FAILED || currentSession.status == AgentTaskStatus.PAUSED) {
+            "Please resume execution of the task from where it stopped and complete the remaining steps."
+        } else {
+            return
+        }
 
         agentGenerationJob?.cancel()
 
@@ -1292,7 +1302,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val workspacePromptSnippet = workspaceContext.formatContextForPrompt()
             val fullSystemPrompt = "$systemPrompt\n\n$workspacePromptSnippet\n\n$planPromptSnippet"
 
-            val attemptResult = repository.requestAiCompletion(
+            var attemptResult = repository.requestAiCompletion(
                 history = historyMessages,
                 userMessage = currentTurnMessage,
                 modelName = state.selectedModel,
@@ -1301,6 +1311,29 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 topP = state.topP,
                 maxTokens = state.maxTokens
             )
+
+            var networkRetries = 0
+            while (attemptResult.isFailure && networkRetries < 3 && kotlinx.coroutines.isActive) {
+                val err = attemptResult.exceptionOrNull()
+                val errText = err?.message ?: ""
+                val isNetwork = errText.contains("Network connection", ignoreCase = true) ||
+                    errText.contains("Unable to resolve host", ignoreCase = true) ||
+                    errText.contains("timeout", ignoreCase = true) ||
+                    errText.contains("Failed to connect", ignoreCase = true)
+                if (!isNetwork) break
+
+                networkRetries++
+                delay(2000L * networkRetries)
+                attemptResult = repository.requestAiCompletion(
+                    history = historyMessages,
+                    userMessage = currentTurnMessage,
+                    modelName = state.selectedModel,
+                    systemPrompt = fullSystemPrompt,
+                    temperature = state.temperature,
+                    topP = state.topP,
+                    maxTokens = state.maxTokens
+                )
+            }
 
             if (attemptResult.isFailure) {
                 val error = attemptResult.exceptionOrNull() ?: Exception("Unknown error during agent generation")
@@ -1385,7 +1418,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             workspaceContext.recordFileDeletion(pathArg)
                         }
                     }
-                    "run_command", "python_execute" -> {
+                    "run_command", "python_execute", "bash", "terminal", "sh", "cmd", "exec" -> {
                         val cmd = (toolCall.arguments["command"] ?: toolCall.arguments["code"] ?: toolCall.arguments["script_path"] ?: toolCall.toolName).toString()
                         workspaceContext.recordCommandExecution(
                             command = cmd,
@@ -1508,35 +1541,35 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     )
 
                     val nudgeContent = buildString {
-                        appendLine("[EXECUTION CONTROL: Tool invocation required]")
-                        appendLine("You provided commentary or described next steps, but did not emit a ```tool_call``` block.")
+                        appendLine("[EXECUTION CONTROL: Command or tool execution required]")
+                        appendLine("You provided commentary or described next steps, but did not execute a command in your Ubuntu terminal.")
                         appendLine("Unfinished action subtask: \"${activeSubtask?.description}\".")
                         if (workspaceContext.hasUnverifiedModifications()) {
                             val unverified = workspaceContext.modifiedFiles.filter { it.value.verificationStatus == VerificationStatus.NEEDS_VERIFICATION }.keys
                             appendLine("Unverified modifications exist on disk for: ${unverified.joinToString(", ")}.")
-                            appendLine("You must run compilation or test checks (using 'run_command' or 'python_execute') to verify the modified workspace state before completing.")
+                            appendLine("You must run compilation or test checks (using standard bash commands or 'run_command') to verify the modified workspace state before completing.")
                         }
                         if (activeSubtask?.status == SubtaskStatus.FAILED) {
                             appendLine("The previous tool execution for subtask \"${activeSubtask.description}\" FAILED.")
-                            appendLine("You must inspect diagnostics, apply a repair (via 'file_patch' or 'file_write'), test an alternative approach, or adapt your plan before concluding.")
+                            appendLine("You must inspect diagnostics, apply a repair (using bash heredocs or file tools), test an alternative approach, or adapt your plan before concluding.")
                         } else if (activeSubtask?.description?.contains("test", ignoreCase = true) == true ||
                             activeSubtask?.description?.contains("compile", ignoreCase = true) == true ||
                             activeSubtask?.description?.contains("verify", ignoreCase = true) == true ||
                             activeSubtask?.description?.contains("execute", ignoreCase = true) == true ||
                             activeSubtask?.description?.contains("run", ignoreCase = true) == true) {
-                            appendLine("The implementation has not been tested or verified yet. You MUST run tests or verify the build (via 'run_command' or 'python_execute') before claiming completion.")
+                            appendLine("The implementation has not been tested or verified yet. You MUST run tests or verify the build (via a ```bash block or 'run_command') before claiming completion.")
                         } else if (activeSubtask?.description?.contains("inspect", ignoreCase = true) == true ||
                             activeSubtask?.description?.contains("locate", ignoreCase = true) == true ||
                             activeSubtask?.description?.contains("search", ignoreCase = true) == true) {
-                            appendLine("Before editing, inspect the existing code and architecture using 'file_list', 'file_tree', 'file_search', or 'file_read'.")
+                            appendLine("Before editing, inspect the existing code and architecture using standard terminal commands (ls, cat, grep, find) or file tools.")
                         } else if (activeSubtask?.description?.contains("modify", ignoreCase = true) == true ||
                             activeSubtask?.description?.contains("implement", ignoreCase = true) == true ||
                             activeSubtask?.description?.contains("fix", ignoreCase = true) == true ||
                             activeSubtask?.description?.contains("write", ignoreCase = true) == true) {
-                            appendLine("The required code modifications have not been saved yet. You MUST invoke 'file_patch' or 'file_write' to apply the changes on disk.")
+                            appendLine("The required code modifications have not been saved yet. You MUST write or update the files using a bash heredoc (cat << 'EOF' > filename ... EOF) or file tools.")
                         }
-                        appendLine("You MUST output the next tool call inside a ```tool_call``` block now to proceed with execution.")
-                        appendLine("Do NOT deliver an intermediate text-only response without a tool call until the objective is fully executed and verified.")
+                        appendLine("You MUST output your next command in a ```bash ... ``` block or a ```tool_call``` block now to proceed with execution.")
+                        appendLine("Do NOT deliver an intermediate text-only response without executing a command until the objective is fully executed and verified.")
                     }
 
                     currentTurnMessage = ChatMessage(
@@ -1626,6 +1659,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         fullReplyText: String,
         initialSteps: List<AgentStep>?
     ) {
+        val responseTimestamp = System.currentTimeMillis()
         val words = fullReplyText.split(Regex("(?<=\\s)|(?=\\s)"))
         val accumulated = StringBuilder()
 
@@ -1637,7 +1671,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val curSession = cur.currentAgentSession ?: return@update cur
                 val updatedMessages = curSession.messages.map { msg ->
                     if (msg.id == assistantMessageId) {
-                        msg.copy(content = currentText, isStreaming = true)
+                        msg.copy(content = currentText, isStreaming = true, timestamp = responseTimestamp)
                     } else msg
                 }
                 val updatedSession = curSession.copy(messages = updatedMessages)
@@ -1652,7 +1686,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
         val finalAssistantMessage = streamingAssistantMessage.copy(
             content = fullReplyText,
-            isStreaming = false
+            isStreaming = false,
+            timestamp = responseTimestamp
         )
 
         val updatedSteps = initialSteps?.map { step ->

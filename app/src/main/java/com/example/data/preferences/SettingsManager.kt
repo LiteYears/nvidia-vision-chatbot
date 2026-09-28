@@ -49,7 +49,7 @@ class SettingsManager(context: Context) {
         } catch (_: Exception) {
             ""
         }
-        if (buildKey.isNotBlank() && !buildKey.contains("placeholder", ignoreCase = true)) {
+        if (buildKey.isNotBlank() && !buildKey.contains("placeholder", ignoreCase = true) && !buildKey.contains("DEFAULT_API_KEY", ignoreCase = true)) {
             return buildKey
         }
 

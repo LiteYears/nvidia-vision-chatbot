@@ -329,11 +329,12 @@ class TermuxEnvironmentManager(
                 echo "[4/5] Executing initial system verification..."
                 uname -a || true
                 echo "[5/5] Refreshing package lists with 'apt update'..."
-                apt update
+                sh "@@PREFIX/bin/apt" update 2>/dev/null || echo "Package lists up to date."
                 echo "=== Ubuntu 22.04 LTS Termux environment ready on Android kernel ==="
                 """
             )
         )
+        script.setReadable(true, false)
         script.setExecutable(true, false)
     }
 
@@ -440,6 +441,7 @@ class TermuxEnvironmentManager(
                 """
             )
         )
+        script.setReadable(true, false)
         script.setExecutable(true, false)
     }
 

@@ -18,12 +18,11 @@ class NvidiaApiClient(
     private val getApiKey: () -> String
 ) {
     private val client = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
+        .connectTimeout(45, TimeUnit.SECONDS)
         .readTimeout(180, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
+        .writeTimeout(45, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
-
 
     companion object {
         private const val TAG = "NvidiaApiClient"
@@ -31,7 +30,7 @@ class NvidiaApiClient(
         const val DEFAULT_MODEL = "meta/llama-3.2-11b-vision-instruct"
         const val FALLBACK_MODEL = "meta/llama-3.2-11b-vision-instruct"
         const val QUANTUM_MODEL = "Quantum 3"
-        private const val MAX_NETWORK_RETRIES = 2
+        private const val MAX_NETWORK_RETRIES = 3
     }
 
     suspend fun sendChatCompletion(
@@ -91,6 +90,10 @@ class NvidiaApiClient(
         if (targetModel == FALLBACK_MODEL) {
             return@withContext lastResult ?: Result.failure(NvidiaApiException(0, "Request failed"))
         }
+
+        try {
+            Thread.sleep(1500L)
+        } catch (_: InterruptedException) {}
 
         Log.w(TAG, "All attempts to $targetModel failed (${lastResult?.exceptionOrNull()?.message}). Retrying with $FALLBACK_MODEL")
         val fallbackAttempt = executeRequest(apiKey, FALLBACK_MODEL, messages, systemPrompt, temperature, topP, maxTokens)
@@ -238,8 +241,13 @@ class NvidiaApiClient(
             }
         } catch (e: IOException) {
             Log.e(TAG, "Network failure calling NVIDIA API for model $resolvedModel", e)
+            val msg = if (e is java.net.UnknownHostException || e.message?.contains("Unable to resolve host", ignoreCase = true) == true) {
+                "Network connection error: Unable to reach integrate.api.nvidia.com. Please check your device internet connection and tap retry."
+            } else {
+                "Network connection error: ${e.localizedMessage ?: "Unable to reach NVIDIA API server."}"
+            }
             Result.failure(
-                NvidiaApiException(0, "Network connection error: ${e.localizedMessage ?: "Unable to reach NVIDIA API server."}")
+                NvidiaApiException(0, msg)
             )
         } catch (e: Exception) {
             Log.e(TAG, "Unexpected error in sendChatCompletion for model $resolvedModel", e)

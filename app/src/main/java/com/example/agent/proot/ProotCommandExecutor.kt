@@ -56,6 +56,15 @@ class ProotCommandExecutor(
 
         rootfsManager.ensureRootfs(workspaceRoot)
 
+        // Check for single heredoc statement before compound splitting
+        if (trimmed.contains("<<")) {
+            val compoundStatements = splitCompound(trimmed)
+            if (compoundStatements.size > 1) {
+                return@withContext executeCompound(compoundStatements, workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
+            }
+            return@withContext executeHeredoc(trimmed, workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
+        }
+
         // 1. Compound statement splitting (&&, ;, ||)
         val compoundStatements = splitCompound(trimmed)
         if (compoundStatements.size > 1) {
@@ -75,6 +84,7 @@ class ProotCommandExecutor(
         var inDouble = false
         var escape = false
         var pendingOp = ""
+        var activeHeredocDelim: String? = null
 
         var i = 0
         while (i < raw.length) {
@@ -105,6 +115,35 @@ class ProotCommandExecutor(
             }
 
             if (!inSingle && !inDouble) {
+                // If inside a heredoc body, do not break on semicolons or operators until the closing delimiter line
+                if (activeHeredocDelim != null) {
+                    if (c == '\n') {
+                        val lastLine = current.toString().substringAfterLast('\n').trim()
+                        if (lastLine == activeHeredocDelim) {
+                            activeHeredocDelim = null
+                            if (current.isNotBlank()) {
+                                steps.add(CompoundStep(current.toString().trim(), pendingOp))
+                                current.clear()
+                            }
+                            pendingOp = ";"
+                            i++
+                            continue
+                        }
+                    }
+                    current.append(c)
+                    i++
+                    continue
+                }
+
+                // Detect start of heredoc: << or <<-
+                if (c == '<' && i + 1 < raw.length && raw[i + 1] == '<' && (i + 2 >= raw.length || raw[i + 2] != '<')) {
+                    val remainingLine = raw.substring(i).substringBefore('\n')
+                    val delimMatch = Regex("""<<-?\s*['"]?([A-Za-z0-9_.-]+)['"]?""").find(remainingLine)
+                    if (delimMatch != null) {
+                        activeHeredocDelim = delimMatch.groupValues[1]
+                    }
+                }
+
                 if (c == ';' || c == '\n') {
                     if (current.isNotBlank()) {
                         steps.add(CompoundStep(current.toString().trim(), pendingOp))
@@ -244,6 +283,11 @@ class ProotCommandExecutor(
             pCmd = pCmd.replace("2> /dev/null", "").replace("2>/dev/null", "").trim()
         }
 
+        // Check for heredocs (<<) before general redirection
+        if (pCmd.contains("<<")) {
+            return executeHeredoc(pCmd, workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
+        }
+
         // Check for redirection operators (>, >>)
         val redirAppend = pCmd.contains(">>")
         val redirTruncate = !redirAppend && pCmd.contains(">")
@@ -298,6 +342,84 @@ class ProotCommandExecutor(
             return CommandExecutionResult(atomicRes.exitCode, out, "", atomicRes.durationMs, atomicRes.isTimedOut, atomicRes.isTruncated)
         }
         return atomicRes
+    }
+
+    private suspend fun executeHeredoc(
+        command: String,
+        workingDir: File,
+        workspaceRoot: File,
+        timeoutMs: Long,
+        maxOutputBytes: Int
+    ): CommandExecutionResult {
+        val startTime = System.currentTimeMillis()
+        val lines = command.lines()
+        if (lines.isEmpty()) {
+            return CommandExecutionResult(0, "", "", 0)
+        }
+
+        val firstLine = lines[0]
+        val delimMatch = Regex("""<<-?\s*['"]?([A-Za-z0-9_.-]+)['"]?""").find(firstLine)
+        val delim = delimMatch?.groupValues?.get(1) ?: "EOF"
+
+        // Check for redirection target on the first line
+        val redirAppend = firstLine.contains(">>")
+        val redirTruncate = !redirAppend && firstLine.contains(">")
+        val targetPath = if (redirAppend) {
+            Regex(""">>\s*([^\s<>|;&]+)""").find(firstLine)?.groupValues?.get(1)?.trim('\'', '"')
+        } else if (redirTruncate) {
+            Regex("""(?<!>)>\s*([^\s<>|;&]+)""").find(firstLine)?.groupValues?.get(1)?.trim('\'', '"')
+        } else null
+
+        // Collect body lines up to closing delimiter line
+        val bodyLines = lines.drop(1).takeWhile { it.trim() != delim }
+        val body = bodyLines.joinToString("\n")
+
+        // First line executable
+        val tokens = tokenize(firstLine.substringBefore("<<").substringBefore(">").trim())
+        val execToken = tokens.firstOrNull()?.lowercase() ?: "cat"
+        val cleanExec = if (execToken.contains('/')) File(execToken).name.lowercase() else execToken
+
+        // Redirection target exists: write or append to file
+        if (!targetPath.isNullOrBlank() && targetPath != "/dev/null" && targetPath != "dev/null") {
+            try {
+                val targetFile = rootfsManager.resolveVirtualPath(targetPath, workingDir, workspaceRoot)
+                targetFile.parentFile?.mkdirs()
+                if (redirAppend) {
+                    targetFile.appendText(body + "\n")
+                } else {
+                    targetFile.writeText(body + "\n")
+                }
+                return CommandExecutionResult(0, "", "", System.currentTimeMillis() - startTime)
+            } catch (e: Exception) {
+                return CommandExecutionResult(1, "", "bash: $targetPath: ${e.message ?: "Failed to write file"}\n", System.currentTimeMillis() - startTime)
+            }
+        }
+
+        if (cleanExec == "python" || cleanExec == "python3" || cleanExec == "py") {
+            val pyRes = pythonRuntime.execute(
+                code = body,
+                filename = "<heredoc>",
+                args = emptyList(),
+                timeoutMs = timeoutMs,
+                maxOutputBytes = maxOutputBytes
+            )
+            return CommandExecutionResult(
+                exitCode = pyRes.exitCode,
+                stdout = pyRes.stdout,
+                stderr = pyRes.stderr,
+                durationMs = System.currentTimeMillis() - startTime,
+                isTimedOut = pyRes.isTimedOut,
+                isTruncated = pyRes.isTruncated
+            )
+        }
+
+        if (cleanExec == "bash" || cleanExec == "sh") {
+            val innerSteps = splitCompound(body)
+            return executeCompound(innerSteps, workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
+        }
+
+        // Default: outputs body (like cat << EOF)
+        return CommandExecutionResult(0, if (body.endsWith("\n")) body else "$body\n", "", System.currentTimeMillis() - startTime)
     }
 
     private fun splitPipes(cmd: String): List<String> {
