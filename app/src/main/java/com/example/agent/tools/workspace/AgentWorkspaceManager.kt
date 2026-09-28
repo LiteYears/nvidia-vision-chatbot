@@ -3,7 +3,9 @@ package com.example.agent.tools.workspace
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.nio.charset.Charset
 import java.util.Base64
+import java.util.UUID
 
 /**
  * Manages isolated, persistent directories for each Agent session.
@@ -105,25 +107,67 @@ node_modules/
             throw SecurityException("Invalid character in path: null byte detected.")
         }
 
-        val trimmed = relativePath.trim()
+        // Clean quotes and trim whitespace
+        var trimmed = relativePath.trim().trim('\'', '"')
         val workspaceRoot = getWorkspaceDir(sessionId)
+        val rootPath = workspaceRoot.canonicalPath
+        val rootfsDir = com.example.agent.proot.ProotRootfsManager.getInstance().ensureRootfs(workspaceRoot)
+        val rootfsPath = rootfsDir.canonicalPath
+        val legacyRootfs = File(workspaceRoot, ".rootfs")
 
-        val target = if (trimmed.isEmpty() || trimmed == "." || trimmed == "./" || trimmed == "/") {
-            workspaceRoot
+        // 1. Direct workspace root aliases
+        if (trimmed.isEmpty() || trimmed == "." || trimmed == "./" || trimmed == "/" || trimmed == "~" || trimmed == "/workspace") {
+            return workspaceRoot
+        }
+
+        // 2. Strip standard virtual workspace prefixes
+        if (trimmed.startsWith("/workspace/")) {
+            trimmed = trimmed.removePrefix("/workspace/").trimStart('/')
+        } else if (trimmed.startsWith("/home/ubuntu/workspace/")) {
+            trimmed = trimmed.removePrefix("/home/ubuntu/workspace/").trimStart('/')
+        } else if (trimmed.startsWith("~/workspace/")) {
+            trimmed = trimmed.removePrefix("~/workspace/").trimStart('/')
+        } else if (trimmed == "/home/ubuntu/workspace" || trimmed == "~/workspace") {
+            return workspaceRoot
+        }
+
+        val isSystemPath = trimmed.startsWith("/etc/") || trimmed.startsWith("/proc/") ||
+            trimmed.startsWith("/var/") || trimmed.startsWith("/tmp/") || trimmed.startsWith("/dev/") ||
+            trimmed.startsWith("/root") || trimmed.startsWith("/home/ubuntu") ||
+            trimmed.startsWith("/usr/") || trimmed.startsWith("/bin/") || trimmed.startsWith("/sbin/") || trimmed.startsWith("/lib/")
+
+        val target: File = if (isSystemPath) {
+            // Persistent Ubuntu 22.04 LTS rootfs system directories
+            val sub = trimmed.trimStart('/')
+            File(rootfsDir, sub).canonicalFile
         } else {
-            val fileCandidate = File(trimmed)
-            if (fileCandidate.isAbsolute) {
-                fileCandidate.canonicalFile
+            val candidate = File(trimmed)
+            if (candidate.isAbsolute) {
+                // If it is already an absolute path inside workspaceRoot or rootfs, accept it directly
+                val candCanonical = candidate.canonicalPath
+                if (candCanonical == rootPath || candCanonical.startsWith(rootPath + File.separator)) {
+                    candidate.canonicalFile
+                } else if (candCanonical == rootfsPath || candCanonical.startsWith(rootfsPath + File.separator)) {
+                    candidate.canonicalFile
+                } else {
+                    // Path had a leading slash intended inside workspace, e.g. "/src/prayer_times.py"
+                    val sub = trimmed.trimStart('/')
+                    File(workspaceRoot, sub).canonicalFile
+                }
             } else {
                 File(workspaceRoot, trimmed).canonicalFile
             }
         }
 
-        val rootPath = workspaceRoot.canonicalPath
         val targetPath = target.canonicalPath
 
-        // Strict boundary check: target must be the root itself or inside rootPath/
-        val isInside = targetPath == rootPath || targetPath.startsWith(rootPath + File.separator)
+        // Strict boundary check: target must be inside rootPath or rootfsPath
+        val isInside = targetPath == rootPath ||
+            targetPath.startsWith(rootPath + File.separator) ||
+            targetPath == rootfsPath ||
+            targetPath.startsWith(rootfsPath + File.separator) ||
+            (legacyRootfs.exists() && (targetPath == legacyRootfs.canonicalPath || targetPath.startsWith(legacyRootfs.canonicalPath + File.separator)))
+
         if (!isInside) {
             throw SecurityException("Access denied: Path '$relativePath' attempts to escape the agent workspace.")
         }
@@ -176,7 +220,78 @@ node_modules/
     }
 
     /**
+     * Atomically writes raw bytes to a target file.
+     * Writes to a temporary file in the same parent directory, syncs to disk, and atomically replaces the target file.
+     * Prevents partial writes, corruption, or truncation if an error or crash occurs.
+     */
+    fun atomicWrite(targetFile: File, bytes: ByteArray) {
+        val parent = targetFile.parentFile ?: targetFile.canonicalFile.parentFile
+        if (parent != null && !parent.exists()) {
+            parent.mkdirs()
+        }
+        val tempFile = File(parent ?: targetFile.parentFile, ".${targetFile.name}.tmp.${UUID.randomUUID()}")
+        try {
+            FileOutputStream(tempFile).use { fos ->
+                fos.write(bytes)
+                fos.flush()
+                try {
+                    fos.fd.sync()
+                } catch (_: Throwable) {}
+            }
+
+            var moved = false
+            try {
+                val canUseNio = try {
+                    Class.forName("java.nio.file.Files") != null
+                } catch (_: Throwable) {
+                    false
+                }
+                if (canUseNio) {
+                    java.nio.file.Files.move(
+                        tempFile.toPath(),
+                        targetFile.toPath(),
+                        java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING
+                    )
+                    moved = true
+                }
+            } catch (_: Throwable) {
+                moved = false
+            }
+
+            if (!moved) {
+                if (targetFile.exists()) {
+                    targetFile.delete()
+                }
+                if (!tempFile.renameTo(targetFile)) {
+                    tempFile.copyTo(targetFile, overwrite = true)
+                    tempFile.delete()
+                }
+            }
+        } finally {
+            if (tempFile.exists()) {
+                tempFile.delete()
+            }
+        }
+    }
+
+    /**
+     * Atomically writes text to a workspace file. Automatically creates parent directories.
+     */
+    fun atomicWriteText(
+        relativePath: String,
+        text: String,
+        charset: Charset = Charsets.UTF_8,
+        sessionId: String = activeSessionId
+    ): File {
+        val targetFile = resolvePath(relativePath, sessionId)
+        atomicWrite(targetFile, text.toByteArray(charset))
+        return targetFile
+    }
+
+    /**
      * Writes raw bytes to a workspace file. Automatically creates parent directories.
+     * Uses atomic temporary file swap for non-append operations to prevent data corruption.
      */
     fun writeBytes(
         relativePath: String,
@@ -190,11 +305,16 @@ node_modules/
                 parent.mkdirs()
             }
         }
-        FileOutputStream(targetFile, append).use { fos ->
-            fos.write(bytes)
-            fos.flush()
+        if (append) {
+            FileOutputStream(targetFile, true).use { fos ->
+                fos.write(bytes)
+                fos.flush()
+            }
+            return targetFile
+        } else {
+            atomicWrite(targetFile, bytes)
+            return targetFile
         }
-        return targetFile
     }
 
     /**
@@ -394,8 +514,152 @@ node_modules/
     }
 
     /**
-     * Extracts a local ZIP file located inside the workspace into a destination directory.
+     * Extracts a local ZIP or TAR archive located inside the workspace into a destination directory.
      */
+    fun extractArchive(
+        archiveFile: File,
+        destinationDir: File = getWorkspaceDir(),
+        overwrite: Boolean = true
+    ): ZipExtractResult {
+        if (!archiveFile.exists() || !archiveFile.isFile) {
+            return ZipExtractResult(
+                archiveName = archiveFile.name,
+                totalFiles = 0,
+                totalBytes = 0L,
+                extractedPaths = emptyList(),
+                isSuccess = false,
+                errorMessage = "Archive file not found: '${archiveFile.path}'"
+            )
+        }
+        val nameLower = archiveFile.name.lowercase()
+        if (nameLower.endsWith(".tar.gz") || nameLower.endsWith(".tgz") || nameLower.endsWith(".tar")) {
+            return FileInputStream(archiveFile).use { fis ->
+                extractTarStream(
+                    inputStream = fis,
+                    destinationDir = destinationDir,
+                    archiveName = archiveFile.name,
+                    overwrite = overwrite,
+                    isGzip = nameLower.endsWith(".gz") || nameLower.endsWith(".tgz")
+                )
+            }
+        }
+        return extractZipFile(archiveFile, destinationDir, overwrite)
+    }
+
+    fun extractTarStream(
+        inputStream: java.io.InputStream,
+        destinationDir: File,
+        archiveName: String = "archive.tar",
+        overwrite: Boolean = true,
+        isGzip: Boolean = false
+    ): ZipExtractResult {
+        destinationDir.mkdirs()
+        val canonicalDest = destinationDir.canonicalFile
+        val canonicalDestPath = canonicalDest.canonicalPath
+        val extractedPaths = mutableListOf<String>()
+        var totalBytes = 0L
+
+        return try {
+            val rawIn = inputStream
+            val inStream = if (isGzip || archiveName.endsWith(".gz") || archiveName.endsWith(".tgz")) {
+                java.util.zip.GZIPInputStream(rawIn)
+            } else {
+                rawIn
+            }
+            val header = ByteArray(512)
+            var consecutiveZeroBlocks = 0
+            while (true) {
+                var read = 0
+                while (read < 512) {
+                    val r = inStream.read(header, read, 512 - read)
+                    if (r < 0) break
+                    read += r
+                }
+                if (read < 512) break
+
+                var isZero = true
+                for (b in header) {
+                    if (b != 0.toByte()) { isZero = false; break }
+                }
+                if (isZero) {
+                    consecutiveZeroBlocks++
+                    if (consecutiveZeroBlocks >= 2) break
+                    continue
+                } else {
+                    consecutiveZeroBlocks = 0
+                }
+
+                val nameRaw = String(header, 0, 100, Charsets.US_ASCII).trim('\u0000', ' ')
+                if (nameRaw.isBlank()) continue
+
+                val sizeStr = String(header, 124, 12, Charsets.US_ASCII).trim('\u0000', ' ')
+                val size = sizeStr.toLongOrNull(8) ?: 0L
+                val typeFlag = header[156].toInt().toChar()
+
+                val targetFile = File(canonicalDest, nameRaw).canonicalFile
+                val targetPath = targetFile.canonicalPath
+                if (!targetPath.startsWith(canonicalDestPath + File.separator) && targetPath != canonicalDestPath) {
+                    throw SecurityException("Malicious tar entry detected attempting path traversal: '$nameRaw'")
+                }
+
+                if (typeFlag == '5' || nameRaw.endsWith("/")) {
+                    targetFile.mkdirs()
+                } else {
+                    targetFile.parentFile?.mkdirs()
+                    val pad = ((512 - (size % 512)) % 512).toInt()
+                    if (overwrite || !targetFile.exists()) {
+                        FileOutputStream(targetFile).use { fos ->
+                            var remaining = size
+                            val buf = ByteArray(4096)
+                            while (remaining > 0) {
+                                val toRead = minOf(remaining, buf.size.toLong()).toInt()
+                                val r = inStream.read(buf, 0, toRead)
+                                if (r < 0) break
+                                fos.write(buf, 0, r)
+                                totalBytes += r
+                                remaining -= r
+                            }
+                        }
+                        extractedPaths.add(getRelativePath(targetFile))
+                    } else {
+                        var remaining = size
+                        val buf = ByteArray(4096)
+                        while (remaining > 0) {
+                            val toRead = minOf(remaining, buf.size.toLong()).toInt()
+                            val r = inStream.read(buf, 0, toRead)
+                            if (r < 0) break
+                            remaining -= r
+                        }
+                    }
+                    if (pad > 0) {
+                        var padRemaining = pad.toLong()
+                        while (padRemaining > 0) {
+                            val skipped = inStream.skip(padRemaining)
+                            if (skipped <= 0) break
+                            padRemaining -= skipped
+                        }
+                    }
+                }
+            }
+            ZipExtractResult(
+                archiveName = archiveName,
+                totalFiles = extractedPaths.size,
+                totalBytes = totalBytes,
+                extractedPaths = extractedPaths,
+                isSuccess = true
+            )
+        } catch (e: Exception) {
+            ZipExtractResult(
+                archiveName = archiveName,
+                totalFiles = extractedPaths.size,
+                totalBytes = totalBytes,
+                extractedPaths = extractedPaths,
+                isSuccess = false,
+                errorMessage = e.message ?: e.javaClass.simpleName
+            )
+        }
+    }
+
     fun extractZipFile(
         zipFile: File,
         destinationDir: File = getWorkspaceDir(),
@@ -637,7 +901,11 @@ node_modules/
 
         fun init(baseDir: File): AgentWorkspaceManager {
             return synchronized(this) {
+                val existing = instance
                 val mgr = AgentWorkspaceManager(baseDir)
+                if (existing != null) {
+                    mgr.activeSessionId = existing.activeSessionId
+                }
                 instance = mgr
                 mgr
             }

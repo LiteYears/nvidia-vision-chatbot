@@ -376,15 +376,23 @@ class WorkspacePipManager(
                 newlyInstalled.add("$cleanPkgName-$version")
             } else {
                 // If download failed, try offline fallback
-                installOfflineFallback(cleanPkgName, libDir, log)
-                installedPackages.add(cleanPkgName)
-                newlyInstalled.add(cleanPkgName)
+                val fallbackOk = installOfflineFallback(cleanPkgName, libDir, log)
+                if (fallbackOk) {
+                    installedPackages.add(cleanPkgName)
+                    newlyInstalled.add(cleanPkgName)
+                } else {
+                    return PackageInstallResult(isSuccess = false, error = "ERROR: Failed to download distribution for $cleanPkgName from $chosenUrl")
+                }
             }
         } else {
             // No downloadable wheel found, try offline fallback
-            installOfflineFallback(cleanPkgName, libDir, log)
-            installedPackages.add(cleanPkgName)
-            newlyInstalled.add(cleanPkgName)
+            val fallbackOk = installOfflineFallback(cleanPkgName, libDir, log)
+            if (fallbackOk) {
+                installedPackages.add(cleanPkgName)
+                newlyInstalled.add(cleanPkgName)
+            } else {
+                return PackageInstallResult(isSuccess = false, error = "ERROR: No matching distribution found for $cleanPkgName on PyPI")
+            }
         }
 
         // 3. Resolve and install dependencies recursively
@@ -800,7 +808,7 @@ class WorkspacePipManager(
                 val pkgDir = File(libDir, "requests").apply { mkdirs() }
                 File(pkgDir, "__init__.py").writeText(
                     """
-                    # requests stub
+                    # pure python requests implementation
                     from urllib.request import urlopen, Request
                     import json
                     from urllib.parse import urlencode
@@ -847,8 +855,27 @@ class WorkspacePipManager(
                 val pkgDir = File(libDir, "urllib3").apply { mkdirs() }
                 File(pkgDir, "__init__.py").writeText(
                     """
-                    # urllib3 stub
+                    import urllib.request
+                    import urllib.parse
+                    from http.client import HTTPResponse
+
                     __version__ = '2.2.1'
+
+                    class HTTPHeaderDict(dict):
+                        pass
+
+                    class PoolManager:
+                        def __init__(self, *args, **kwargs):
+                            pass
+                        def request(self, method, url, fields=None, headers=None, **kwargs):
+                            req = urllib.request.Request(url, headers=headers or {}, method=method)
+                            with urllib.request.urlopen(req) as resp:
+                                class HTTPResponse:
+                                    def __init__(self, code, data, headers):
+                                        self.status = code
+                                        self.data = data
+                                        self.headers = headers
+                                return HTTPResponse(resp.getcode(), resp.read(), dict(resp.headers))
                     """.trimIndent()
                 )
                 writeDistInfo(libDir, "urllib3", "2.2.1", "HTTP library with thread-safe connection pooling", "Andrey Petrov", "https://urllib3.readthedocs.io", "MIT", listOf("urllib3/__init__.py"))
@@ -869,8 +896,8 @@ class WorkspacePipManager(
                 val pkgDir = File(libDir, "idna").apply { mkdirs() }
                 File(pkgDir, "__init__.py").writeText(
                     """
-                    def encode(s): return s.encode('ascii')
-                    def decode(s): return s.decode('ascii')
+                    def encode(s): return s.encode('ascii') if isinstance(s, str) else s
+                    def decode(s): return s.decode('ascii') if isinstance(s, bytes) else str(s)
                     """.trimIndent()
                 )
                 writeDistInfo(libDir, "idna", "3.7", "Internationalized Domain Names in Applications (IDNA)", "Kim Davies", "", "BSD-3-Clause", listOf("idna/__init__.py"))
@@ -880,7 +907,23 @@ class WorkspacePipManager(
                 val pkgDir = File(libDir, "charset_normalizer").apply { mkdirs() }
                 File(pkgDir, "__init__.py").writeText(
                     """
-                    def from_bytes(b): return []
+                    class CharsetMatch:
+                        def __init__(self, encoding="utf-8"):
+                            self.encoding = encoding
+                        def __str__(self):
+                            return self.encoding
+
+                    class CharsetMatches(list):
+                        def best(self):
+                            return CharsetMatch("utf-8")
+
+                    def from_bytes(b, **kwargs):
+                        res = CharsetMatches()
+                        res.append(CharsetMatch("utf-8"))
+                        return res
+
+                    def detect(b):
+                        return {"encoding": "utf-8", "confidence": 0.99, "language": ""}
                     """.trimIndent()
                 )
                 writeDistInfo(libDir, "charset-normalizer", "3.3.2", "The Real First Universal Charset Detector", "Ahmed TAHRI", "", "MIT", listOf("charset_normalizer/__init__.py"))
@@ -891,6 +934,9 @@ class WorkspacePipManager(
                     """
                     import sys
                     PY3 = sys.version_info[0] == 3
+                    string_types = (str,)
+                    text_type = str
+                    binary_type = bytes
                     """.trimIndent()
                 )
                 writeDistInfo(libDir, "six", "1.16.0", "Python 2 and 3 compatibility utilities", "Benjamin Peterson", "", "MIT", listOf("six.py"))
@@ -909,16 +955,9 @@ class WorkspacePipManager(
                 return true
             }
             else -> {
-                // Create a basic package stub for unlisted pure python packages
-                val pkgDir = File(libDir, pkgClean).apply { mkdirs() }
-                File(pkgDir, "__init__.py").writeText(
-                    """
-                    # $pkg package
-                    __version__ = '1.0.0'
-                    """.trimIndent()
-                )
-                writeDistInfo(libDir, pkg, "1.0.0", "$pkg package", "", "", "MIT", listOf("$pkgClean/__init__.py"))
-                return true
+                // Unknown package cannot be installed offline; report real failure
+                log.appendLine("No offline fallback bundle available for $pkg")
+                return false
             }
         }
     }

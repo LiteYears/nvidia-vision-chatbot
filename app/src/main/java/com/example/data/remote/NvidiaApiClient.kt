@@ -3,7 +3,9 @@ package com.example.data.remote
 import android.util.Log
 import com.example.data.model.ChatMessage
 import com.example.data.model.MessageRole
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -81,9 +83,7 @@ class NvidiaApiClient(
             }
             if (attempt < MAX_NETWORK_RETRIES) {
                 Log.w(TAG, "Request to $targetModel failed on attempt ${attempt + 1}, retrying in 1200ms... Error: ${exception?.message}")
-                try {
-                    Thread.sleep(1200L * (attempt + 1))
-                } catch (_: InterruptedException) {}
+                delay(1200L * (attempt + 1))
             }
         }
 
@@ -91,9 +91,7 @@ class NvidiaApiClient(
             return@withContext lastResult ?: Result.failure(NvidiaApiException(0, "Request failed"))
         }
 
-        try {
-            Thread.sleep(1500L)
-        } catch (_: InterruptedException) {}
+        delay(1500L)
 
         Log.w(TAG, "All attempts to $targetModel failed (${lastResult?.exceptionOrNull()?.message}). Retrying with $FALLBACK_MODEL")
         val fallbackAttempt = executeRequest(apiKey, FALLBACK_MODEL, messages, systemPrompt, temperature, topP, maxTokens)
@@ -249,6 +247,8 @@ class NvidiaApiClient(
             Result.failure(
                 NvidiaApiException(0, msg)
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Unexpected error in sendChatCompletion for model $resolvedModel", e)
             Result.failure(e)

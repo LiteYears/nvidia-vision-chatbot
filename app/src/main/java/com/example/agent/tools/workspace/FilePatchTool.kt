@@ -102,10 +102,43 @@ class FilePatchTool(
         }
 
         if (!targetFile.exists() || !targetFile.isFile) {
+            val availableFiles = try {
+                workspaceManager.listWorkspaceFiles()
+                    .filter { !it.isDirectory }
+                    .map { it.relativePath }
+            } catch (_: Exception) {
+                emptyList()
+            }
+            val baseName = File(requestedPath).name
+            val matching = availableFiles.filter { it.endsWith(baseName) || it.contains(baseName) }
+
+            val errorMsg = buildString {
+                appendLine("File not found: '$requestedPath'")
+                if (matching.isNotEmpty()) {
+                    appendLine("\nDid you mean:")
+                    for (m in matching) {
+                        appendLine("  $m")
+                    }
+                }
+                if (availableFiles.isNotEmpty()) {
+                    appendLine("\nAvailable files in workspace:")
+                    for (f in availableFiles.take(15)) {
+                        appendLine("  - $f")
+                    }
+                    if (availableFiles.size > 15) {
+                        appendLine("  ... (${availableFiles.size - 15} more files)")
+                    }
+                } else {
+                    appendLine("\n(Workspace is currently empty)")
+                }
+                appendLine("\nRecovery advice:")
+                appendLine("Create the file first using 'file_write' before attempting to patch it.")
+            }
+
             return ToolResult.failure(
                 callId = callId,
                 toolName = definition.name,
-                error = "File not found: '$requestedPath'"
+                error = errorMsg.trim()
             )
         }
 
@@ -134,10 +167,7 @@ class FilePatchTool(
         }
 
         return try {
-            FileOutputStream(targetFile, false).use { fos ->
-                fos.write(patchResult.newContent.toByteArray(Charsets.UTF_8))
-                fos.flush()
-            }
+            workspaceManager.atomicWrite(targetFile, patchResult.newContent.toByteArray(Charsets.UTF_8))
 
             val relPath = workspaceManager.getRelativePath(targetFile)
             val summary = buildString {
@@ -220,9 +250,30 @@ class FilePatchTool(
                 )
             }
 
+            val origLines = normalizedOriginal.lines()
+            val rawTargetLines = normalizedTarget.lines().map { it.replaceFirst(Regex("""^\s*\d+[:|]\s*"""), "").trim() }
+            val firstTargetLine = rawTargetLines.firstOrNull { it.isNotBlank() } ?: ""
+            val candidateLines = if (firstTargetLine.isNotBlank()) {
+                origLines.mapIndexedNotNull { idx, line ->
+                    val cleanLine = line.trim()
+                    if (cleanLine.isNotBlank() && (cleanLine.contains(firstTargetLine) || firstTargetLine.contains(cleanLine))) {
+                        "  • Line ${idx + 1}: ${cleanLine.take(90)}"
+                    } else null
+                }.take(3)
+            } else emptyList()
+
+            val errorMsg = buildString {
+                appendLine("Could not find target_content in '$requestedPath' (${origLines.size} total lines).")
+                if (candidateLines.isNotEmpty()) {
+                    appendLine("Closest line matches in file:")
+                    candidateLines.forEach { appendLine(it) }
+                }
+                appendLine("Tip: Call 'file_read' to inspect the exact lines, or use 'file_write' to overwrite the complete file.")
+            }.trimEnd()
+
             return PatchApplicationResult(
                 isSuccess = false,
-                errorMessage = "Could not find target_content in the file. Tip: Call 'file_read' to inspect the exact lines, or use 'file_write' to update the complete file.",
+                errorMessage = errorMsg,
                 newContent = originalContent,
                 linesRemoved = 0,
                 linesAdded = 0

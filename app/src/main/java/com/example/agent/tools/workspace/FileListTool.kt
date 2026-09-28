@@ -12,10 +12,20 @@ import java.util.UUID
 
 /**
  * Tool for listing files and directories inside the agent workspace.
+ * Automatically filters internal build/noise directories (.git, node_modules)
+ * and supports custom limits and recursive traversal with cycle detection.
  */
 class FileListTool(
     private val workspaceManager: AgentWorkspaceManager = AgentWorkspaceManager.getInstance()
 ) : AgentTool {
+
+    companion object {
+        val DEFAULT_IGNORED_DIRS = setOf(
+            ".git", ".rootfs", "ubuntu_rootfs", "node_modules", "__pycache__", ".gradle",
+            "build", ".idea", ".vscode", "venv", ".venv", ".pytest_cache",
+            ".mypy_cache", "target", "dist", ".cache"
+        )
+    }
 
     override val definition: ToolDefinition = ToolDefinition(
         name = "file_list",
@@ -35,6 +45,20 @@ class FileListTool(
                 description = "Whether to list contents recursively inside subdirectories (default: false)",
                 required = false,
                 default = false
+            ),
+            ToolParameter(
+                name = "show_hidden",
+                type = "boolean",
+                description = "Whether to include hidden and build directories like .git or node_modules (default: false)",
+                required = false,
+                default = false
+            ),
+            ToolParameter(
+                name = "limit",
+                type = "number",
+                description = "Maximum entries to return (default: 100, maximum: 300)",
+                required = false,
+                default = 100
             )
         )
     )
@@ -44,11 +68,22 @@ class FileListTool(
         val rawPath = arguments["path"]?.toString()?.trim() ?: "."
         val isRootPath = rawPath.isEmpty() || rawPath == "." || rawPath == "./" || rawPath == "/"
         val requestedPath = if (isRootPath) "." else rawPath
+
         val isRecursive = when (val r = arguments["recursive"]) {
             is Boolean -> r
             is String -> r.equals("true", ignoreCase = true)
             else -> false
         }
+        val showHidden = when (val sh = arguments["show_hidden"] ?: arguments["include_ignored"]) {
+            is Boolean -> sh
+            is String -> sh.equals("true", ignoreCase = true)
+            else -> false
+        }
+        val limit = when (val l = arguments["limit"] ?: arguments["max_results"]) {
+            is Number -> l.toInt()
+            is String -> l.toIntOrNull() ?: 100
+            else -> 100
+        }.coerceIn(10, 300)
 
         val targetDir: File
         try {
@@ -80,14 +115,46 @@ class FileListTool(
             )
         }
 
-        val filesList = if (isRecursive) {
+        val targetCanonical = try { targetDir.canonicalPath } catch (_: Exception) { targetDir.absolutePath }
+        val visitedCanonicals = mutableSetOf<String>()
+        var wasTruncated = false
+
+        val filesList: List<File> = if (isRecursive) {
+            val collected = mutableListOf<File>()
             targetDir.walkTopDown()
                 .maxDepth(6)
-                .take(150)
-                .filter { it.canonicalPath != targetDir.canonicalPath }
-                .toList()
+                .onEnter { dir ->
+                    val canonical = try { dir.canonicalPath } catch (_: Exception) { dir.absolutePath }
+                    if (!visitedCanonicals.add(canonical)) {
+                        return@onEnter false
+                    }
+                    if (!showHidden && dir != targetDir) {
+                        val name = dir.name
+                        if (name.startsWith(".") || DEFAULT_IGNORED_DIRS.contains(name.lowercase())) {
+                            return@onEnter false
+                        }
+                    }
+                    true
+                }
+                .filter { file ->
+                    val c = try { file.canonicalPath } catch (_: Exception) { file.absolutePath }
+                    c != targetCanonical && (showHidden || (!file.name.startsWith(".") && !DEFAULT_IGNORED_DIRS.contains(file.name.lowercase())))
+                }
+                .forEach { file ->
+                    if (collected.size < limit) {
+                        collected.add(file)
+                    } else {
+                        wasTruncated = true
+                    }
+                }
+            collected
         } else {
-            targetDir.listFiles()?.toList() ?: emptyList()
+            val raw = targetDir.listFiles()?.toList() ?: emptyList()
+            raw.filter { file ->
+                showHidden || (!file.name.startsWith(".") && !DEFAULT_IGNORED_DIRS.contains(file.name.lowercase()))
+            }.take(limit).also {
+                if (raw.size > limit) wasTruncated = true
+            }
         }
 
         if (filesList.isEmpty()) {
@@ -99,7 +166,7 @@ class FileListTool(
             )
         }
 
-        val sortedFiles = filesList.sortedWith(compareBy({ !it.isDirectory }, { it.name }))
+        val sortedFiles = filesList.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
         val formatted = buildString {
             val headerRel = if (isRootPath) "." else requestedPath
             appendLine("Workspace files in \"$headerRel\" (${sortedFiles.size} items):")
@@ -109,6 +176,9 @@ class FileListTool(
                 val sizeInfo = if (file.isDirectory) "" else " (${file.length()} bytes)"
                 val dateInfo = dateFormat.format(Date(file.lastModified()))
                 appendLine("  $typeTag $rel$sizeInfo - $dateInfo")
+            }
+            if (wasTruncated) {
+                appendLine("\n[Output capped at $limit entries. Pass a specific subdirectory in 'path' to inspect deeper contents.]")
             }
         }.trimEnd()
 

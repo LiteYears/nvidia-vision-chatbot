@@ -1,6 +1,7 @@
 package com.example.agent.termux
 
 import com.example.agent.proot.ProotCommandExecutor
+import com.example.agent.python.EmbeddedPythonRuntime
 import com.example.agent.tools.command.CommandExecutionResult
 import com.example.agent.tools.command.CommandRunner
 import com.example.agent.tools.workspace.AgentWorkspaceManager
@@ -22,7 +23,9 @@ import java.io.InputStream
 class TermuxCommandRunner(
     private val envManager: TermuxEnvironmentManager = TermuxEnvironmentManager.getInstance(),
     private val workspaceManager: AgentWorkspaceManager = AgentWorkspaceManager.getInstance(),
-    private val fallbackExecutor: ProotCommandExecutor = ProotCommandExecutor()
+    private val fallbackExecutor: ProotCommandExecutor = ProotCommandExecutor(
+        pythonRuntime = EmbeddedPythonRuntime(workspaceManager)
+    )
 ) : CommandRunner {
 
     override suspend fun run(
@@ -30,6 +33,14 @@ class TermuxCommandRunner(
         workingDir: File,
         timeoutMs: Long,
         maxOutputBytes: Int
+    ): CommandExecutionResult = run(command, workingDir, timeoutMs, maxOutputBytes, "ubuntu")
+
+    override suspend fun run(
+        command: String,
+        workingDir: File,
+        timeoutMs: Long,
+        maxOutputBytes: Int,
+        environment: String
     ): CommandExecutionResult = withContext(Dispatchers.IO) {
         val promptRegex = Regex("""(?m)^[ \t]*(?:[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+:[^$#\r\n]*[\$#]|[\$#>])[ \t]*""")
         val trimmed = command.replace(promptRegex, "").trim()
@@ -42,16 +53,38 @@ class TermuxCommandRunner(
             envManager.ensureInitialized(force = false)
         }
 
+        val workspaceRoot = workspaceManager.getWorkspaceDir()
         val effectiveDir = if (workingDir.exists() && workingDir.isDirectory) {
             workingDir
         } else {
-            envManager.homeDir
+            workspaceRoot
         }
 
-        val workspaceRoot = workspaceManager.getWorkspaceDir()
+        val resolvedEnv = when (environment.trim().lowercase()) {
+            "termux" -> "termux"
+            "auto" -> if (isTermuxSpecificCommand(trimmed)) "termux" else "ubuntu"
+            else -> "ubuntu"
+        }
 
-        // 1. Direct handling for Ubuntu PRoot and package management commands:
-        if (isEmbeddedUbuntuCommand(trimmed)) {
+        // 1. Ubuntu 22.04 LTS Execution:
+        if (resolvedEnv == "ubuntu") {
+            // Check if native host PRoot binary is available
+            val nativeProot = findNativeProotBinary()
+            if (nativeProot != null) {
+                val prootRes = runNativeProot(
+                    prootBin = nativeProot,
+                    command = trimmed,
+                    workingDir = effectiveDir,
+                    workspaceRoot = workspaceRoot,
+                    timeoutMs = timeoutMs,
+                    maxOutputBytes = maxOutputBytes
+                )
+                if (prootRes != null) {
+                    return@withContext prootRes
+                }
+            }
+
+            // Route to Ubuntu virtual userspace executor (handles bash pipelines, apt, dpkg, deb archives, python runtime)
             return@withContext fallbackExecutor.execute(
                 commandLine = trimmed,
                 workingDir = effectiveDir,
@@ -61,6 +94,7 @@ class TermuxCommandRunner(
             )
         }
 
+        // 2. Termux Native Execution:
         val startTime = System.currentTimeMillis()
         val shell = envManager.findSystemShell()
 
@@ -71,6 +105,11 @@ class TermuxCommandRunner(
             pb.environment().putAll(envVars)
 
             val process = pb.start()
+
+            // Close standard input immediately so child commands waiting for EOF on stdin do not hang
+            try {
+                process.outputStream.close()
+            } catch (_: Exception) {}
 
             val stdoutDeferred = async(Dispatchers.IO) {
                 readStreamLimited(process.inputStream, maxOutputBytes)
@@ -106,13 +145,15 @@ class TermuxCommandRunner(
             val stdoutResult = stdoutDeferred.await()
             val stderrResult = stderrDeferred.await()
 
-            // 2. Fallback check:
+            // Fallback check:
             // If the native process failed because of Permission denied (code 126, e.g. SELinux W^X blocking
-            // execution of user binaries/scripts in data dir) or command not found (code 127),
-            // automatically route to the PRoot Ubuntu virtual executor!
+            // execution of user binaries/scripts in data dir), command not found (code 127), syntax errors,
+            // or missing host tools, automatically route to the PRoot Ubuntu virtual executor!
             val isRestrictedOrUnavailable = exitCode == 126 || exitCode == 127 ||
                 stderrResult.text.contains("Permission denied", ignoreCase = true) ||
-                stderrResult.text.contains("inaccessible or not found", ignoreCase = true)
+                stderrResult.text.contains("inaccessible or not found", ignoreCase = true) ||
+                stderrResult.text.contains("not found", ignoreCase = true) ||
+                (exitCode != 0 && (stderrResult.text.contains("syntax error", ignoreCase = true) || trimmed.contains("<<")))
 
             if (isRestrictedOrUnavailable) {
                 val fallbackRes = fallbackExecutor.execute(
@@ -147,15 +188,138 @@ class TermuxCommandRunner(
         }
     }
 
-    private fun isEmbeddedUbuntuCommand(command: String): Boolean {
+    private suspend fun runNativeProot(
+        prootBin: File,
+        command: String,
+        workingDir: File,
+        workspaceRoot: File,
+        timeoutMs: Long,
+        maxOutputBytes: Int
+    ): CommandExecutionResult? = withContext(Dispatchers.IO) {
+        val rootfsDir = envManager.ubuntuRootDir
+        val relWorking = try {
+            val rel = workingDir.relativeTo(workspaceRoot).path
+            if (rel.isBlank() || rel == ".") "/workspace" else "/workspace/$rel"
+        } catch (_: Exception) {
+            "/workspace"
+        }
+
+        val bashCandidates = listOf(
+            File(rootfsDir, "usr/bin/bash"),
+            File(rootfsDir, "bin/bash"),
+            File("/bin/bash"),
+            File("/usr/bin/bash")
+        )
+        val bashPath = bashCandidates.firstOrNull { it.exists() }?.let {
+            if (it.absolutePath.startsWith(rootfsDir.absolutePath)) {
+                it.absolutePath.removePrefix(rootfsDir.absolutePath)
+            } else {
+                it.absolutePath
+            }
+        } ?: "/bin/sh"
+
+        val prootArgs = listOf(
+            prootBin.absolutePath,
+            "-r", rootfsDir.absolutePath,
+            "-0",
+            "-b", "/dev",
+            "-b", "/proc",
+            "-b", "/sys",
+            "-b", "${workspaceRoot.absolutePath}:/workspace",
+            "-w", relWorking,
+            bashPath, "-c", command
+        )
+
+        val startTime = System.currentTimeMillis()
+        try {
+            val pb = ProcessBuilder(prootArgs)
+            pb.directory(workingDir)
+            val envVars = envManager.getEnvironmentVariables(workspaceRoot)
+            pb.environment().putAll(envVars)
+            pb.environment()["HOME"] = "/root"
+            pb.environment()["USER"] = "root"
+            pb.environment()["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+            val process = pb.start()
+            try {
+                process.outputStream.close()
+            } catch (_: Exception) {}
+
+            val stdoutDeferred = async(Dispatchers.IO) { readStreamLimited(process.inputStream, maxOutputBytes) }
+            val stderrDeferred = async(Dispatchers.IO) { readStreamLimited(process.errorStream, maxOutputBytes) }
+
+            val finished = process.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+            val durationMs = System.currentTimeMillis() - startTime
+
+            if (!finished) {
+                process.destroyForcibly()
+                return@withContext CommandExecutionResult(
+                    exitCode = -1,
+                    stdout = "",
+                    stderr = "Process timed out after ${timeoutMs}ms and was killed.",
+                    durationMs = durationMs,
+                    isTimedOut = true
+                )
+            }
+
+            val exitCode = process.exitValue()
+            val stdoutRes = stdoutDeferred.await()
+            val stderrRes = stderrDeferred.await()
+
+            // If PRoot failed with ptrace or permission error, return null to fall back to virtual executor
+            if (exitCode == 126 || exitCode == 127 ||
+                stderrRes.text.contains("ptrace", ignoreCase = true) ||
+                stderrRes.text.contains("proot info", ignoreCase = true) ||
+                (stderrRes.text.contains("Permission denied", ignoreCase = true) && stderrRes.text.contains("proot", ignoreCase = true))) {
+                return@withContext null
+            }
+
+            CommandExecutionResult(
+                exitCode = exitCode,
+                stdout = stdoutRes.text,
+                stderr = stderrRes.text,
+                durationMs = durationMs,
+                isTimedOut = false,
+                isTruncated = stdoutRes.isTruncated || stderrRes.isTruncated
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun findNativeProotBinary(): File? {
+        val candidates = listOf(
+            File("/data/data/com.termux/files/usr/bin/proot"),
+            File("/usr/bin/proot"),
+            File("/system/bin/proot"),
+            File("/system/xbin/proot")
+        )
+        return candidates.firstOrNull { it.exists() && it.canExecute() && !it.isDirectory }
+    }
+
+    private fun isTermuxSpecificCommand(command: String): Boolean {
         val trimmed = command.trim()
         val tokens = trimmed.split(Regex("\\s+|&&|\\|\\||;")).filter { it.isNotBlank() }
         if (tokens.isEmpty()) return false
-        val packageKeywords = setOf("apt", "apt-get", "dpkg", "pkg", "proot", "proot-distro")
+        val firstToken = tokens.first().trim('\'', '"')
+        val baseName = if (firstToken.contains('/')) File(firstToken).name else firstToken
+        return baseName == "pkg" || baseName.startsWith("termux-")
+    }
+
+    private fun isEmbeddedUbuntuCommand(command: String): Boolean {
+        val trimmed = command.trim()
+        if (trimmed.contains("<<")) return true
+
+        val tokens = trimmed.split(Regex("\\s+|&&|\\|\\||;")).filter { it.isNotBlank() }
+        if (tokens.isEmpty()) return false
+        val ubuntuKeywords = setOf(
+            "apt", "apt-get", "dpkg", "pkg", "proot", "proot-distro",
+            "python", "python3", "py", "pip", "pip3", "pytest", "unittest"
+        )
         return tokens.any { token ->
             val clean = token.trim('\'', '"', ';', '&', '|').lowercase()
             val baseName = if (clean.contains('/')) File(clean).name else clean
-            baseName in packageKeywords
+            baseName in ubuntuKeywords
         }
     }
 

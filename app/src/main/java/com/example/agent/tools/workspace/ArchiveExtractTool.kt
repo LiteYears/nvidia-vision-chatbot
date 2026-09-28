@@ -17,13 +17,13 @@ class ArchiveExtractTool(
 
     override val definition: ToolDefinition = ToolDefinition(
         name = "archive_extract",
-        description = "Extracts a ZIP archive into the agent workspace. " +
+        description = "Extracts an archive (ZIP, TAR, TAR.GZ, TGZ) into the agent workspace. " +
             "Safely unpacks folders and source code files, allowing the agent to inspect, modify, and fix codebases.",
         parameters = listOf(
             ToolParameter(
                 name = "path",
                 type = "string",
-                description = "Relative path of the ZIP archive inside the workspace (e.g. 'project.zip', 'data/code.zip')",
+                description = "Relative path of the archive inside the workspace (e.g. 'project.zip', 'code.tar.gz', 'bundle.tgz')",
                 required = true
             ),
             ToolParameter(
@@ -62,10 +62,10 @@ class ArchiveExtractTool(
             else -> true
         }
 
-        val zipFile: File
+        val archiveFile: File
         val targetDir: File
         try {
-            zipFile = workspaceManager.resolvePath(requestedPath)
+            archiveFile = workspaceManager.resolvePath(requestedPath)
             targetDir = workspaceManager.resolvePath(destination)
         } catch (e: SecurityException) {
             return ToolResult.failure(
@@ -75,7 +75,7 @@ class ArchiveExtractTool(
             )
         }
 
-        if (!zipFile.exists() || !zipFile.isFile) {
+        if (!archiveFile.exists() || !archiveFile.isFile) {
             return ToolResult.failure(
                 callId = callId,
                 toolName = definition.name,
@@ -83,15 +83,15 @@ class ArchiveExtractTool(
             )
         }
 
-        val extractResult = workspaceManager.extractZipFile(
-            zipFile = zipFile,
+        val extractResult = workspaceManager.extractArchive(
+            archiveFile = archiveFile,
             destinationDir = targetDir,
             overwrite = overwrite
         )
 
         return if (extractResult.isSuccess) {
             val preview = buildString {
-                appendLine("Successfully extracted ${extractResult.totalFiles} files from '${zipFile.name}' into '$destination' (${extractResult.totalBytes} bytes total).")
+                appendLine("Successfully extracted ${extractResult.totalFiles} files from '${archiveFile.name}' into '$destination' (${extractResult.totalBytes} bytes total).")
                 appendLine("Extracted files:")
                 val displayList = extractResult.extractedPaths.take(25)
                 for (p in displayList) {
@@ -112,7 +112,7 @@ class ArchiveExtractTool(
             ToolResult.failure(
                 callId = callId,
                 toolName = definition.name,
-                error = "Failed to extract archive '${zipFile.name}': ${extractResult.errorMessage}"
+                error = "Failed to extract archive '${archiveFile.name}': ${extractResult.errorMessage}"
             )
         }
     }

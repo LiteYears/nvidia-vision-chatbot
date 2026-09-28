@@ -12,49 +12,6 @@ class CommandSecurityValidator(
     var allowAllCommands: Boolean = true
 ) {
 
-    companion object {
-        // Standard safe commands (file operations, text processing, basic inspection)
-        val STANDARD_SAFE_COMMANDS = setOf(
-            "ls", "dir", "tree", "pwd",
-            "cat", "head", "tail", "wc", "stat", "file", "find",
-            "grep", "egrep", "fgrep", "sed", "awk", "sort", "uniq", "cut", "tr", "echo", "printf", "diff", "cmp", "tee",
-            "touch", "mkdir", "rmdir", "cp", "mv", "rm", "basename", "dirname", "true", "false", "sleep", "seq",
-            "for", "do", "done", "while", "which", "whoami", "uname", "date", "env", "printenv", "test"
-        )
-
-        // Network tools
-        val NETWORK_COMMANDS = setOf(
-            "curl", "wget", "nc", "netcat", "ncat", "socat", "nmap", "ping", "ping6",
-            "ssh", "scp", "sftp", "telnet", "ftp", "tcpdump", "traceroute", "route", "ifconfig", "ip"
-        )
-
-        // Android system and package management tools
-        val SYSTEM_PACKAGE_COMMANDS = setOf(
-            "pm", "am", "cmd", "service", "dumpsys", "setprop", "getprop", "logcat", "dmesg",
-            "apt", "apt-get", "dpkg", "apk", "rpm", "yum", "pacman", "pkg"
-        )
-
-        // Root / privilege escalation tools
-        val PRIVILEGED_COMMANDS = setOf(
-            "su", "sudo", "doas", "chroot", "mount", "umount", "insmod", "rmmod", "modprobe",
-            "iptables", "nft", "setenforce", "getenforce"
-        )
-
-        // Potentially destructive tools
-        val DESTRUCTIVE_COMMANDS = setOf(
-            "reboot", "shutdown", "poweroff", "killall",
-            "dd", "fdisk", "mkfs"
-        )
-
-        // System paths
-        val SENSITIVE_SYSTEM_PATHS = listOf(
-            "/system", "/data", "/etc", "/proc", "/sys", "/dev",
-            "/storage", "/sdcard", "/root", "/var", "/private",
-            "/vendor", "/apex", "/mnt", "/product", "/system_ext",
-            "/init", "/sbin"
-        )
-    }
-
     /**
      * Validates whether a command is permitted according to policy.
      * All command restrictions have been removed: commands execute normally without being blocked.

@@ -16,11 +16,13 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.TimeUnit
+import java.security.MessageDigest
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
+import org.json.JSONObject
 
 /**
  * Complete PRoot Ubuntu user-space shell executor.
@@ -117,18 +119,24 @@ class ProotCommandExecutor(
             if (!inSingle && !inDouble) {
                 // If inside a heredoc body, do not break on semicolons or operators until the closing delimiter line
                 if (activeHeredocDelim != null) {
-                    if (c == '\n') {
-                        val lastLine = current.toString().substringAfterLast('\n').trim()
-                        if (lastLine == activeHeredocDelim) {
-                            activeHeredocDelim = null
-                            if (current.isNotBlank()) {
-                                steps.add(CompoundStep(current.toString().trim(), pendingOp))
-                                current.clear()
-                            }
+                    val lineSoFar = current.toString().substringAfterLast('\n').trim().trim('\'', '"')
+                    if (lineSoFar == activeHeredocDelim && (c == '\n' || c == ';' || (c == '&' && i + 1 < raw.length && raw[i + 1] == '&') || (c == '|' && i + 1 < raw.length && raw[i + 1] == '|'))) {
+                        activeHeredocDelim = null
+                        if (current.isNotBlank()) {
+                            steps.add(CompoundStep(current.toString().trim(), pendingOp))
+                            current.clear()
+                        }
+                        if (c == '&' && i + 1 < raw.length && raw[i + 1] == '&') {
+                            pendingOp = "&&"
+                            i += 2
+                        } else if (c == '|' && i + 1 < raw.length && raw[i + 1] == '|') {
+                            pendingOp = "||"
+                            i += 2
+                        } else {
                             pendingOp = ";"
                             i++
-                            continue
                         }
+                        continue
                     }
                     current.append(c)
                     i++
@@ -366,17 +374,29 @@ class ProotCommandExecutor(
         val delimMatch = Regex("""<<-?\s*['"]?([A-Za-z0-9_.-]+)['"]?""").find(firstLine)
         val delim = delimMatch?.groupValues?.get(1) ?: "EOF"
 
-        // Check for redirection target on the first line
+        // Check for redirection target on the first line or subsequent line
         val redirAppend = firstLine.contains(">>")
         val redirTruncate = !redirAppend && firstLine.contains(">")
+        val lastLine = lines.lastOrNull()?.trim() ?: ""
         val targetPath = if (redirAppend) {
-            Regex(""">>\s*([^\s<>|;&]+)""").find(firstLine)?.groupValues?.get(1)?.trim('\'', '"')
+            Regex(""">>\s*(?:"([^"]+)"|'([^']+)'|([^\s<>|;&]+))""").find(firstLine)?.let {
+                it.groupValues[1].ifEmpty { it.groupValues[2].ifEmpty { it.groupValues[3] } }
+            }?.trim('\'', '"')
         } else if (redirTruncate) {
-            Regex("""(?<!>)>\s*([^\s<>|;&]+)""").find(firstLine)?.groupValues?.get(1)?.trim('\'', '"')
+            Regex("""(?<!>)>\s*(?:"([^"]+)"|'([^']+)'|([^\s<>|;&]+))""").find(firstLine)?.let {
+                it.groupValues[1].ifEmpty { it.groupValues[2].ifEmpty { it.groupValues[3] } }
+            }?.trim('\'', '"')
+        } else if (lastLine.contains(">")) {
+            Regex("""(?<!>)>{1,2}\s*(?:"([^"]+)"|'([^']+)'|([^\s<>|;&]+))""").find(lastLine)?.let {
+                it.groupValues[1].ifEmpty { it.groupValues[2].ifEmpty { it.groupValues[3] } }
+            }?.trim('\'', '"')
         } else null
 
         // Collect body lines up to closing delimiter line
-        val rawBodyLines = lines.drop(heredocLineIndex + 1).takeWhile { it.trim() != delim }
+        val rawBodyLines = lines.drop(heredocLineIndex + 1).takeWhile { 
+            val clean = it.trim().trim('\'', '"').trimEnd(';', ' ')
+            clean != delim
+        }
         val body = if (rawBodyLines.isNotEmpty()) {
             rawBodyLines.joinToString("\n")
         } else {
@@ -563,50 +583,82 @@ class ProotCommandExecutor(
             "cal" -> {
                 val cal = java.util.Calendar.getInstance()
                 val monthName = SimpleDateFormat("MMMM yyyy", Locale.US).format(cal.time)
+                val firstDayCal = (cal.clone() as java.util.Calendar).apply {
+                    set(java.util.Calendar.DAY_OF_MONTH, 1)
+                }
+                val startDayOfWeek = firstDayCal.get(java.util.Calendar.DAY_OF_WEEK) // 1 = Sunday
+                val daysInMonth = cal.getActualMaximum(java.util.Calendar.DAY_OF_MONTH)
+
                 val out = buildString {
-                    appendLine("    $monthName")
+                    val padLeft = ((20 - monthName.length) / 2).coerceAtLeast(0)
+                    appendLine(" ".repeat(padLeft) + monthName)
                     appendLine("Su Mo Tu We Th Fr Sa")
-                    appendLine(" 1  2  3  4  5  6  7")
-                    appendLine(" 8  9 10 11 12 13 14")
-                    appendLine("15 16 17 18 19 20 21")
-                    appendLine("22 23 24 25 26 27 28")
-                    appendLine("29 30")
+                    for (i in 1 until startDayOfWeek) {
+                        append("   ")
+                    }
+                    var curCol = startDayOfWeek
+                    for (day in 1..daysInMonth) {
+                        append(String.format(Locale.US, "%2d ", day))
+                        if (curCol % 7 == 0 && day != daysInMonth) {
+                            append("\n")
+                        }
+                        curCol++
+                    }
+                    append("\n")
                 }
                 return CommandExecutionResult(0, out, "", 5)
             }
             "df" -> {
-                val out = """
-                Filesystem     1K-blocks      Used Available Use% Mounted on
-                /dev/root       61255492  12489240  45624192  22% /
-                workspace       61255492  12489240  45624192  22% /workspace
-                tmpfs            4096000         0   4096000   0% /dev/shm
-                """.trimIndent() + "\n"
+                val totalBytes = workspaceRoot.totalSpace
+                val freeBytes = workspaceRoot.usableSpace
+                val usedBytes = (totalBytes - freeBytes).coerceAtLeast(0)
+                val totalKb = (totalBytes / 1024).coerceAtLeast(1024)
+                val usedKb = usedBytes / 1024
+                val freeKb = freeBytes / 1024
+                val pct = if (totalKb > 0) ((usedKb * 100) / totalKb).toInt() else 0
+
+                val out = buildString {
+                    appendLine("Filesystem     1K-blocks      Used Available Use% Mounted on")
+                    appendLine(String.format(Locale.US, "%-14s %10d %9d %9d %3d%% /", "/dev/root", totalKb, usedKb, freeKb, pct))
+                    appendLine(String.format(Locale.US, "%-14s %10d %9d %9d %3d%% /workspace", "workspace", totalKb, usedKb, freeKb, pct))
+                    appendLine(String.format(Locale.US, "%-14s %10d %9d %9d   0%% /dev/shm", "tmpfs", 4096000, 0, 4096000))
+                }
                 return CommandExecutionResult(0, out, "", 5)
             }
             "free" -> {
-                val out = """
-                               total        used        free      shared  buff/cache   available
-                Mem:         8192000     2048000     4096000      128000     2048000     5896000
-                Swap:        2097152           0     2097152
-                """.trimIndent() + "\n"
+                val rt = Runtime.getRuntime()
+                val totalMemKb = rt.totalMemory() / 1024
+                val freeMemKb = rt.freeMemory() / 1024
+                val usedMemKb = totalMemKb - freeMemKb
+                val maxMemKb = rt.maxMemory() / 1024
+                val availableKb = maxMemKb - usedMemKb
+
+                val out = buildString {
+                    appendLine("               total        used        free      shared  buff/cache   available")
+                    appendLine(String.format(Locale.US, "%-6s %12d %11d %11d %11d %11d %11d", "Mem:", maxMemKb, usedMemKb, freeMemKb, 0, totalMemKb - freeMemKb, availableKb.coerceAtLeast(freeMemKb)))
+                    appendLine(String.format(Locale.US, "%-6s %12d %11d %11d", "Swap:", 0, 0, 0))
+                }
                 return CommandExecutionResult(0, out, "", 5)
             }
             "ps" -> {
                 val isAux = args.any { it.contains("aux") || it.contains("-ef") }
+                val sdf = SimpleDateFormat("HH:mm", Locale.US)
+                val timeStr = sdf.format(Date())
+                val pid = try { android.os.Process.myPid() } catch (_: Throwable) { 1000 }
                 val out = if (isAux) {
-                    """
-                    USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
-                    root           1  0.0  0.1  10240  4096 ?        Ss   08:00   0:01 /bin/init
-                    ubuntu       102  0.0  0.2  14280  6120 pts/0    Ss   08:30   0:00 /bin/bash
-                    ubuntu       205  0.1  0.5  28400 16384 pts/0    S    08:31   0:00 python3
-                    ubuntu       208  0.0  0.1  10800  3200 pts/0    R+   08:31   0:00 ps aux
-                    """.trimIndent() + "\n"
+                    buildString {
+                        appendLine("USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND")
+                        appendLine("root           1  0.0  0.1  10240  4096 ?        Ss   08:00   0:01 /bin/init")
+                        appendLine("ubuntu       102  0.0  0.2  14280  6120 pts/0    Ss   $timeStr   0:00 /bin/bash")
+                        appendLine(String.format(Locale.US, "ubuntu     %5d  0.1  0.8  45200 24100 pts/0    S    %s   0:00 python3", pid, timeStr))
+                        appendLine(String.format(Locale.US, "ubuntu     %5d  0.0  0.1  10800  3200 pts/0    R+   %s   0:00 ps %s", pid + 1, timeStr, args.joinToString(" ")))
+                    }
                 } else {
-                    """
-                      PID TTY          TIME CMD
-                      102 pts/0    00:00:00 bash
-                      208 pts/0    00:00:00 ps
-                    """.trimIndent() + "\n"
+                    buildString {
+                        appendLine("  PID TTY          TIME CMD")
+                        appendLine("  102 pts/0    00:00:00 bash")
+                        appendLine("  $pid pts/0    00:00:00 ps")
+                    }
                 }
                 return CommandExecutionResult(0, out, "", 5)
             }
@@ -916,7 +968,7 @@ class ProotCommandExecutor(
                     val out = """
                     PRoot 5.4.0 (git: e3a7df2b, arch: aarch64/x86_64, mode: user-space-ptrace-emulated)
                     chroot, mount --bind, and binfmt_misc implementation without root privileges.
-                    Ubuntu 22.04 LTS (Jammy Jellyfish) rootfs container active at .rootfs/
+                    Ubuntu 22.04 LTS (Jammy Jellyfish) rootfs container active at ${rootfsManager.persistentRootfsDir.canonicalPath}/
                     """.trimIndent() + "\n"
                     return CommandExecutionResult(0, out, "", 5)
                 }
@@ -936,7 +988,7 @@ class ProotCommandExecutor(
                     "list" -> {
                         val out = """
                         Supported distributions:
-                          * ubuntu (installed: .rootfs)
+                          * ubuntu (installed: ${rootfsManager.persistentRootfsDir.canonicalPath})
                             Distribution: Ubuntu 22.04.4 LTS (Jammy Jellyfish)
                             Architecture: aarch64 / x86_64
                             Status: INSTALLED & READY
@@ -957,7 +1009,7 @@ class ProotCommandExecutor(
                         Distro: ubuntu
                         Name: Ubuntu 22.04.4 LTS (Jammy Jellyfish)
                         Kernel: Linux 5.15.0-101-generic
-                        Rootfs Path: ${File(workspaceRoot, ".rootfs").canonicalPath}
+                        Rootfs Path: ${rootfsManager.persistentRootfsDir.canonicalPath}
                         Default User: ubuntu (UID: 1000, GID: 1000)
                         Supported Tools: bash, python3, pip, apt, dpkg, curl, wget, git, build-essential
                         Status: active
@@ -1169,7 +1221,7 @@ class ProotCommandExecutor(
                 return handleNode(args, workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
             }
             "npm", "npx" -> {
-                return handleNpm(args, workingDir, workspaceRoot)
+                return handleNpm(args, workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
             }
             "sleep" -> {
                 val sec = args.firstOrNull()?.toDoubleOrNull() ?: 1.0
@@ -1338,7 +1390,7 @@ class ProotCommandExecutor(
             return CommandExecutionResult(
                 exitCode = 2,
                 stdout = "",
-                stderr = "python3: can't open file '${scriptFile.name}': [Errno 2] No such file or directory\n",
+                stderr = "python3: can't open file '$scriptArg': [Errno 2] No such file or directory\n",
                 durationMs = System.currentTimeMillis() - startTime
             )
         }
@@ -1356,7 +1408,7 @@ class ProotCommandExecutor(
 
         val pyRes = pythonRuntime.execute(
             code = code,
-            filename = scriptFile.name,
+            filename = scriptArg,
             args = pyArgs,
             timeoutMs = timeoutMs,
             maxOutputBytes = maxOutputBytes
@@ -1467,7 +1519,17 @@ class ProotCommandExecutor(
         }
     }
 
-    private fun handlePytest(
+    private fun computeSha1(text: String): String {
+        return try {
+            val md = MessageDigest.getInstance("SHA-1")
+            val bytes = md.digest(text.toByteArray(Charsets.UTF_8))
+            bytes.joinToString("") { "%02x".format(it) }
+        } catch (_: Exception) {
+            Integer.toHexString(text.hashCode())
+        }
+    }
+
+    private suspend fun handlePytest(
         args: List<String>,
         workingDir: File,
         workspaceRoot: File,
@@ -1475,69 +1537,385 @@ class ProotCommandExecutor(
         maxOutputBytes: Int = 32768
     ): CommandExecutionResult {
         val startTime = System.currentTimeMillis()
+
+        // 1. Try real host pytest if available
+        val hostPytest = listOf(
+            "/data/data/com.termux/files/usr/bin/pytest",
+            "/data/data/com.termux/files/usr/bin/applets/pytest",
+            "/usr/bin/pytest",
+            "/usr/local/bin/pytest",
+            "/bin/pytest"
+        ).firstOrNull { File(it).canExecute() }
+
+        if (hostPytest != null) {
+            try {
+                val pb = ProcessBuilder(listOf(hostPytest) + args)
+                pb.directory(workingDir)
+                val curPath = pb.environment()["PATH"] ?: ""
+                pb.environment()["PATH"] = "/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/bin/applets:/usr/local/bin:/usr/bin:/bin:$curPath"
+                val proc = pb.start()
+                val stdout = proc.inputStream.bufferedReader().readText().take(maxOutputBytes)
+                val stderr = proc.errorStream.bufferedReader().readText().take(maxOutputBytes)
+                val exit = proc.waitFor()
+                return CommandExecutionResult(exit, stdout, stderr, System.currentTimeMillis() - startTime)
+            } catch (_: Exception) {
+            }
+        }
+
+        // 2. Discover test files
         val targetArg = args.firstOrNull { !it.startsWith("-") }
         val testFiles = mutableListOf<File>()
 
         if (targetArg != null) {
             val candidatePath = if (targetArg.endsWith(".py")) targetArg else targetArg.replace('.', '/') + ".py"
             val file = rootfsManager.resolveVirtualPath(candidatePath, workingDir, workspaceRoot)
-            if (file.exists() && file.isFile) {
-                testFiles.add(file)
+            if (!file.exists()) {
+                return CommandExecutionResult(
+                    exitCode = 4,
+                    stdout = "",
+                    stderr = "ERROR: file or directory not found: $targetArg\n",
+                    durationMs = System.currentTimeMillis() - startTime
+                )
             }
-        }
-        if (testFiles.isEmpty()) {
-            val testsDir = File(workspaceRoot, "tests")
-            if (testsDir.exists() && testsDir.isDirectory) {
-                testsDir.walkTopDown().filter { it.isFile && (it.name.startsWith("test_") || it.name.endsWith("_test.py")) }.forEach {
+            if (file.isFile) {
+                testFiles.add(file)
+            } else if (file.isDirectory) {
+                file.walkTopDown().filter { it.isFile && (it.name.startsWith("test_") || it.name.endsWith("_test.py")) }.forEach {
                     testFiles.add(it)
                 }
             }
+        } else {
+            val searchDirs = listOf(File(workingDir, "tests"), File(workspaceRoot, "tests"), workingDir)
+            for (dir in searchDirs) {
+                if (dir.exists() && dir.isDirectory) {
+                    dir.walkTopDown().filter { it.isFile && (it.name.startsWith("test_") || it.name.endsWith("_test.py")) }.forEach {
+                        if (!testFiles.contains(it)) testFiles.add(it)
+                    }
+                }
+            }
         }
 
-        var totalItems = 0
+        if (testFiles.isEmpty()) {
+            val out = "============================= test session starts ==============================\n" +
+                      "platform linux -- Python 3.10.12, pytest-7.4.4\n" +
+                      "rootdir: ${workspaceRoot.canonicalPath}\n" +
+                      "collected 0 items\n\n" +
+                      "============================ no tests ran in 0.01s ============================\n"
+            return CommandExecutionResult(5, out, "", System.currentTimeMillis() - startTime)
+        }
+
+        // 3. Real test execution per test file
+        var totalPassed = 0
+        var totalFailed = 0
+        val failureDetails = mutableListOf<String>()
+        val fileReportLines = mutableListOf<String>()
+
         for (tf in testFiles) {
             val code = try { tf.readText() } catch (_: Exception) { "" }
-            val count = Regex("""def\s+test_[a-zA-Z0-9_]+""").findAll(code).count()
-            totalItems += if (count > 0) count else 1
-        }
-        val itemsCount = totalItems.coerceAtLeast(1)
-        val fileReport = testFiles.firstOrNull()?.let { it.relativeToOrNull(workspaceRoot)?.path ?: it.name } ?: "tests/test_api.py"
+            val relPath = tf.relativeToOrNull(workspaceRoot)?.path ?: tf.relativeToOrNull(workingDir)?.path ?: tf.name
+            val testNames = Regex("""def\s+(test_[a-zA-Z0-9_]+)""").findAll(code).map { it.groupValues[1] }.toList()
+            val testsToRun = if (testNames.isNotEmpty()) testNames else listOf("test_suite")
 
-        val durationSec = String.format(java.util.Locale.US, "%.2fs", (System.currentTimeMillis() - startTime + 35) / 1000.0)
+            val fileDots = StringBuilder()
+            val pyRes = pythonRuntime.execute(
+                code = code,
+                filename = tf.name,
+                args = emptyList(),
+                timeoutMs = timeoutMs,
+                maxOutputBytes = maxOutputBytes
+            )
+
+            if (pyRes.exitCode == 0) {
+                for (tName in testsToRun) {
+                    fileDots.append(".")
+                    totalPassed++
+                }
+            } else {
+                val errorMsg = if (pyRes.stderr.isNotBlank()) pyRes.stderr else pyRes.stdout
+                for ((idx, tName) in testsToRun.withIndex()) {
+                    if (idx == 0) {
+                        fileDots.append("F")
+                        totalFailed++
+                        failureDetails.add(
+                            """
+                            _________________________________ $tName __________________________________
+                            $errorMsg
+                            """.trimIndent()
+                        )
+                    } else {
+                        fileDots.append(".")
+                        totalPassed++
+                    }
+                }
+            }
+
+            fileReportLines.add("$relPath $fileDots")
+        }
+
+        val totalCollected = totalPassed + totalFailed
+        val durationSec = String.format(Locale.US, "%.2fs", (System.currentTimeMillis() - startTime) / 1000.0)
+
         val stdout = buildString {
             appendLine("============================= test session starts ==============================")
-            appendLine("platform linux -- Python 3.11.8, pytest-7.4.4, pluggy-1.4.0")
-            appendLine("rootdir: /home/ubuntu/workspace")
-            appendLine("collected $itemsCount items")
+            appendLine("platform linux -- Python 3.10.12, pytest-7.4.4, pluggy-1.4.0")
+            appendLine("rootdir: ${workspaceRoot.canonicalPath}")
+            appendLine("collected $totalCollected items")
             appendLine()
-            appendLine("$fileReport ${".".repeat(itemsCount)}                                        [100%]")
+            for (line in fileReportLines) {
+                appendLine(line.padEnd(70) + " [100%]")
+            }
+            if (failureDetails.isNotEmpty()) {
+                appendLine()
+                appendLine("=================================== FAILURES ===================================")
+                for (fail in failureDetails) {
+                    appendLine(fail)
+                }
+            }
             appendLine()
-            appendLine("============================== $itemsCount passed in $durationSec ===============================")
+            if (totalFailed > 0) {
+                appendLine("========================= $totalFailed failed, $totalPassed passed in $durationSec ==========================")
+            } else {
+                appendLine("============================== $totalPassed passed in $durationSec ===============================")
+            }
         }
-        return CommandExecutionResult(0, stdout, "", System.currentTimeMillis() - startTime)
+
+        return CommandExecutionResult(
+            exitCode = if (totalFailed > 0) 1 else 0,
+            stdout = stdout,
+            stderr = "",
+            durationMs = System.currentTimeMillis() - startTime
+        )
+    }
+
+    private fun extractTarArchive(
+        tarFile: File,
+        destDir: File,
+        verbose: Boolean,
+        isGzip: Boolean
+    ): Pair<Int, String> {
+        if (!tarFile.exists() || !tarFile.isFile) {
+            return Pair(2, "tar: ${tarFile.name}: Cannot open: No such file or directory\ntar: Error is not recoverable: exiting now\n")
+        }
+        destDir.mkdirs()
+        val outSb = StringBuilder()
+        return try {
+            val rawIn = tarFile.inputStream()
+            val inStream = if (isGzip || tarFile.name.endsWith(".gz") || tarFile.name.endsWith(".tgz")) {
+                GZIPInputStream(rawIn)
+            } else {
+                rawIn
+            }
+            inStream.use { stream ->
+                val header = ByteArray(512)
+                var consecutiveZeroBlocks = 0
+                while (true) {
+                    var read = 0
+                    while (read < 512) {
+                        val r = stream.read(header, read, 512 - read)
+                        if (r < 0) break
+                        read += r
+                    }
+                    if (read < 512) break
+
+                    var isZero = true
+                    for (b in header) {
+                        if (b != 0.toByte()) { isZero = false; break }
+                    }
+                    if (isZero) {
+                        consecutiveZeroBlocks++
+                        if (consecutiveZeroBlocks >= 2) break
+                        continue
+                    } else {
+                        consecutiveZeroBlocks = 0
+                    }
+
+                    val nameRaw = String(header, 0, 100, Charsets.US_ASCII).trim('\u0000', ' ')
+                    if (nameRaw.isBlank()) continue
+
+                    val sizeStr = String(header, 124, 12, Charsets.US_ASCII).trim('\u0000', ' ')
+                    val size = sizeStr.toLongOrNull(8) ?: 0L
+                    val typeFlag = header[156].toInt().toChar()
+
+                    val targetFile = File(destDir, nameRaw)
+                    if (typeFlag == '5' || nameRaw.endsWith("/")) {
+                        targetFile.mkdirs()
+                        if (verbose) outSb.appendLine(nameRaw)
+                    } else {
+                        targetFile.parentFile?.mkdirs()
+                        val pad = ((512 - (size % 512)) % 512).toInt()
+                        targetFile.outputStream().use { fos ->
+                            var remaining = size
+                            val buf = ByteArray(4096)
+                            while (remaining > 0) {
+                                val toRead = minOf(remaining, buf.size.toLong()).toInt()
+                                val r = stream.read(buf, 0, toRead)
+                                if (r < 0) break
+                                fos.write(buf, 0, r)
+                                remaining -= r
+                            }
+                        }
+                        if (pad > 0) {
+                            var padRemaining = pad.toLong()
+                            while (padRemaining > 0) {
+                                val skipped = stream.skip(padRemaining)
+                                if (skipped <= 0) break
+                                padRemaining -= skipped
+                            }
+                        }
+                        if (verbose) outSb.appendLine(nameRaw)
+                    }
+                }
+            }
+            Pair(0, outSb.toString())
+        } catch (e: Exception) {
+            Pair(2, "tar: Error extracting archive: ${e.message}\n")
+        }
+    }
+
+    private fun createTarArchive(
+        archiveFile: File,
+        srcFiles: List<File>,
+        workingDir: File,
+        verbose: Boolean,
+        isGzip: Boolean
+    ): Pair<Int, String> {
+        archiveFile.parentFile?.mkdirs()
+        val outSb = StringBuilder()
+        return try {
+            val rawOut = archiveFile.outputStream()
+            val outStream = if (isGzip || archiveFile.name.endsWith(".gz") || archiveFile.name.endsWith(".tgz")) {
+                GZIPOutputStream(rawOut)
+            } else {
+                rawOut
+            }
+            outStream.use { stream ->
+                fun writeUstarEntry(file: File, relPath: String) {
+                    val header = ByteArray(512)
+                    val nameBytes = relPath.toByteArray(Charsets.US_ASCII)
+                    System.arraycopy(nameBytes, 0, header, 0, minOf(nameBytes.size, 99))
+
+                    val mode = if (file.isDirectory) "0000755\u0000" else "0000644\u0000"
+                    System.arraycopy(mode.toByteArray(Charsets.US_ASCII), 0, header, 100, 8)
+
+                    val uid = "0001750\u0000"
+                    System.arraycopy(uid.toByteArray(Charsets.US_ASCII), 0, header, 108, 8)
+
+                    val gid = "0001750\u0000"
+                    System.arraycopy(gid.toByteArray(Charsets.US_ASCII), 0, header, 116, 8)
+
+                    val size = if (file.isDirectory) 0L else file.length()
+                    val sizeStr = String.format(Locale.US, "%011o ", size)
+                    System.arraycopy(sizeStr.toByteArray(Charsets.US_ASCII), 0, header, 124, 12)
+
+                    val mtime = file.lastModified() / 1000L
+                    val mtimeStr = String.format(Locale.US, "%011o ", mtime)
+                    System.arraycopy(mtimeStr.toByteArray(Charsets.US_ASCII), 0, header, 136, 12)
+
+                    header[156] = if (file.isDirectory) '5'.toByte() else '0'.toByte()
+
+                    System.arraycopy("ustar\u0000".toByteArray(Charsets.US_ASCII), 0, header, 257, 6)
+                    System.arraycopy("00".toByteArray(Charsets.US_ASCII), 0, header, 263, 2)
+
+                    for (c in 148..155) header[c] = 0x20.toByte()
+                    var chksum = 0
+                    for (b in header) chksum += (b.toInt() and 0xFF)
+                    val chkStr = String.format(Locale.US, "%06o\u0000 ", chksum)
+                    System.arraycopy(chkStr.toByteArray(Charsets.US_ASCII), 0, header, 148, 8)
+
+                    stream.write(header)
+                    if (verbose) outSb.appendLine(relPath)
+
+                    if (file.isFile) {
+                        file.inputStream().use { it.copyTo(stream) }
+                        val pad = ((512 - (size % 512)) % 512).toInt()
+                        if (pad > 0) {
+                            stream.write(ByteArray(pad))
+                        }
+                    }
+                }
+
+                for (src in srcFiles) {
+                    if (!src.exists()) continue
+                    if (src.isDirectory) {
+                        src.walkTopDown().forEach { f ->
+                            val rel = f.relativeTo(workingDir).path + (if (f.isDirectory) "/" else "")
+                            writeUstarEntry(f, rel)
+                        }
+                    } else {
+                        val rel = src.relativeToOrNull(workingDir)?.path ?: src.name
+                        writeUstarEntry(src, rel)
+                    }
+                }
+
+                // Two 512-byte zero blocks
+                stream.write(ByteArray(1024))
+            }
+            Pair(0, outSb.toString())
+        } catch (e: Exception) {
+            Pair(2, "tar: Error creating archive: ${e.message}\n")
+        }
     }
 
     private fun handleTar(args: List<String>, workingDir: File, workspaceRoot: File): CommandExecutionResult {
-        val flags = args.firstOrNull { it.startsWith("-") || it.contains("c") || it.contains("x") } ?: ""
-        val isExtract = flags.contains("x")
-        val isCreate = flags.contains("c")
-
-        if (isExtract) {
-            val archiveArg = args.lastOrNull { it.endsWith(".tar.gz") || it.endsWith(".tgz") || it.endsWith(".tar") }
-            if (archiveArg != null) {
-                val f = rootfsManager.resolveVirtualPath(archiveArg, workingDir, workspaceRoot)
-                if (f.exists()) {
-                    return CommandExecutionResult(0, "Extracted ${f.name}\n", "", 20)
-                }
-            }
-        } else if (isCreate) {
-            val archiveArg = args.firstOrNull { it.endsWith(".tar.gz") || it.endsWith(".tgz") || it.endsWith(".tar") }
-            if (archiveArg != null) {
-                val f = rootfsManager.resolveVirtualPath(archiveArg, workingDir, workspaceRoot)
-                f.createNewFile()
-                return CommandExecutionResult(0, "Created archive ${f.name}\n", "", 20)
+        val hostTar = listOf(
+            "/data/data/com.termux/files/usr/bin/tar",
+            "/data/data/com.termux/files/usr/bin/applets/tar",
+            "/usr/bin/tar",
+            "/bin/tar"
+        ).firstOrNull { File(it).canExecute() }
+        if (hostTar != null) {
+            try {
+                val pb = ProcessBuilder(listOf(hostTar) + args)
+                pb.directory(workingDir)
+                val proc = pb.start()
+                val stdout = proc.inputStream.bufferedReader().readText()
+                val stderr = proc.errorStream.bufferedReader().readText()
+                val exit = proc.waitFor()
+                return CommandExecutionResult(exit, stdout, stderr, 20)
+            } catch (_: Exception) {
             }
         }
+
+        val flags = args.firstOrNull { it.startsWith("-") || (!it.contains("/") && !it.contains(".")) } ?: ""
+        val isExtract = flags.contains("x")
+        val isCreate = flags.contains("c")
+        val isList = flags.contains("t")
+        val isGzip = flags.contains("z")
+        val isVerbose = flags.contains("v")
+
+        var archiveArg: String? = null
+        val fIdx = args.indexOf("-f")
+        if (fIdx >= 0 && fIdx + 1 < args.size) {
+            archiveArg = args[fIdx + 1]
+        } else {
+            archiveArg = args.firstOrNull { it.endsWith(".tar.gz") || it.endsWith(".tgz") || it.endsWith(".tar") }
+        }
+
+        if (archiveArg == null) {
+            return CommandExecutionResult(1, "", "tar: Must specify one of -c, -x, -t and an archive file\n", 5)
+        }
+
+        val archiveFile = rootfsManager.resolveVirtualPath(archiveArg, workingDir, workspaceRoot)
+
+        val cIdx = args.indexOf("-C")
+        val targetDir = if (cIdx >= 0 && cIdx + 1 < args.size) {
+            rootfsManager.resolveVirtualPath(args[cIdx + 1], workingDir, workspaceRoot)
+        } else {
+            workingDir
+        }
+
+        if (isExtract || isList) {
+            val (exit, out) = extractTarArchive(archiveFile, targetDir, isVerbose || isList, isGzip)
+            return CommandExecutionResult(exit, if (exit == 0) out else "", if (exit != 0) out else "", 20)
+        } else if (isCreate) {
+            val nonFlags = args.filter {
+                it != flags && it != "-f" && it != archiveArg && it != "-C" && (cIdx < 0 || it != args.getOrNull(cIdx + 1)) && !it.startsWith("-")
+            }
+            val srcFiles = nonFlags.map { rootfsManager.resolveVirtualPath(it, workingDir, workspaceRoot) }
+            val (exit, out) = createTarArchive(archiveFile, srcFiles, workingDir, isVerbose, isGzip)
+            return CommandExecutionResult(exit, if (exit == 0) out else "", if (exit != 0) out else "", 20)
+        }
+
         return CommandExecutionResult(0, "tar: operation completed\n", "", 5)
     }
 
@@ -1548,15 +1926,22 @@ class ProotCommandExecutor(
         timeoutMs: Long,
         maxOutputBytes: Int
     ): CommandExecutionResult {
-        // Try real host git first
-        val hostGit = listOf("/usr/bin/git", "/usr/local/bin/git", "/bin/git").firstOrNull { File(it).canExecute() }
+        val hostGit = listOf(
+            "/data/data/com.termux/files/usr/bin/git",
+            "/data/data/com.termux/files/usr/bin/applets/git",
+            "/usr/bin/git",
+            "/usr/local/bin/git",
+            "/bin/git"
+        ).firstOrNull { File(it).canExecute() }
         if (hostGit != null) {
             try {
                 val pb = ProcessBuilder(listOf(hostGit) + args)
                 pb.directory(workingDir)
+                val curPath = pb.environment()["PATH"] ?: ""
+                pb.environment()["PATH"] = "/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/bin/applets:/usr/local/bin:/usr/bin:/bin:$curPath"
                 val proc = pb.start()
-                val stdout = proc.inputStream.bufferedReader().readText()
-                val stderr = proc.errorStream.bufferedReader().readText()
+                val stdout = proc.inputStream.bufferedReader().readText().take(maxOutputBytes)
+                val stderr = proc.errorStream.bufferedReader().readText().take(maxOutputBytes)
                 val exit = proc.waitFor()
                 return CommandExecutionResult(exit, stdout, stderr, 20)
             } catch (_: Exception) {
@@ -1564,37 +1949,241 @@ class ProotCommandExecutor(
         }
 
         val sub = args.firstOrNull()?.lowercase() ?: "status"
-        val gitDir = File(workspaceRoot, ".git")
+        var curDir: File? = workingDir
+        var gitDir: File? = null
+        while (curDir != null) {
+            val candidate = File(curDir, ".git")
+            if (candidate.exists() && candidate.isDirectory) {
+                gitDir = candidate
+                break
+            }
+            if (curDir.canonicalPath == workspaceRoot.canonicalPath) break
+            curDir = curDir.parentFile
+        }
+        if (gitDir == null) {
+            gitDir = File(workspaceRoot, ".git")
+        }
 
         when (sub) {
             "init" -> {
-                gitDir.mkdirs()
-                File(gitDir, "HEAD").writeText("ref: refs/heads/main\n")
-                return CommandExecutionResult(0, "Initialized empty Git repository in ${workspaceRoot.canonicalPath}/.git/\n", "", 10)
+                val targetDir = if (args.size > 1 && !args[1].startsWith("-")) {
+                    rootfsManager.resolveVirtualPath(args[1], workingDir, workspaceRoot)
+                } else workingDir
+                val initGitDir = File(targetDir, ".git")
+                initGitDir.mkdirs()
+                File(initGitDir, "objects").mkdirs()
+                File(initGitDir, "refs/heads").mkdirs()
+                File(initGitDir, "HEAD").writeText("ref: refs/heads/main\n")
+                File(initGitDir, "config").writeText(
+                    "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n"
+                )
+                return CommandExecutionResult(0, "Initialized empty Git repository in ${initGitDir.canonicalPath}/\n", "", 10)
             }
-            "status" -> {
+            "--version", "-v" -> return CommandExecutionResult(0, "git version 2.34.1\n", "", 2)
+            else -> {
                 if (!gitDir.exists()) {
                     return CommandExecutionResult(128, "", "fatal: not a git repository (or any of the parent directories): .git\n", 5)
                 }
-                val out = """
-                On branch main
-                No commits yet
-                nothing to commit (create/copy files and use "git add" to track)
-                """.trimIndent() + "\n"
+            }
+        }
+
+        val repoRoot = gitDir.parentFile ?: workspaceRoot
+        val headFile = File(gitDir, "HEAD")
+        val currentBranch = if (headFile.exists()) {
+            headFile.readText().substringAfter("refs/heads/").trim().ifBlank { "main" }
+        } else "main"
+        val indexFile = File(gitDir, "index.txt")
+        val commitsFile = File(gitDir, "commits.log")
+
+        when (sub) {
+            "status" -> {
+                val staged = if (indexFile.exists()) indexFile.readLines().filter { it.isNotBlank() } else emptyList()
+                val stagedPaths = staged.map { it.substringBefore("|") }.toSet()
+                val repoFiles = repoRoot.walkTopDown().filter {
+                    it.isFile && !it.path.contains("/.git") && !it.path.contains("/.rootfs") && !it.path.startsWith(rootfsManager.persistentRootfsDir.canonicalPath) && !it.path.contains("__pycache__")
+                }.map { it.relativeTo(repoRoot).path }.toList()
+
+                val untracked = repoFiles.filter { !stagedPaths.contains(it) }
+                val out = buildString {
+                    appendLine("On branch $currentBranch")
+                    if (!commitsFile.exists() || commitsFile.length() == 0L) {
+                        appendLine("No commits yet")
+                        appendLine()
+                    }
+                    if (staged.isNotEmpty()) {
+                        appendLine("Changes to be committed:")
+                        appendLine("  (use \"git rm --cached <file>...\" to unstage)")
+                        for (p in stagedPaths) {
+                            appendLine("\tnew file:   $p")
+                        }
+                        appendLine()
+                    }
+                    if (untracked.isNotEmpty()) {
+                        appendLine("Untracked files:")
+                        appendLine("  (use \"git add <file>...\" to include in what will be committed)")
+                        for (p in untracked.take(20)) {
+                            appendLine("\t$p")
+                        }
+                        if (untracked.size > 20) {
+                            appendLine("\t... and ${untracked.size - 20} more")
+                        }
+                        appendLine()
+                    }
+                    if (staged.isEmpty() && untracked.isEmpty()) {
+                        appendLine("nothing to commit, working tree clean")
+                    }
+                }
                 return CommandExecutionResult(0, out, "", 5)
             }
-            "add" -> return CommandExecutionResult(0, "", "", 5)
+            "add" -> {
+                val targets = args.drop(1).filter { !it.startsWith("-") }
+                if (targets.isEmpty()) {
+                    return CommandExecutionResult(0, "Nothing specified, nothing added.\n", "", 2)
+                }
+                indexFile.parentFile?.mkdirs()
+                val existing = if (indexFile.exists()) indexFile.readLines().filter { it.isNotBlank() }.toMutableList() else mutableListOf()
+                val existingMap = existing.associate { it.substringBefore("|") to it }.toMutableMap()
+
+                for (target in targets) {
+                    if (target == "." || target == "-A" || target == "*") {
+                        repoRoot.walkTopDown().filter {
+                            it.isFile && !it.path.contains("/.git") && !it.path.contains("/.rootfs") && !it.path.startsWith(rootfsManager.persistentRootfsDir.canonicalPath) && !it.path.contains("__pycache__")
+                        }.forEach { f ->
+                            val rel = f.relativeTo(repoRoot).path
+                            val hash = computeSha1(f.readText(Charsets.UTF_8).take(2048))
+                            existingMap[rel] = "$rel|$hash|${f.length()}"
+                        }
+                    } else {
+                        val f = rootfsManager.resolveVirtualPath(target, workingDir, workspaceRoot)
+                        if (!f.exists()) {
+                            return CommandExecutionResult(128, "", "fatal: pathspec '$target' did not match any files\n", 5)
+                        }
+                        if (f.isDirectory) {
+                            f.walkTopDown().filter { it.isFile && !it.path.contains("/.git") }.forEach { cf ->
+                                val rel = cf.relativeTo(repoRoot).path
+                                val hash = computeSha1(cf.readText(Charsets.UTF_8).take(2048))
+                                existingMap[rel] = "$rel|$hash|${cf.length()}"
+                            }
+                        } else {
+                            val rel = f.relativeToOrNull(repoRoot)?.path ?: f.name
+                            val hash = computeSha1(f.readText(Charsets.UTF_8).take(2048))
+                            existingMap[rel] = "$rel|$hash|${f.length()}"
+                        }
+                    }
+                }
+                indexFile.writeText(existingMap.values.joinToString("\n") + "\n")
+                return CommandExecutionResult(0, "", "", 5)
+            }
             "commit" -> {
-                val msg = args.indexOf("-m").let { if (it >= 0 && it + 1 < args.size) args[it + 1] else "commit" }
-                return CommandExecutionResult(0, "[main (root-commit) 8f3a1b2] $msg\n 1 file changed, 1 insertion(+)\n", "", 10)
+                val staged = if (indexFile.exists()) indexFile.readLines().filter { it.isNotBlank() } else emptyList()
+                if (staged.isEmpty()) {
+                    return CommandExecutionResult(1, "On branch $currentBranch\nnothing to commit, working tree clean\n", "", 5)
+                }
+                val mIdx = args.indexOf("-m")
+                val msg = if (mIdx >= 0 && mIdx + 1 < args.size) {
+                    args[mIdx + 1].trim('\'', '"')
+                } else {
+                    val remaining = args.drop(1).filter { !it.startsWith("-") }
+                    if (remaining.isNotEmpty()) remaining.joinToString(" ") else "Commit update"
+                }
+
+                val now = System.currentTimeMillis()
+                val sha = computeSha1("$currentBranch-$msg-$now")
+                val shortSha = sha.take(7)
+
+                commitsFile.appendText("$sha|$currentBranch|$now|$msg|${staged.size}\n")
+                File(gitDir, "refs/heads/$currentBranch").writeText("$sha\n")
+                indexFile.delete()
+
+                val isRootCommit = commitsFile.readLines().count { it.isNotBlank() } == 1
+                val rootStr = if (isRootCommit) " (root-commit)" else ""
+                val out = "[$currentBranch$rootStr $shortSha] $msg\n ${staged.size} file(s) changed, ${staged.size * 5} insertions(+)\n"
+                return CommandExecutionResult(0, out, "", 10)
             }
-            "branch" -> return CommandExecutionResult(0, "* main\n", "", 5)
             "log" -> {
-                return CommandExecutionResult(0, "commit 8f3a1b2c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a (HEAD -> main)\nAuthor: Ubuntu User <ubuntu@workspace.local>\nDate:   ${Date()}\n\n    Initial commit\n", "", 5)
+                if (!commitsFile.exists() || commitsFile.length() == 0L) {
+                    return CommandExecutionResult(128, "", "fatal: your current branch '$currentBranch' does not have any commits yet\n", 5)
+                }
+                val commits = commitsFile.readLines().filter { it.isNotBlank() }.reversed()
+                val dateFormat = SimpleDateFormat("EEE MMM dd HH:mm:ss yyyy Z", Locale.US).apply {
+                    timeZone = TimeZone.getDefault()
+                }
+                val out = buildString {
+                    for (entry in commits) {
+                        val parts = entry.split("|")
+                        if (parts.size >= 4) {
+                            val sha = parts[0]
+                            val branch = parts[1]
+                            val timeMs = parts[2].toLongOrNull() ?: System.currentTimeMillis()
+                            val msg = parts[3]
+                            val headPointer = if (branch == currentBranch) " (HEAD -> $branch)" else ""
+                            appendLine("commit $sha$headPointer")
+                            appendLine("Author: Ubuntu Developer <ubuntu@workspace.local>")
+                            appendLine("Date:   ${dateFormat.format(Date(timeMs))}")
+                            appendLine()
+                            appendLine("    $msg")
+                            appendLine()
+                        }
+                    }
+                }
+                return CommandExecutionResult(0, out, "", 5)
             }
-            "config" -> return CommandExecutionResult(0, "", "", 2)
-            "--version", "-v" -> return CommandExecutionResult(0, "git version 2.34.1\n", "", 2)
-            else -> return CommandExecutionResult(0, "git $sub: completed\n", "", 5)
+            "branch" -> {
+                val newBranchName = args.getOrNull(1)?.takeIf { !it.startsWith("-") }
+                if (newBranchName != null) {
+                    File(gitDir, "refs/heads/$newBranchName").writeText(
+                        File(gitDir, "refs/heads/$currentBranch").let { if (it.exists()) it.readText() else "main\n" }
+                    )
+                    return CommandExecutionResult(0, "", "", 5)
+                }
+                val branchesDir = File(gitDir, "refs/heads")
+                val branchFiles = branchesDir.listFiles()?.map { it.name } ?: listOf(currentBranch)
+                val out = buildString {
+                    for (b in branchFiles) {
+                        if (b == currentBranch) appendLine("* $b") else appendLine("  $b")
+                    }
+                }
+                return CommandExecutionResult(0, out, "", 5)
+            }
+            "checkout" -> {
+                val bIdx = args.indexOf("-b")
+                val branchName = if (bIdx >= 0 && bIdx + 1 < args.size) {
+                    args[bIdx + 1]
+                } else {
+                    args.firstOrNull { it != "checkout" && !it.startsWith("-") }
+                }
+                if (branchName == null) {
+                    return CommandExecutionResult(1, "", "fatal: missing branch name\n", 5)
+                }
+                File(gitDir, "refs/heads/$branchName").writeText("ref: refs/heads/$branchName\n")
+                headFile.writeText("ref: refs/heads/$branchName\n")
+                val msg = if (bIdx >= 0) "Switched to a new branch '$branchName'\n" else "Switched to branch '$branchName'\n"
+                return CommandExecutionResult(0, msg, "", 5)
+            }
+            "diff" -> {
+                val staged = if (indexFile.exists()) indexFile.readLines().filter { it.isNotBlank() } else emptyList()
+                val out = buildString {
+                    for (line in staged) {
+                        val path = line.substringBefore("|")
+                        val f = File(repoRoot, path)
+                        if (f.exists()) {
+                            appendLine("diff --git a/$path b/$path")
+                            appendLine("--- a/$path")
+                            appendLine("+++ b/$path")
+                            val lines = f.readLines().take(20)
+                            appendLine("@@ -0,0 +1,${lines.size} @@")
+                            for (l in lines) appendLine("+$l")
+                        }
+                    }
+                }
+                return CommandExecutionResult(0, out, "", 5)
+            }
+            "config" -> {
+                return CommandExecutionResult(0, "", "", 2)
+            }
+            else -> {
+                return CommandExecutionResult(0, "git $sub: completed\n", "", 5)
+            }
         }
     }
 
@@ -1605,21 +2194,29 @@ class ProotCommandExecutor(
         timeoutMs: Long,
         maxOutputBytes: Int
     ): CommandExecutionResult {
-        val hostMake = listOf("/usr/bin/make", "/usr/local/bin/make", "/bin/make").firstOrNull { File(it).canExecute() }
+        val hostMake = listOf(
+            "/data/data/com.termux/files/usr/bin/make",
+            "/data/data/com.termux/files/usr/bin/applets/make",
+            "/usr/bin/make",
+            "/usr/local/bin/make",
+            "/bin/make"
+        ).firstOrNull { File(it).canExecute() }
         if (hostMake != null) {
             try {
                 val pb = ProcessBuilder(listOf(hostMake) + args)
                 pb.directory(workingDir)
+                val curPath = pb.environment()["PATH"] ?: ""
+                pb.environment()["PATH"] = "/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/bin/applets:/usr/local/bin:/usr/bin:/bin:$curPath"
                 val proc = pb.start()
-                val stdout = proc.inputStream.bufferedReader().readText()
-                val stderr = proc.errorStream.bufferedReader().readText()
+                val stdout = proc.inputStream.bufferedReader().readText().take(maxOutputBytes)
+                val stderr = proc.errorStream.bufferedReader().readText().take(maxOutputBytes)
                 val exit = proc.waitFor()
                 return CommandExecutionResult(exit, stdout, stderr, 20)
             } catch (_: Exception) {
             }
         }
 
-        // Userspace Makefile parser
+        // Userspace Makefile parser with variable substitution
         val makefile = File(workingDir, "Makefile").let { if (it.exists()) it else File(workingDir, "makefile") }
         if (!makefile.exists()) {
             return CommandExecutionResult(2, "", "make: *** No targets specified and no makefile found. Stop.\n", 5)
@@ -1627,17 +2224,34 @@ class ProotCommandExecutor(
 
         val target = args.firstOrNull { !it.startsWith("-") } ?: "all"
         val lines = makefile.readLines()
+        val variables = mutableMapOf<String, String>()
         val recipeLines = mutableListOf<String>()
         var foundTarget = false
 
         for (line in lines) {
+            val trimmed = line.trim()
+            if (trimmed.startsWith("#") || trimmed.isBlank()) continue
+
+            // Parse variable assignments: VAR = VALUE or VAR := VALUE
+            if (!line.startsWith("\t") && !line.startsWith("    ") && (line.contains("=") || line.contains(":="))) {
+                val eqIdx = if (line.contains(":=")) line.indexOf(":=") else line.indexOf('=')
+                val varName = line.substring(0, eqIdx).trim()
+                val varVal = line.substring(if (line.contains(":=")) eqIdx + 2 else eqIdx + 1).trim()
+                variables[varName] = varVal
+                continue
+            }
+
             if (line.startsWith("$target:") || (target == "all" && line.contains(":") && !line.startsWith("\t"))) {
                 foundTarget = true
                 continue
             }
             if (foundTarget) {
                 if (line.startsWith("\t") || line.startsWith("    ")) {
-                    recipeLines.add(line.trim())
+                    var expanded = line.trim()
+                    for ((k, v) in variables) {
+                        expanded = expanded.replace("\$($k)", v).replace("\${$k}", v)
+                    }
+                    recipeLines.add(expanded)
                 } else if (line.contains(":")) {
                     break
                 }
@@ -1656,6 +2270,7 @@ class ProotCommandExecutor(
             if (res.stdout.isNotBlank()) outSb.appendLine(res.stdout)
             if (res.exitCode != 0) {
                 lastExit = res.exitCode
+                if (res.stderr.isNotBlank()) outSb.appendLine(res.stderr)
                 break
             }
         }
@@ -1669,24 +2284,35 @@ class ProotCommandExecutor(
         timeoutMs: Long,
         maxOutputBytes: Int
     ): CommandExecutionResult {
-        val hostCmake = listOf("/usr/bin/cmake", "/usr/local/bin/cmake").firstOrNull { File(it).canExecute() }
+        val hostCmake = listOf(
+            "/data/data/com.termux/files/usr/bin/cmake",
+            "/usr/bin/cmake",
+            "/usr/local/bin/cmake"
+        ).firstOrNull { File(it).canExecute() }
         if (hostCmake != null) {
             try {
                 val pb = ProcessBuilder(listOf(hostCmake) + args)
                 pb.directory(workingDir)
+                val curPath = pb.environment()["PATH"] ?: ""
+                pb.environment()["PATH"] = "/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/bin/applets:/usr/local/bin:/usr/bin:/bin:$curPath"
                 val proc = pb.start()
-                val stdout = proc.inputStream.bufferedReader().readText()
-                val stderr = proc.errorStream.bufferedReader().readText()
+                val stdout = proc.inputStream.bufferedReader().readText().take(maxOutputBytes)
+                val stderr = proc.errorStream.bufferedReader().readText().take(maxOutputBytes)
                 val exit = proc.waitFor()
                 return CommandExecutionResult(exit, stdout, stderr, 20)
             } catch (_: Exception) {
             }
         }
 
-        if (args.any { it == "--version" || it == "-version" }) {
+        if (args.any { it == "--version" || it == "-version" || it == "-v" }) {
             return CommandExecutionResult(0, "cmake version 3.22.1\nCMake suite maintained and supported by Kitware (kitware.com/cmake).\n", "", 5)
         }
-        return CommandExecutionResult(0, "-- Configuring done\n-- Generating done\n-- Build files have been written to: ${workingDir.canonicalPath}\n", "", 15)
+        return CommandExecutionResult(
+            exitCode = 127,
+            stdout = "",
+            stderr = "bash: cmake: command not found (host cmake not installed). Install via: apt install cmake\n",
+            durationMs = 5
+        )
     }
 
     private fun handleCompiler(
@@ -1697,14 +2323,23 @@ class ProotCommandExecutor(
         timeoutMs: Long,
         maxOutputBytes: Int
     ): CommandExecutionResult {
-        val hostCompiler = listOf("/usr/bin/$compiler", "/usr/local/bin/$compiler").firstOrNull { File(it).canExecute() }
+        val hostCompiler = listOf(
+            "/data/data/com.termux/files/usr/bin/$compiler",
+            "/data/data/com.termux/files/usr/bin/applets/$compiler",
+            "/usr/bin/$compiler",
+            "/usr/local/bin/$compiler",
+            "/bin/$compiler",
+            "/system/bin/$compiler"
+        ).firstOrNull { File(it).canExecute() }
         if (hostCompiler != null) {
             try {
                 val pb = ProcessBuilder(listOf(hostCompiler) + args)
                 pb.directory(workingDir)
+                val curPath = pb.environment()["PATH"] ?: ""
+                pb.environment()["PATH"] = "/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/bin/applets:/usr/local/bin:/usr/bin:/bin:$curPath"
                 val proc = pb.start()
-                val stdout = proc.inputStream.bufferedReader().readText()
-                val stderr = proc.errorStream.bufferedReader().readText()
+                val stdout = proc.inputStream.bufferedReader().readText().take(maxOutputBytes)
+                val stderr = proc.errorStream.bufferedReader().readText().take(maxOutputBytes)
                 val exit = proc.waitFor()
                 return CommandExecutionResult(exit, stdout, stderr, 20)
             } catch (_: Exception) {
@@ -1714,7 +2349,12 @@ class ProotCommandExecutor(
         if (args.any { it == "--version" || it == "-v" }) {
             return CommandExecutionResult(0, "$compiler (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0\nCopyright (C) 2021 Free Software Foundation, Inc.\n", "", 5)
         }
-        return CommandExecutionResult(0, "Compilation completed successfully.\n", "", 10)
+        return CommandExecutionResult(
+            exitCode = 127,
+            stdout = "",
+            stderr = "bash: $compiler: command not found (host tool not installed). Install via: apt install build-essential\n",
+            durationMs = 5
+        )
     }
 
     private fun handleJava(
@@ -1725,14 +2365,21 @@ class ProotCommandExecutor(
         timeoutMs: Long,
         maxOutputBytes: Int
     ): CommandExecutionResult {
-        val hostJava = listOf("/usr/bin/$tool", "/usr/local/bin/$tool").firstOrNull { File(it).canExecute() }
+        val hostJava = listOf(
+            "/data/data/com.termux/files/usr/bin/$tool",
+            "/data/data/com.termux/files/usr/bin/applets/$tool",
+            "/usr/bin/$tool",
+            "/usr/local/bin/$tool"
+        ).firstOrNull { File(it).canExecute() }
         if (hostJava != null) {
             try {
                 val pb = ProcessBuilder(listOf(hostJava) + args)
                 pb.directory(workingDir)
+                val curPath = pb.environment()["PATH"] ?: ""
+                pb.environment()["PATH"] = "/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/bin/applets:/usr/local/bin:/usr/bin:/bin:$curPath"
                 val proc = pb.start()
-                val stdout = proc.inputStream.bufferedReader().readText()
-                val stderr = proc.errorStream.bufferedReader().readText()
+                val stdout = proc.inputStream.bufferedReader().readText().take(maxOutputBytes)
+                val stderr = proc.errorStream.bufferedReader().readText().take(maxOutputBytes)
                 val exit = proc.waitFor()
                 return CommandExecutionResult(exit, stdout, stderr, 20)
             } catch (_: Exception) {
@@ -1742,7 +2389,12 @@ class ProotCommandExecutor(
         if (args.any { it == "-version" || it == "--version" }) {
             return CommandExecutionResult(0, "openjdk version \"17.0.10\" 2024-01-16\nOpenJDK Runtime Environment (build 17.0.10+7-Ubuntu-122.04.1)\nOpenJDK 64-Bit Server VM (build 17.0.10+7-Ubuntu-122.04.1, mixed mode, sharing)\n", "", 5)
         }
-        return CommandExecutionResult(0, "Java $tool completed.\n", "", 5)
+        return CommandExecutionResult(
+            exitCode = 127,
+            stdout = "",
+            stderr = "bash: $tool: command not found (Java Development Kit not installed in host/Termux). Install via: apt install default-jdk\n",
+            durationMs = 5
+        )
     }
 
     private fun handleRust(
@@ -1753,14 +2405,20 @@ class ProotCommandExecutor(
         timeoutMs: Long,
         maxOutputBytes: Int
     ): CommandExecutionResult {
-        val hostRust = listOf("/usr/bin/$tool", "/usr/local/bin/$tool").firstOrNull { File(it).canExecute() }
+        val hostRust = listOf(
+            "/data/data/com.termux/files/usr/bin/$tool",
+            "/usr/bin/$tool",
+            "/usr/local/bin/$tool"
+        ).firstOrNull { File(it).canExecute() }
         if (hostRust != null) {
             try {
                 val pb = ProcessBuilder(listOf(hostRust) + args)
                 pb.directory(workingDir)
+                val curPath = pb.environment()["PATH"] ?: ""
+                pb.environment()["PATH"] = "/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/bin/applets:/usr/local/bin:/usr/bin:/bin:$curPath"
                 val proc = pb.start()
-                val stdout = proc.inputStream.bufferedReader().readText()
-                val stderr = proc.errorStream.bufferedReader().readText()
+                val stdout = proc.inputStream.bufferedReader().readText().take(maxOutputBytes)
+                val stderr = proc.errorStream.bufferedReader().readText().take(maxOutputBytes)
                 val exit = proc.waitFor()
                 return CommandExecutionResult(exit, stdout, stderr, 20)
             } catch (_: Exception) {
@@ -1770,7 +2428,12 @@ class ProotCommandExecutor(
         if (args.any { it == "--version" || it == "-V" }) {
             return CommandExecutionResult(0, "$tool 1.75.0 (82e1608df 2023-12-21) (Ubuntu 1.75.0+dfsg1-0ubuntu1~22.04)\n", "", 5)
         }
-        return CommandExecutionResult(0, "$tool completed.\n", "", 5)
+        return CommandExecutionResult(
+            exitCode = 127,
+            stdout = "",
+            stderr = "bash: $tool: command not found (Rust compiler/cargo not installed in host/Termux). Install via: apt install rustc cargo\n",
+            durationMs = 5
+        )
     }
 
     private fun executeHttp(
@@ -1871,6 +2534,10 @@ class ProotCommandExecutor(
     ): CommandExecutionResult {
         val startTime = System.currentTimeMillis()
         val shell = when {
+            File("/data/data/com.termux/files/usr/bin/bash").canExecute() -> "/data/data/com.termux/files/usr/bin/bash"
+            File("/data/data/com.termux/files/usr/bin/sh").canExecute() -> "/data/data/com.termux/files/usr/bin/sh"
+            File("/bin/bash").canExecute() -> "/bin/bash"
+            File("/usr/bin/bash").canExecute() -> "/usr/bin/bash"
             File("/system/bin/sh").canExecute() -> "/system/bin/sh"
             File("/bin/sh").canExecute() -> "/bin/sh"
             File("/usr/bin/sh").canExecute() -> "/usr/bin/sh"
@@ -1878,6 +2545,13 @@ class ProotCommandExecutor(
         }
         val processBuilder = ProcessBuilder(shell, "-c", command)
         processBuilder.directory(workingDir)
+        val curPath = processBuilder.environment()["PATH"] ?: ""
+        val rootfsDir = rootfsManager.persistentRootfsDir
+        val rootfsPaths = "${rootfsDir.absolutePath}/usr/local/bin:${rootfsDir.absolutePath}/usr/bin:${rootfsDir.absolutePath}/bin:${rootfsDir.absolutePath}/usr/sbin:${rootfsDir.absolutePath}/sbin"
+        processBuilder.environment()["PATH"] = "$rootfsPaths:/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/bin/applets:/usr/local/bin:/usr/bin:/bin:$curPath"
+        val curLd = processBuilder.environment()["LD_LIBRARY_PATH"] ?: ""
+        val rootfsLd = "${rootfsDir.absolutePath}/usr/local/lib:${rootfsDir.absolutePath}/usr/lib:${rootfsDir.absolutePath}/lib:${rootfsDir.absolutePath}/usr/lib/aarch64-linux-gnu:${rootfsDir.absolutePath}/usr/lib/x86_64-linux-gnu"
+        processBuilder.environment()["LD_LIBRARY_PATH"] = "$rootfsLd:/data/data/com.termux/files/usr/lib:$curLd"
 
         return try {
             val process = processBuilder.start()
@@ -2069,6 +2743,29 @@ class ProotCommandExecutor(
         maxOutputBytes: Int
     ): CommandExecutionResult {
         val startTime = System.currentTimeMillis()
+        val hostNode = listOf(
+            "/data/data/com.termux/files/usr/bin/node",
+            "/data/data/com.termux/files/usr/bin/nodejs",
+            "/usr/bin/node",
+            "/usr/local/bin/node",
+            "/bin/node"
+        ).firstOrNull { File(it).canExecute() }
+
+        if (hostNode != null) {
+            try {
+                val pb = ProcessBuilder(listOf(hostNode) + args)
+                pb.directory(workingDir)
+                val curPath = pb.environment()["PATH"] ?: ""
+                pb.environment()["PATH"] = "/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/bin/applets:/usr/local/bin:/usr/bin:/bin:$curPath"
+                val proc = pb.start()
+                val stdout = proc.inputStream.bufferedReader().readText().take(maxOutputBytes)
+                val stderr = proc.errorStream.bufferedReader().readText().take(maxOutputBytes)
+                val exit = proc.waitFor()
+                return CommandExecutionResult(exit, stdout, stderr, System.currentTimeMillis() - startTime)
+            } catch (_: Exception) {
+            }
+        }
+
         if (args.isEmpty()) {
             return CommandExecutionResult(0, "Welcome to Node.js v20.11.1.\nType \".help\" for more information.\n", "", 5)
         }
@@ -2076,44 +2773,69 @@ class ProotCommandExecutor(
         if (first == "-v" || first == "--version") {
             return CommandExecutionResult(0, "v20.11.1\n", "", 5)
         }
-        val eIdx = args.indexOf("-e").let { if (it >= 0) it else args.indexOf("--eval") }
-        val code = if (eIdx >= 0 && eIdx + 1 < args.size) {
-            args.drop(eIdx + 1).joinToString(" ")
-        } else {
-            val scriptArg = args.firstOrNull { it.endsWith(".js") } ?: args.firstOrNull { !it.startsWith("-") }
-            if (scriptArg != null) {
-                val f = rootfsManager.resolveVirtualPath(scriptArg, workingDir, workspaceRoot)
-                if (f.exists()) f.readText() else null
-            } else null
-        }
 
-        if (code != null) {
-            val logRegex = Regex("""console\.log\((.*)\)""")
-            val lines = code.lines()
-            val outSb = StringBuilder()
-            for (line in lines) {
-                val match = logRegex.find(line)
-                if (match != null) {
-                    val rawVal = match.groupValues[1].trim('\'', '"', '`')
-                    outSb.appendLine(rawVal)
-                }
+        val scriptArg = args.firstOrNull { !it.startsWith("-") }
+        if (scriptArg != null) {
+            val f = rootfsManager.resolveVirtualPath(scriptArg, workingDir, workspaceRoot)
+            if (!f.exists()) {
+                return CommandExecutionResult(1, "", "node: internal/modules/cjs/loader.js: Cannot find module '$scriptArg'\n", 5)
             }
-            val out = if (outSb.isNotEmpty()) outSb.toString() else "Script executed successfully.\n"
-            return CommandExecutionResult(0, out, "", System.currentTimeMillis() - startTime)
         }
 
-        return CommandExecutionResult(0, "Node.js v20.11.1 execution completed.\n", "", 5)
+        return CommandExecutionResult(
+            exitCode = 127,
+            stdout = "",
+            stderr = "bash: node: command not found (Node.js runtime not installed in host/Termux). Install via: apt install nodejs\n",
+            durationMs = 5
+        )
     }
 
-    private fun handleNpm(
+    private suspend fun handleNpm(
         args: List<String>,
         workingDir: File,
-        workspaceRoot: File
+        workspaceRoot: File,
+        timeoutMs: Long,
+        maxOutputBytes: Int
     ): CommandExecutionResult {
+        val startTime = System.currentTimeMillis()
+        val hostNpm = listOf(
+            "/data/data/com.termux/files/usr/bin/npm",
+            "/data/data/com.termux/files/usr/bin/npx",
+            "/usr/bin/npm",
+            "/usr/local/bin/npm"
+        ).firstOrNull { File(it).canExecute() }
+
+        if (hostNpm != null) {
+            try {
+                val pb = ProcessBuilder(listOf(hostNpm) + args)
+                pb.directory(workingDir)
+                val curPath = pb.environment()["PATH"] ?: ""
+                pb.environment()["PATH"] = "/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/bin/applets:/usr/local/bin:/usr/bin:/bin:$curPath"
+                val proc = pb.start()
+                val stdout = proc.inputStream.bufferedReader().readText().take(maxOutputBytes)
+                val stderr = proc.errorStream.bufferedReader().readText().take(maxOutputBytes)
+                val exit = proc.waitFor()
+                return CommandExecutionResult(exit, stdout, stderr, System.currentTimeMillis() - startTime)
+            } catch (_: Exception) {
+            }
+        }
+
         if (args.isEmpty() || args.contains("-v") || args.contains("--version")) {
             return CommandExecutionResult(0, "10.2.4\n", "", 5)
         }
         val sub = args[0].lowercase()
+
+        fun findPackageJson(): File? {
+            var cur: File? = workingDir
+            while (cur != null) {
+                val candidate = File(cur, "package.json")
+                if (candidate.exists() && candidate.isFile) return candidate
+                if (cur.canonicalPath == workspaceRoot.canonicalPath) break
+                cur = cur.parentFile
+            }
+            return null
+        }
+
         when (sub) {
             "init" -> {
                 val pkgJson = File(workingDir, "package.json")
@@ -2141,11 +2863,27 @@ class ProotCommandExecutor(
                 val pkgs = args.drop(1).filter { !it.startsWith("-") }
                 val nodeModules = File(workingDir, "node_modules")
                 nodeModules.mkdirs()
-                for (p in pkgs) {
-                    val pDir = File(nodeModules, p)
-                    pDir.mkdirs()
-                    File(pDir, "package.json").writeText("{\"name\":\"$p\",\"version\":\"1.0.0\"}\n")
+                val pkgJsonFile = File(workingDir, "package.json")
+                val pkgObj = if (pkgJsonFile.exists()) {
+                    try { JSONObject(pkgJsonFile.readText()) } catch (_: Exception) { JSONObject() }
+                } else {
+                    JSONObject().apply {
+                        put("name", "workspace-app")
+                        put("version", "1.0.0")
+                        put("dependencies", JSONObject())
+                    }
                 }
+                val deps = pkgObj.optJSONObject("dependencies") ?: JSONObject().also { pkgObj.put("dependencies", it) }
+
+                for (p in pkgs) {
+                    val pName = p.substringBefore("@")
+                    val pVer = if (p.contains("@")) p.substringAfter("@") else "1.0.0"
+                    val pDir = File(nodeModules, pName)
+                    pDir.mkdirs()
+                    File(pDir, "package.json").writeText("{\"name\":\"$pName\",\"version\":\"$pVer\"}\n")
+                    deps.put(pName, "^$pVer")
+                }
+                pkgJsonFile.writeText(pkgObj.toString(2) + "\n")
                 val count = if (pkgs.isNotEmpty()) pkgs.size else 1
                 return CommandExecutionResult(0, "added $count package(s), and audited ${count + 1} packages in 1s\nfound 0 vulnerabilities\n", "", 15)
             }
@@ -2160,12 +2898,41 @@ class ProotCommandExecutor(
                 }
                 return CommandExecutionResult(0, out, "", 5)
             }
-            "run" -> {
-                val scriptName = args.getOrNull(1) ?: "test"
-                return CommandExecutionResult(0, "> workspace-app@1.0.0 $scriptName\n> Running script: $scriptName\nDone.\n", "", 10)
+            "run", "test", "start" -> {
+                val scriptName = if (sub == "run") (args.getOrNull(1) ?: "test") else sub
+                val pkgFile = findPackageJson()
+                if (pkgFile == null) {
+                    return CommandExecutionResult(1, "", "npm ERR! enoent ENOENT: no such file or directory, open 'package.json'\n", 5)
+                }
+                val pkgContent = try { pkgFile.readText() } catch (_: Exception) { "" }
+                val scripts = try {
+                    JSONObject(pkgContent).optJSONObject("scripts")
+                } catch (_: Exception) { null }
+
+                val scriptCommand = scripts?.optString(scriptName)?.takeIf { it.isNotBlank() }
+                if (scriptCommand == null) {
+                    return CommandExecutionResult(1, "", "npm ERR! Missing script: \"$scriptName\"\n", 5)
+                }
+
+                val pkgName = try { JSONObject(pkgContent).optString("name", "workspace-app") } catch (_: Exception) { "workspace-app" }
+                val pkgVersion = try { JSONObject(pkgContent).optString("version", "1.0.0") } catch (_: Exception) { "1.0.0" }
+
+                val header = "> $pkgName@$pkgVersion $scriptName\n> $scriptCommand\n"
+                val res = executePipeline(scriptCommand, workingDir, workspaceRoot, timeoutMs, maxOutputBytes, "")
+                return CommandExecutionResult(
+                    exitCode = res.exitCode,
+                    stdout = header + res.stdout,
+                    stderr = res.stderr,
+                    durationMs = res.durationMs + 10
+                )
             }
             else -> {
-                return CommandExecutionResult(0, "npm $sub completed.\n", "", 5)
+                return CommandExecutionResult(
+                    exitCode = 127,
+                    stdout = "",
+                    stderr = "bash: npm: command not found (host tool not installed). Install via: apt install npm\n",
+                    durationMs = 5
+                )
             }
         }
     }

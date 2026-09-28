@@ -79,8 +79,9 @@ object ToolCallParser {
         if (bashMatches.isNotEmpty()) {
             val nonJsonCodes = bashMatches.map { it.groupValues[1].trim() }
                 .filter { it.isNotBlank() && !it.contains("\"tool\"", ignoreCase = true) }
-            if (nonJsonCodes.isNotEmpty()) {
-                val combined = nonJsonCodes.joinToString("\n")
+            val executableBlocks = nonJsonCodes.mapNotNull { extractExecutableCommandsFromBlock(it) }
+            if (executableBlocks.isNotEmpty()) {
+                val combined = executableBlocks.joinToString("\n")
                 return ToolCall(
                     callId = UUID.randomUUID().toString(),
                     toolName = "bash",
@@ -146,8 +147,9 @@ object ToolCallParser {
 
     @Suppress("UNCHECKED_CAST")
     private fun parseJsonToToolCall(jsonString: String, isExplicitToolCallBlock: Boolean): ToolCall? {
+        val normalizedJson = normalizeJsonStringEscapes(jsonString)
         try {
-            val map = mapAdapter.fromJson(jsonString)
+            val map = mapAdapter.fromJson(normalizedJson)
             if (map != null) {
                 val hasToolKey = map.containsKey("tool")
                 val candidateName = ((map["tool"] as? String) ?: (map["name"] as? String))?.trim()
@@ -168,6 +170,12 @@ object ToolCallParser {
                         }
                     }
 
+                    // Preserve escaped newlines inside command parameter
+                    val cmd = (arguments["command"] ?: arguments["cmd"]) as? String
+                    if (cmd != null && !cmd.contains('\n') && cmd.contains("\\n")) {
+                        arguments["command"] = cmd.replace("\\n", "\n").replace("\\r", "\r")
+                    }
+
                     return ToolCall(
                         callId = UUID.randomUUID().toString(),
                         toolName = candidateName!!,
@@ -181,7 +189,7 @@ object ToolCallParser {
 
         // Fallback using org.json.JSONObject
         return try {
-            val json = JSONObject(jsonString)
+            val json = JSONObject(normalizedJson)
             val hasToolKey = json.has("tool")
             val candidateName = (json.optString("tool").ifBlank { json.optString("name") }).trim()
 
@@ -219,6 +227,11 @@ object ToolCallParser {
                 }
             }
 
+            val cmd = (arguments["command"] ?: arguments["cmd"]) as? String
+            if (cmd != null && !cmd.contains('\n') && cmd.contains("\\n")) {
+                arguments["command"] = cmd.replace("\\n", "\n").replace("\\r", "\r")
+            }
+
             ToolCall(
                 callId = UUID.randomUUID().toString(),
                 toolName = candidateName,
@@ -251,6 +264,140 @@ object ToolCallParser {
     }
 
     /**
+     * Extracts valid shell command lines from a code block, removing leading/trailing
+     * natural language sentences, explanations, or commentary while preserving comments (#),
+     * heredocs (cat << EOF), and valid commands.
+     * Returns null if the block is purely natural language or raw non-shell programming code.
+     */
+    fun extractExecutableCommandsFromBlock(raw: String): String? {
+        val trimmed = raw.trim()
+        if (trimmed.isBlank()) return null
+
+        val lines = trimmed.lines()
+        val cleanedLines = mutableListOf<String>()
+        var inHeredoc = false
+        var heredocDelim: String? = null
+
+        val knownCommands = setOf(
+            "cat", "echo", "python", "python3", "py", "pip", "pip3", "ls", "cd", "mkdir", "pwd",
+            "grep", "find", "touch", "rm", "cp", "mv", "sed", "awk", "head", "tail", "wc", "sort",
+            "uniq", "cut", "tr", "tar", "zip", "unzip", "apt", "apt-get", "dpkg", "pkg", "proot",
+            "proot-distro", "node", "npm", "npx", "sh", "bash", "curl", "wget", "git", "pytest",
+            "unittest", "which", "whoami", "uname", "chmod", "export", "source", "test", "sleep", "printf"
+        )
+
+        val proseLeadingWords = setOf(
+            "the", "this", "here", "in", "we", "i", "note", "please", "to", "first", "next", "finally",
+            "you", "as", "for", "let's", "lets", "it"
+        )
+
+        val rawCodeKeywords = setOf(
+            "def", "class", "return", "import", "from", "function", "const", "let", "var", "public", "private"
+        )
+
+        for (line in lines) {
+            val lineTrim = line.trim()
+            if (inHeredoc) {
+                cleanedLines.add(line)
+                if (heredocDelim != null && lineTrim == heredocDelim) {
+                    inHeredoc = false
+                    heredocDelim = null
+                }
+                continue
+            }
+
+            if (lineTrim.isBlank()) continue
+
+            // Check start of heredoc: cat << EOF, cat <<- 'EOF'
+            if (lineTrim.contains("<<")) {
+                val delimMatch = Regex("""<<-?\s*['"]?([A-Za-z0-9_.-]+)['"]?""").find(lineTrim)
+                if (delimMatch != null) {
+                    inHeredoc = true
+                    heredocDelim = delimMatch.groupValues[1].trim('\'', '"')
+                }
+                cleanedLines.add(line)
+                continue
+            }
+
+            // Shell comments are fine
+            if (lineTrim.startsWith("#")) {
+                cleanedLines.add(line)
+                continue
+            }
+
+            val firstToken = lineTrim.split(Regex("\\s+")).firstOrNull()?.lowercase()?.trim('\'', '"', '`') ?: ""
+
+            // Check if line looks like raw programming code (e.g. def foo(): or return bar)
+            if (firstToken in rawCodeKeywords && !lineTrim.startsWith("echo ") && !lineTrim.startsWith("cat ")) {
+                continue
+            }
+
+            // Check if line looks like conversational English prose
+            if (firstToken in proseLeadingWords && (lineTrim.endsWith(".") || lineTrim.endsWith(":") || (!lineTrim.contains("=") && !lineTrim.contains("/") && !lineTrim.contains("-")))) {
+                continue
+            }
+
+            cleanedLines.add(line)
+        }
+
+        // Must have at least one actual shell command or heredoc
+        val hasActualCommand = cleanedLines.any { line ->
+            val l = line.trim()
+            if (l.isBlank() || l.startsWith("#")) return@any false
+            val tok = l.split(Regex("\\s+")).firstOrNull()?.lowercase()?.trim('\'', '"', '`') ?: ""
+            tok in knownCommands || l.contains("<<") || l.contains("=") || l.startsWith("./") || l.startsWith("/") || l.startsWith("sh ") || l.startsWith("bash ")
+        }
+
+        return if (hasActualCommand && cleanedLines.isNotEmpty()) {
+            cleanedLines.joinToString("\n").trim()
+        } else {
+            null
+        }
+    }
+
+    /**
+     * Escapes raw control characters inside JSON string literals so LLM-generated JSON
+     * with unescaped newlines does not cause syntax errors.
+     */
+    fun normalizeJsonStringEscapes(json: String): String {
+        val sb = StringBuilder(json.length + 32)
+        var inString = false
+        var escape = false
+        for (i in json.indices) {
+            val c = json[i]
+            if (escape) {
+                sb.append(c)
+                escape = false
+                continue
+            }
+            if (c == '\\') {
+                escape = true
+                sb.append(c)
+                continue
+            }
+            if (c == '"') {
+                inString = !inString
+                sb.append(c)
+                continue
+            }
+            if (inString && c == '\n') {
+                sb.append("\\n")
+                continue
+            }
+            if (inString && c == '\r') {
+                sb.append("\\r")
+                continue
+            }
+            if (inString && c == '\t') {
+                sb.append("\\t")
+                continue
+            }
+            sb.append(c)
+        }
+        return sb.toString()
+    }
+
+    /**
      * Checks if the text contains a structured tool call.
      */
     fun hasToolCall(text: String): Boolean = parse(text) != null
@@ -262,7 +409,14 @@ object ToolCallParser {
     fun stripToolCalls(text: String): String {
         var clean = text.replace(EXPLICIT_TOOL_CALL_REGEX) { "" }
         clean = clean.replace(XML_TOOL_CALL_REGEX) { "" }
-        clean = clean.replace(BASH_BLOCK_REGEX) { "" }
+        clean = clean.replace(BASH_BLOCK_REGEX) { match ->
+            val content = match.groupValues[1].trim()
+            if (extractExecutableCommandsFromBlock(content) != null) {
+                ""
+            } else {
+                match.value
+            }
+        }
         return clean.trim()
     }
 }

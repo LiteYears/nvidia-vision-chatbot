@@ -14,7 +14,7 @@ import java.util.UUID
  */
 class RunCommandTool(
     private val workspaceManager: AgentWorkspaceManager = AgentWorkspaceManager.getInstance(),
-    private val commandRunner: CommandRunner = ProcessCommandRunner(),
+    private val commandRunner: CommandRunner = ProcessCommandRunner(workspaceManager = workspaceManager),
     val securityValidator: CommandSecurityValidator = CommandSecurityValidator(),
     private val capabilityDetector: RuntimeCapabilityDetector = RuntimeCapabilityDetector()
 ) : AgentTool {
@@ -54,6 +54,13 @@ class RunCommandTool(
                 description = "Maximum output bytes to capture from stdout/stderr (default: 32768 / 32 KB, maximum: 131072 / 128 KB)",
                 required = false,
                 default = 32768
+            ),
+            ToolParameter(
+                name = "environment",
+                type = "string",
+                description = "Target execution environment: 'ubuntu' (default, Ubuntu 22.04 LTS userspace with bash, coreutils, apt, dpkg, compilers, and python3), 'termux' (Android Termux environment with pkg and system utilities), or 'auto' (automatic detection based on command).",
+                required = false,
+                default = "ubuntu"
             )
         )
     )
@@ -78,17 +85,30 @@ class RunCommandTool(
         val maxOutputBytes = parseInt(arguments["max_output_bytes"] ?: arguments["max_bytes"], default = 32768)
             .coerceIn(1024, 131072)
 
+        val environmentArg = (arguments["environment"] ?: arguments["env"])?.toString()?.trim()?.lowercase() ?: "ubuntu"
+        val targetEnvironment = when (environmentArg) {
+            "termux" -> "termux"
+            "auto" -> "auto"
+            else -> "ubuntu"
+        }
+
         val workspaceRoot = workspaceManager.getWorkspaceDir()
 
-        // 1. Resolve and validate working directory
-        val resolvedWorkingDir: File = if (workingDirArg.isBlank() || workingDirArg == "." || workingDirArg == "./") {
+        // 1. Resolve and validate working directory (supporting virtual /workspace, ~/workspace, and relative paths)
+        val resolvedWorkingDir: File = if (workingDirArg.isBlank() || workingDirArg == "." || workingDirArg == "./" || workingDirArg == "/workspace" || workingDirArg == "~/workspace" || workingDirArg == "~") {
             workspaceRoot
+        } else if (workingDirArg.startsWith("/workspace/")) {
+            val sub = workingDirArg.removePrefix("/workspace/").trimStart('/')
+            File(workspaceRoot, sub).canonicalFile
+        } else if (workingDirArg.startsWith("~/workspace/")) {
+            val sub = workingDirArg.removePrefix("~/workspace/").trimStart('/')
+            File(workspaceRoot, sub).canonicalFile
         } else {
             val candidate = File(workingDirArg)
-            if (candidate.isAbsolute) {
+            if (candidate.isAbsolute && candidate.exists()) {
                 candidate.canonicalFile
             } else {
-                File(workspaceRoot, workingDirArg).canonicalFile
+                File(workspaceRoot, workingDirArg.trimStart('/')).canonicalFile
             }
         }
 
@@ -121,7 +141,7 @@ class RunCommandTool(
             )
         }
 
-        // Sanitize command input (strip prompt prefixes, comments, terminal transcripts)
+        // Sanitize command input (strip prompt prefixes, comments, terminal transcripts, unescape newlines)
         val sanitizedCommand = sanitizeCommand(rawCommand)
         if (sanitizedCommand.isBlank() || isOnlyComments(sanitizedCommand)) {
             return ToolResult.success(
@@ -131,19 +151,40 @@ class RunCommandTool(
             )
         }
 
+        // 3. SEPARATION GATE: Prevent natural language explanations, markdown, or raw code from reaching shell
+        if (isNaturalLanguageOrRawCode(sanitizedCommand)) {
+            return ToolResult.failure(
+                callId = callId,
+                toolName = definition.name,
+                error = "Invalid command payload: Natural language reasoning, explanation, or raw code was passed to 'run_command' instead of an executable shell command.\nAttempted payload: $rawCommand\n\nFix: Put reasoning and explanations in your message narrative. To create files, use 'file_write' or bash heredocs ('cat << 'EOF' > filename ... EOF'). To execute code, run 'python3 script.py' or use 'python_execute'."
+            )
+        }
+
+        // 4. Pre-execution script path validation (e.g. 'python3 src/prayer_times.py')
+        val scriptValidationError = validateScriptTargetBeforeExecution(sanitizedCommand, resolvedWorkingDir, workspaceRoot)
+        if (scriptValidationError != null) {
+            return scriptValidationError
+        }
+
         val nonCommentLine = sanitizedCommand.lines()
             .map { it.trim() }
             .firstOrNull { it.isNotBlank() && !it.startsWith("#") } ?: sanitizedCommand
-        val primaryExecutable = nonCommentLine.split(Regex("\\s+")).firstOrNull()?.trim('\'', '"') ?: ""
-        val rawExec = if (primaryExecutable.contains('/')) File(primaryExecutable).name else primaryExecutable
+        val tokens = nonCommentLine.split(Regex("\\s+")).map { it.trim('\'', '"') }.filter { it.isNotBlank() }
+        val effectiveExecutable = if (tokens.firstOrNull() == "sudo" && tokens.size > 1) {
+            tokens[1]
+        } else {
+            tokens.firstOrNull() ?: ""
+        }
+        val rawExec = if (effectiveExecutable.contains('/')) File(effectiveExecutable).name else effectiveExecutable
         val cleanExec = if (rawExec.isBlank() || rawExec == "#" || rawExec.contains('@') || rawExec.endsWith('$')) "bash" else rawExec
 
-        // 3. Execute via modular CommandRunner
+        // 5. Execute via modular CommandRunner
         val execResult = commandRunner.run(
             command = sanitizedCommand,
             workingDir = resolvedWorkingDir,
             timeoutMs = timeoutMs,
-            maxOutputBytes = maxOutputBytes
+            maxOutputBytes = maxOutputBytes,
+            environment = targetEnvironment
         )
 
         val relativeDir = try {
@@ -179,6 +220,23 @@ class RunCommandTool(
             )
 
             if (isUnavailable) {
+                val aptPkg = com.example.agent.proot.ProotAptManager.findPackageProviding(cleanExec)
+                if (aptPkg != null) {
+                    val errorMsg = buildString {
+                        appendLine("Command '$cleanExec' not found in Ubuntu userspace, but can be installed with:")
+                        appendLine()
+                        appendLine("  apt update && apt install -y ${aptPkg.name}")
+                        appendLine()
+                        appendLine("Package details:")
+                        appendLine("  Package: ${aptPkg.name} (${aptPkg.version})")
+                        appendLine("  Description: ${aptPkg.description}")
+                        appendLine()
+                        appendLine("To install and execute, run:")
+                        appendLine("  run_command with command: 'apt install -y ${aptPkg.name} && $rawCommand'")
+                    }
+                    return ToolResult.failure(callId = callId, toolName = definition.name, error = errorMsg.trim())
+                }
+
                 val capError = capabilityDetector.buildCapabilityUnavailableError(cleanExec, rawCommand, execResult.stderr)
                 return ToolResult.failure(callId = callId, toolName = definition.name, error = capError)
             }
@@ -240,16 +298,6 @@ class RunCommandTool(
         }
     }
 
-    private fun isLanguageRuntimeCommand(executable: String): Boolean {
-        val norm = executable.lowercase().trim()
-        return norm in setOf(
-            "python", "python3", "py",
-            "node", "nodejs", "npm", "npx",
-            "java", "javac", "gradle", "mvn",
-            "pip", "pip3", "ruby", "perl", "php"
-        )
-    }
-
     private fun sanitizeCommand(raw: String): String {
         var s = raw.trim()
         val transcriptIndex = s.indexOf("[stdout]")
@@ -263,6 +311,11 @@ class RunCommandTool(
         val processExitedIndex = s.indexOf("[Process exited")
         if (processExitedIndex >= 0) {
             s = s.substring(0, processExitedIndex).trim()
+        }
+
+        // If s has no actual newlines but contains literal \n (common in JSON), unescape it
+        if (!s.contains('\n') && s.contains("\\n")) {
+            s = s.replace("\\n", "\n").replace("\\r", "\r")
         }
 
         // Strip leading prompt prefixes from lines: ubuntu@termux:~$, user@host:~/dir$, $, #, >
@@ -284,6 +337,119 @@ class RunCommandTool(
             }
         }
         return lines.joinToString("\n").trim()
+    }
+
+    private fun isNaturalLanguageOrRawCode(cmd: String): Boolean {
+        val nonComment = cmd.lines()
+            .map { it.trim() }
+            .firstOrNull { it.isNotBlank() && !it.startsWith("#") } ?: return false
+
+        // Check if inside a heredoc or echo/cat/printf
+        if (nonComment.startsWith("cat <<") || nonComment.startsWith("echo ") || nonComment.startsWith("printf ")) {
+            return false
+        }
+
+        val tokens = nonComment.split(Regex("\\s+")).filter { it.isNotBlank() }
+        val firstToken = tokens.firstOrNull()?.lowercase()?.trim('\'', '"', '`', ':', '.') ?: ""
+
+        val rawCodeKeywords = setOf("def", "class", "return", "import", "from", "function", "const", "let", "var", "public", "private")
+        if (firstToken in rawCodeKeywords) {
+            return true
+        }
+
+        val proseLeadingWords = setOf(
+            "the", "this", "here", "in", "we", "i", "note", "please", "to", "first", "next", "finally",
+            "you", "as", "for", "let's", "lets", "it"
+        )
+        if (firstToken in proseLeadingWords) {
+            if (tokens.size >= 2) {
+                val secondToken = tokens.getOrNull(1)?.lowercase() ?: ""
+                val isCommandAfterWord = secondToken in setOf("python", "python3", "cat", "ls", "cd", "mkdir")
+                if (!isCommandAfterWord) {
+                    return true
+                }
+            } else if (nonComment.endsWith(".") || nonComment.endsWith(":")) {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private fun validateScriptTargetBeforeExecution(
+        command: String,
+        workingDir: File,
+        workspaceRoot: File
+    ): ToolResult? {
+        val trimmed = command.trim()
+        val scriptCmdMatch = Regex("""^(?:sudo\s+)?(?:python3|python|py|bash|sh)\s+([^\s;&|<>'"]+|'[^']+'|"[^"]+")(?:\s+.*)?$""").find(trimmed)
+            ?: return null
+
+        val rawTarget = scriptCmdMatch.groupValues[1].trim().trim('\'', '"')
+        if (rawTarget.startsWith("-")) return null
+
+        val resolved = try {
+            val cand = File(rawTarget)
+            if (cand.isAbsolute && cand.exists()) {
+                cand
+            } else if (rawTarget.startsWith("/workspace/")) {
+                File(workspaceRoot, rawTarget.removePrefix("/workspace/").trimStart('/')).canonicalFile
+            } else if (workingDir != workspaceRoot && File(workingDir, rawTarget).exists()) {
+                File(workingDir, rawTarget).canonicalFile
+            } else {
+                workspaceManager.resolvePath(rawTarget)
+            }
+        } catch (_: Exception) {
+            null
+        }
+
+        if (resolved == null || !resolved.exists() || !resolved.isFile) {
+            val availableFiles = workspaceManager.listWorkspaceFiles()
+                .filter { !it.isDirectory }
+                .map { it.relativePath }
+            val baseName = File(rawTarget).name
+            val matching = availableFiles.filter { it.endsWith(baseName) || it.contains(baseName) }
+
+            val execTokens = trimmed.split(Regex("\\s+")).filter { it.isNotBlank() }
+            val execName = if (execTokens.firstOrNull() == "sudo" && execTokens.size > 1) execTokens[1] else execTokens.firstOrNull() ?: "python3"
+            val relativeDir = try {
+                workspaceManager.getRelativePath(workingDir).ifBlank { "." }
+            } catch (_: Exception) {
+                workingDir.path
+            }
+
+            val errorMsg = buildString {
+                appendLine("$execName: can't open file '$rawTarget': [Errno 2] No such file or directory")
+                appendLine("Working Directory: $relativeDir")
+                if (matching.isNotEmpty()) {
+                    appendLine("\nDid you mean:")
+                    for (m in matching) {
+                        appendLine("  $execName $m")
+                    }
+                }
+                appendLine("\nWorkspace files present:")
+                if (availableFiles.isNotEmpty()) {
+                    for (f in availableFiles.take(15)) {
+                        appendLine("  - $f")
+                    }
+                    if (availableFiles.size > 15) {
+                        appendLine("  ... (${availableFiles.size - 15} more files)")
+                    }
+                } else {
+                    appendLine("  (Workspace is currently empty)")
+                }
+                appendLine("\nRecovery advice:")
+                appendLine("Create the script file first using 'file_write' or a bash heredoc ('cat << 'EOF' > $rawTarget ... EOF') before executing.")
+            }
+
+            return ToolResult.failure(
+                callId = UUID.randomUUID().toString(),
+                toolName = definition.name,
+                error = errorMsg.trim()
+            )
+        }
+
+        return null
     }
 
     private fun isOnlyComments(cmd: String): Boolean {

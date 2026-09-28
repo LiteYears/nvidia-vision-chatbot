@@ -130,9 +130,13 @@ class FileWriteTool(
                 content.toByteArray(Charsets.UTF_8)
             }
 
-            FileOutputStream(targetFile, isAppend).use { fos ->
-                fos.write(bytes)
-                fos.flush()
+            if (isAppend) {
+                FileOutputStream(targetFile, true).use { fos ->
+                    fos.write(bytes)
+                    fos.flush()
+                }
+            } else {
+                workspaceManager.atomicWrite(targetFile, bytes)
             }
 
             val relPath = workspaceManager.getRelativePath(targetFile)

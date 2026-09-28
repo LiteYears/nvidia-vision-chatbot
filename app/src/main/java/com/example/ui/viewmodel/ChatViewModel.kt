@@ -9,6 +9,8 @@ import android.speech.tts.TextToSpeech
 import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.agent.plan.AgentFlailingDetector
+import com.example.agent.plan.Subtask
 import com.example.agent.plan.SubtaskStatus
 import com.example.agent.plan.TaskPlan
 import com.example.agent.plan.TaskPlanner
@@ -43,6 +45,7 @@ import com.example.data.remote.NvidiaApiClient
 import com.example.data.repository.AgentPlanRepository
 import com.example.data.repository.ChatRepository
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -117,7 +120,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = ChatRepository(database.chatDao(), settingsManager, apiClient)
     private val agentPlanRepository = AgentPlanRepository(database.agentPlanDao())
     private val taskPlanner = TaskPlanner()
-    private val workspaceManager = AgentWorkspaceManager(File(application.filesDir, "agent_workspaces"))
+    private val workspaceManager = AgentWorkspaceManager.init(File(application.filesDir, "agent_workspaces"))
     private val toolRegistry = ToolRegistry.defaultRegistry(workspaceManager)
 
     private val termuxEnvManager = TermuxEnvironmentManager.getInstance()
@@ -868,43 +871,59 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
 
-            // Run command via real Linux process runner
-            val currentDir = File(workspaceManager.getWorkspaceDir(), "")
-            val result = termuxRunner.run(
-                command = command,
-                workingDir = currentDir,
-                timeoutMs = 30000L,
-                maxOutputBytes = 65536
-            )
+            try {
+                // Run command via real Linux process runner
+                val currentDir = File(workspaceManager.getWorkspaceDir(), "")
+                val result = termuxRunner.run(
+                    command = command,
+                    workingDir = currentDir,
+                    timeoutMs = 30000L,
+                    maxOutputBytes = 65536
+                )
 
-            val newLines = mutableListOf<TerminalLine>()
-            if (result.stdout.isNotBlank()) {
-                val stdoutLines = result.stdout.trimEnd().lines()
-                stdoutLines.forEach { line ->
-                    newLines.add(TerminalLine(type = TerminalLineType.STDOUT, text = line))
+                val newLines = mutableListOf<TerminalLine>()
+                if (result.stdout.isNotBlank()) {
+                    val stdoutLines = result.stdout.trimEnd().lines()
+                    stdoutLines.forEach { line ->
+                        newLines.add(TerminalLine(type = TerminalLineType.STDOUT, text = line))
+                    }
                 }
-            }
-            if (result.stderr.isNotBlank()) {
-                val stderrLines = result.stderr.trimEnd().lines()
-                stderrLines.forEach { line ->
-                    newLines.add(TerminalLine(type = TerminalLineType.STDERR, text = line, exitCode = result.exitCode))
+                if (result.stderr.isNotBlank()) {
+                    val stderrLines = result.stderr.trimEnd().lines()
+                    stderrLines.forEach { line ->
+                        newLines.add(TerminalLine(type = TerminalLineType.STDERR, text = line, exitCode = result.exitCode))
+                    }
                 }
-            }
-            if (result.stdout.isBlank() && result.stderr.isBlank() && result.exitCode != 0) {
-                newLines.add(
-                    TerminalLine(
-                        type = TerminalLineType.STDERR,
-                        text = "Process exited with code ${result.exitCode}",
-                        exitCode = result.exitCode
+                if (result.stdout.isBlank() && result.stderr.isBlank() && result.exitCode != 0) {
+                    newLines.add(
+                        TerminalLine(
+                            type = TerminalLineType.STDERR,
+                            text = "Process exited with code ${result.exitCode}",
+                            exitCode = result.exitCode
+                        )
                     )
-                )
-            }
+                }
 
-            _terminalState.update {
-                it.copy(
-                    lines = it.lines + newLines,
-                    isRunning = false
-                )
+                _terminalState.update {
+                    it.copy(
+                        lines = it.lines + newLines,
+                        isRunning = false
+                    )
+                }
+            } catch (e: CancellationException) {
+                _terminalState.update { it.copy(isRunning = false) }
+                throw e
+            } catch (e: Throwable) {
+                _terminalState.update {
+                    it.copy(
+                        lines = it.lines + TerminalLine(
+                            type = TerminalLineType.STDERR,
+                            text = "Error executing command: ${e.message ?: e.toString()}",
+                            exitCode = -1
+                        ),
+                        isRunning = false
+                    )
+                }
             }
         }
     }
@@ -937,6 +956,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun startNewAgentSession() {
         agentGenerationJob?.cancel()
+        workspaceManager.activeSessionId = "default"
         _uiState.update {
             it.copy(
                 currentAgentSession = null,
@@ -961,13 +981,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val plan = agentPlanRepository.getPlan(session.id)
-                if (plan != null && _uiState.value.currentAgentSession?.id == session.id) {
-                    val updated = _uiState.value.currentAgentSession!!.copy(plan = plan)
+                if (plan != null) {
                     _uiState.update { state ->
-                        state.copy(
-                            currentAgentSession = updated,
-                            agentSessions = state.agentSessions.map { if (it.id == updated.id) updated else it }
-                        )
+                        val current = state.currentAgentSession
+                        if (current?.id == session.id) {
+                            val updated = current.copy(plan = plan)
+                            state.copy(
+                                currentAgentSession = updated,
+                                agentSessions = state.agentSessions.map { if (it.id == updated.id) updated else it }
+                            )
+                        } else {
+                            state
+                        }
                     }
                 }
             } catch (_: Exception) {
@@ -1131,14 +1156,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         agentGenerationJob = viewModelScope.launch {
             val agentSystemPrompt = buildAgentSystemPrompt(trimmedGoal)
 
-            executeAgentSessionTurn(
-                session = newSession,
-                userMessage = userGoalMessage,
-                assistantMessageId = assistantMessageId,
-                streamingAssistantMessage = streamingAssistantMessage,
-                systemPrompt = agentSystemPrompt,
-                initialSteps = initialSteps
-            )
+            try {
+                executeAgentSessionTurn(
+                    session = newSession,
+                    userMessage = userGoalMessage,
+                    assistantMessageId = assistantMessageId,
+                    streamingAssistantMessage = streamingAssistantMessage,
+                    systemPrompt = agentSystemPrompt,
+                    initialSteps = initialSteps
+                )
+            } catch (e: CancellationException) {
+                _uiState.update { it.copy(isAgentLoading = false) }
+                throw e
+            } catch (e: Throwable) {
+                handleAgentError(assistantMessageId, streamingAssistantMessage, e)
+            }
         }
     }
 
@@ -1216,14 +1248,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         agentGenerationJob = viewModelScope.launch {
             val agentSystemPrompt = buildAgentSystemPrompt(currentSession.goal)
 
-            executeAgentSessionTurn(
-                session = updatedSession,
-                userMessage = userMessage,
-                assistantMessageId = assistantMessageId,
-                streamingAssistantMessage = streamingAssistantMessage,
-                systemPrompt = agentSystemPrompt,
-                initialSteps = null
-            )
+            try {
+                executeAgentSessionTurn(
+                    session = updatedSession,
+                    userMessage = userMessage,
+                    assistantMessageId = assistantMessageId,
+                    streamingAssistantMessage = streamingAssistantMessage,
+                    systemPrompt = agentSystemPrompt,
+                    initialSteps = null
+                )
+            } catch (e: CancellationException) {
+                _uiState.update { it.copy(isAgentLoading = false) }
+                throw e
+            } catch (e: Throwable) {
+                handleAgentError(assistantMessageId, streamingAssistantMessage, e)
+            }
         }
     }
 
@@ -1305,6 +1344,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             workspaceManager = workspaceManager
         )
         workspaceContext.discoverWorkspace()
+        val flailingDetector = AgentFlailingDetector()
 
         val state = _uiState.value
         val historyMessages = session.messages
@@ -1486,6 +1526,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     updateSessionPlan(currentPlan)
                 }
 
+                // Track tool execution signature for loop/flailing analysis
+                flailingDetector.recordExecution(
+                    toolName = toolCall.toolName,
+                    arguments = toolCall.arguments,
+                    isSuccess = toolResult.isSuccess,
+                    error = toolResult.error
+                )
+                val flailingReport = flailingDetector.detectFlailing()
+                if (flailingReport?.shouldAutoAdaptPlan == true && activeSubtask != null) {
+                    val recoverySubtask = Subtask(
+                        description = "Diagnose '${flailingReport.toolName}' failure and implement alternative approach",
+                        status = SubtaskStatus.RUNNING
+                    )
+                    currentPlan = taskPlanner.adaptPlanForFailure(
+                        plan = currentPlan,
+                        failedSubtaskId = activeSubtask.id,
+                        failureDiagnostic = flailingReport.description,
+                        recoverySubtask = recoverySubtask
+                    )
+                    updateSessionPlan(currentPlan)
+                }
+
                 // 3. STATE: OBSERVING
                 updateAgentSessionStatus(AgentTaskStatus.OBSERVING)
                 delay(120L)
@@ -1512,6 +1574,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     } else {
                         appendLine("\n[UBUNTU TERMINAL: Command failed with the error shown in the terminal output above. Analyze the terminal output, inspect errors, and run your corrective terminal command in ```bash.]")
+                        if (flailingReport != null) {
+                            appendLine()
+                            appendLine(flailingReport.guidanceDirective)
+                        }
                     }
                     appendLine("Autonomous plan step ${currentPlan.stepCount} of ${currentPlan.maxSteps} executed.")
                     if (currentPlan.isStepLimitExceeded) {
@@ -1784,7 +1850,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val updatedMessages = curSession.messages.map { msg ->
                 if (msg.isStreaming) msg.copy(isStreaming = false) else msg
             }.filterNot { it.isStreaming && it.content.isBlank() }
-            val s = curSession.copy(messages = updatedMessages)
+            val s = curSession.copy(
+                messages = updatedMessages,
+                status = AgentTaskStatus.PAUSED,
+                updatedAt = System.currentTimeMillis()
+            )
             cur.copy(
                 isAgentLoading = false,
                 currentAgentSession = s,

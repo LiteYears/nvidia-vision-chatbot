@@ -197,6 +197,9 @@ fun ChatDrawerContent(
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     val isChatMode = currentMode == AppMode.CHAT
+                    val isAgentMode = currentMode == AppMode.AGENT
+                    val isTerminalMode = currentMode == AppMode.TERMINAL
+
                     Surface(
                         shape = RoundedCornerShape(9.dp),
                         color = if (isChatMode) MaterialTheme.colorScheme.surface else Color.Transparent,
@@ -221,14 +224,13 @@ fun ChatDrawerContent(
                                 text = "Chat",
                                 style = MaterialTheme.typography.labelSmall.copy(
                                     fontWeight = if (isChatMode) FontWeight.SemiBold else FontWeight.Normal,
-                                    fontSize = 12.sp,
+                                    fontSize = 11.sp,
                                     color = if (isChatMode) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             )
                         }
                     }
 
-                    val isAgentMode = currentMode == AppMode.AGENT || currentMode == AppMode.TERMINAL
                     Surface(
                         shape = RoundedCornerShape(9.dp),
                         color = if (isAgentMode) MaterialTheme.colorScheme.surface else Color.Transparent,
@@ -243,18 +245,49 @@ fun ChatDrawerContent(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(
-                                imageVector = Icons.Outlined.Terminal,
+                                imageVector = Icons.Outlined.SmartToy,
                                 contentDescription = null,
                                 tint = if (isAgentMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
                                 modifier = Modifier.size(14.dp)
                             )
                             Spacer(modifier = Modifier.width(4.dp))
                             Text(
-                                text = "Agent (Terminal)",
+                                text = "Agent",
                                 style = MaterialTheme.typography.labelSmall.copy(
                                     fontWeight = if (isAgentMode) FontWeight.SemiBold else FontWeight.Normal,
-                                    fontSize = 12.sp,
+                                    fontSize = 11.sp,
                                     color = if (isAgentMode) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            )
+                        }
+                    }
+
+                    Surface(
+                        shape = RoundedCornerShape(9.dp),
+                        color = if (isTerminalMode) MaterialTheme.colorScheme.surface else Color.Transparent,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(9.dp))
+                            .clickable { onModeChange(AppMode.TERMINAL) }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(vertical = 6.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Terminal,
+                                contentDescription = null,
+                                tint = if (isTerminalMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "Terminal",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontWeight = if (isTerminalMode) FontWeight.SemiBold else FontWeight.Normal,
+                                    fontSize = 11.sp,
+                                    color = if (isTerminalMode) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             )
                         }

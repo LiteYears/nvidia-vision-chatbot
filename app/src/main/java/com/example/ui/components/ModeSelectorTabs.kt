@@ -64,10 +64,18 @@ fun ModeSelectorTabs(
             )
 
             ModeTabItem(
-                title = "Agent (Ubuntu Terminal)",
-                icon = Icons.Outlined.Terminal,
+                title = "Agent",
+                icon = Icons.Outlined.SmartToy,
                 isSelected = currentMode == AppMode.AGENT,
                 onClick = { onModeChange(AppMode.AGENT) },
+                modifier = Modifier.weight(1f)
+            )
+
+            ModeTabItem(
+                title = "Terminal",
+                icon = Icons.Outlined.Terminal,
+                isSelected = currentMode == AppMode.TERMINAL,
+                onClick = { onModeChange(AppMode.TERMINAL) },
                 modifier = Modifier.weight(1f)
             )
         }
@@ -100,7 +108,13 @@ private fun ModeTabItem(
         modifier = modifier
             .clip(RoundedCornerShape(18.dp))
             .clickable { onClick() }
-            .testTag(if (title.contains("Chat")) "mode_tab_chat" else "mode_tab_agent")
+            .testTag(
+                when (title) {
+                    "Chat" -> "mode_tab_chat"
+                    "Terminal" -> "mode_tab_terminal"
+                    else -> "mode_tab_agent"
+                }
+            )
     ) {
         Row(
             modifier = Modifier.padding(vertical = 7.dp, horizontal = 12.dp),

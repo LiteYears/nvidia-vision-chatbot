@@ -14,7 +14,7 @@ import java.util.UUID
  * Tool for reading all file types safely within the agent workspace.
  *
  * Supports:
- * - Text, source code, data, and configurations (UTF-8)
+ * - Text, source code, data, and configurations (UTF-8) with optional line range and line numbers
  * - Binary files, images, archives, datasets, and executables (Base64, Hex dump, or structured metadata summary)
  * - Configurable byte limits to prevent excessive context consumption
  */
@@ -25,13 +25,32 @@ class FileReadTool(
     override val definition: ToolDefinition = ToolDefinition(
         name = "file_read",
         description = "Reads the content of any file (text, source code, data, or binary) located within the agent workspace. " +
-            "Supports size limits and encodings ('auto', 'utf-8', 'base64', 'hex') to handle all file formats cleanly.",
+            "Supports line-by-line inspection (start_line, end_line), line numbers, and encodings ('auto', 'utf-8', 'base64', 'hex').",
         parameters = listOf(
             ToolParameter(
                 name = "path",
                 type = "string",
                 description = "Relative path of the file to read (e.g. 'notes.txt', 'src/pipeline.py', 'data/image.png')",
                 required = true
+            ),
+            ToolParameter(
+                name = "start_line",
+                type = "number",
+                description = "Optional 1-indexed starting line number for slicing text files",
+                required = false
+            ),
+            ToolParameter(
+                name = "end_line",
+                type = "number",
+                description = "Optional 1-indexed ending line number for slicing text files (inclusive)",
+                required = false
+            ),
+            ToolParameter(
+                name = "show_line_numbers",
+                type = "boolean",
+                description = "Whether to prefix each line with its 1-indexed line number (default: false, auto-enabled if line range specified)",
+                required = false,
+                default = false
             ),
             ToolParameter(
                 name = "max_bytes",
@@ -74,10 +93,43 @@ class FileReadTool(
         }
 
         if (!targetFile.exists()) {
+            val availableFiles = try {
+                workspaceManager.listWorkspaceFiles()
+                    .filter { !it.isDirectory }
+                    .map { it.relativePath }
+            } catch (_: Exception) {
+                emptyList()
+            }
+            val baseName = File(requestedPath).name
+            val matching = availableFiles.filter { it.endsWith(baseName) || it.contains(baseName) }
+
+            val errorMsg = buildString {
+                appendLine("File not found: '$requestedPath'")
+                if (matching.isNotEmpty()) {
+                    appendLine("\nDid you mean:")
+                    for (m in matching) {
+                        appendLine("  $m")
+                    }
+                }
+                if (availableFiles.isNotEmpty()) {
+                    appendLine("\nAvailable files in workspace:")
+                    for (f in availableFiles.take(15)) {
+                        appendLine("  - $f")
+                    }
+                    if (availableFiles.size > 15) {
+                        appendLine("  ... (${availableFiles.size - 15} more files)")
+                    }
+                } else {
+                    appendLine("\n(Workspace is currently empty)")
+                }
+                appendLine("\nRecovery advice:")
+                appendLine("Inspect the workspace with 'file_list' or create the file using 'file_write'.")
+            }
+
             return ToolResult.failure(
                 callId = callId,
                 toolName = definition.name,
-                error = "File not found: '$requestedPath'"
+                error = errorMsg.trim()
             )
         }
 
@@ -97,6 +149,22 @@ class FileReadTool(
 
         val encoding = arguments["encoding"]?.toString()?.trim()?.lowercase() ?: "auto"
 
+        val startLineArg = when (val sl = arguments["start_line"] ?: arguments["from_line"]) {
+            is Number -> sl.toInt()
+            is String -> sl.toIntOrNull()
+            else -> null
+        }
+        val endLineArg = when (val el = arguments["end_line"] ?: arguments["to_line"]) {
+            is Number -> el.toInt()
+            is String -> el.toIntOrNull()
+            else -> null
+        }
+        val showLineNumbers = when (val sln = arguments["show_line_numbers"] ?: arguments["line_numbers"]) {
+            is Boolean -> sln
+            is String -> sln.equals("true", ignoreCase = true)
+            else -> (startLineArg != null || endLineArg != null)
+        }
+
         return try {
             val totalSize = targetFile.length()
             if (totalSize == 0L) {
@@ -109,6 +177,34 @@ class FileReadTool(
 
             val isBinary = workspaceManager.isBinaryFile(targetFile)
             val typeInfo = workspaceManager.getFileTypeInfo(targetFile)
+
+            // If line slicing was requested on a text file
+            if (!isBinary && (startLineArg != null || endLineArg != null || showLineNumbers)) {
+                val allLines = targetFile.readLines(Charsets.UTF_8)
+                val totalLines = allLines.size
+
+                val startLine = (startLineArg ?: 1).coerceIn(1, maxOf(1, totalLines))
+                val endLine = (endLineArg ?: totalLines).coerceIn(startLine, maxOf(startLine, totalLines))
+
+                val slicedLines = if (totalLines == 0) emptyList() else allLines.subList(startLine - 1, minOf(endLine, totalLines))
+                val formattedSlice = buildString {
+                    appendLine("[$requestedPath: lines $startLine to $endLine of $totalLines]")
+                    slicedLines.forEachIndexed { idx, line ->
+                        val currentLineNum = startLine + idx
+                        if (showLineNumbers) {
+                            appendLine(String.format(java.util.Locale.US, "%4d: %s", currentLineNum, line))
+                        } else {
+                            appendLine(line)
+                        }
+                    }
+                }.trimEnd()
+
+                return ToolResult.success(
+                    callId = callId,
+                    toolName = definition.name,
+                    result = formattedSlice
+                )
+            }
 
             val bytesToRead = minOf(totalSize, maxBytes.toLong()).toInt()
             val buffer = ByteArray(bytesToRead)

@@ -26,4 +26,16 @@ interface CommandRunner {
         timeoutMs: Long,
         maxOutputBytes: Int
     ): CommandExecutionResult
+
+    /**
+     * Executes the command targeting a specific environment ('ubuntu', 'termux', or 'auto').
+     */
+    suspend fun run(
+        command: String,
+        workingDir: File,
+        timeoutMs: Long,
+        maxOutputBytes: Int,
+        environment: String
+    ): CommandExecutionResult = run(command, workingDir, timeoutMs, maxOutputBytes)
 }
+

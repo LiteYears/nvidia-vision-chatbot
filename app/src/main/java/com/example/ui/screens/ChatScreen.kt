@@ -452,7 +452,7 @@ fun ChatScreen(
                 }
             },
             bottomBar = {
-                val shouldShowBottomBar = uiState.currentMode == AppMode.CHAT || uiState.currentAgentSession != null
+                val shouldShowBottomBar = uiState.currentMode == AppMode.CHAT || (uiState.currentMode == AppMode.AGENT && uiState.currentAgentSession != null)
 
                 if (shouldShowBottomBar) {
                     // Floating chat/agent input card positioned cleanly above the keyboard or navigation bar
@@ -567,7 +567,8 @@ fun ChatScreen(
                     .fillMaxSize()
                     .padding(paddingValues)
             ) {
-                if (uiState.currentMode == AppMode.CHAT) {
+                when (uiState.currentMode) {
+                    AppMode.CHAT -> {
                     // Chat Mode Content (100% Intact)
                     if (uiState.messages.isEmpty()) {
                         // Clean landing screen with ONLY the animated logo and dynamic greeting
@@ -644,8 +645,8 @@ fun ChatScreen(
                             }
                         }
                     }
-                } else {
-                    // Agent Mode Content
+                    AppMode.AGENT -> {
+                        // Agent Mode Content
                     if (uiState.currentAgentSession == null) {
                         AgentGoalWelcomeView(
                             goalInput = uiState.agentInputText,
@@ -734,6 +735,17 @@ fun ChatScreen(
                                 }
                             }
                         }
+                    }
+                    AppMode.TERMINAL -> {
+                        TerminalScreen(
+                            state = terminalState,
+                            onSendCommand = viewModel::executeTerminalCommand,
+                            onInputChange = viewModel::onTerminalInputChanged,
+                            onClearTerminal = viewModel::clearTerminal,
+                            onReinitializeEnv = { viewModel.initializeTermuxEnvironment(force = true) },
+                            onHistoryNavigate = viewModel::navigateTerminalHistory,
+                            modifier = Modifier.fillMaxSize()
+                        )
                     }
                 }
             }

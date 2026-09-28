@@ -3127,7 +3127,55 @@ class PythonInterpreter(
                 val members = mapOf<String, Any?>(
                     "TestCase" to testCaseClass,
                     "main" to PyBuiltinFunc("main") { _, _ ->
-                        appendStdout("\n----------------------------------------------------------------------\nRan tests\n\nOK\n")
+                        val testFuncs = mutableListOf<Pair<String, UserDefinedFunction>>()
+                        for ((name, value) in globalScope) {
+                            if (name.startsWith("test_") && value is UserDefinedFunction) {
+                                testFuncs.add(name to value)
+                            }
+                        }
+                        if (testFuncs.isEmpty()) {
+                            appendStdout("\n----------------------------------------------------------------------\nRan 0 tests in 0.000s\n\nOK\n")
+                            return@PyBuiltinFunc null
+                        }
+                        var passed = 0
+                        var failed = 0
+                        val failureLogs = StringBuilder()
+                        val dots = StringBuilder()
+
+                        for ((tName, fn) in testFuncs) {
+                            try {
+                                callFunction(fn, emptyList(), emptyMap(), line)
+                                dots.append(".")
+                                passed++
+                            } catch (e: PythonRuntimeException) {
+                                dots.append("F")
+                                failed++
+                                failureLogs.appendLine("======================================================================")
+                                failureLogs.appendLine("FAIL: $tName")
+                                failureLogs.appendLine("----------------------------------------------------------------------")
+                                failureLogs.appendLine(formatTraceback(e))
+                            } catch (e: Exception) {
+                                dots.append("E")
+                                failed++
+                                failureLogs.appendLine("======================================================================")
+                                failureLogs.appendLine("ERROR: $tName")
+                                failureLogs.appendLine("----------------------------------------------------------------------")
+                                failureLogs.appendLine(e.message ?: "Unknown error")
+                            }
+                        }
+
+                        appendStdout(dots.toString())
+                        if (failureLogs.isNotEmpty()) {
+                            appendStdout("\n$failureLogs")
+                        }
+                        appendStdout("\n----------------------------------------------------------------------\n")
+                        appendStdout("Ran ${testFuncs.size} tests in 0.005s\n\n")
+                        if (failed > 0) {
+                            appendStdout("FAILED (failures=$failed)\n")
+                            throw PythonSystemExit(1)
+                        } else {
+                            appendStdout("OK\n")
+                        }
                         null
                     },
                     "skip" to PyBuiltinFunc("skip") { inner, _ -> inner.firstOrNull() },

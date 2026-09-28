@@ -211,6 +211,13 @@ class RuntimeCapabilityDetector(
                 appendLine("\nRecommended Alternative:")
                 appendLine("-> $alternativeAdvice")
             }
+            val aptPkg = com.example.agent.proot.ProotAptManager.findPackageProviding(executable)
+            if (aptPkg != null) {
+                appendLine("\nPackage Installation:")
+                appendLine("-> Command '$executable' is available via Ubuntu package '${aptPkg.name}'.")
+                appendLine("-> Run 'apt install -y ${aptPkg.name}' via 'run_command' to install it into the Ubuntu environment.")
+            }
+
             appendLine("\nAvailable Capabilities:")
             appendLine("- $availableList")
             if (unavailableList.isNotBlank()) {
@@ -218,13 +225,14 @@ class RuntimeCapabilityDetector(
                 appendLine("- $unavailableList")
             }
             appendLine("\nNext Steps:")
-            appendLine("Do NOT retry running '$executable' via run_command.")
-            if (executable.startsWith("python")) {
+            if (aptPkg != null) {
+                appendLine("-> Install '${aptPkg.name}' with 'apt install -y ${aptPkg.name}' using run_command, then retry.")
+            } else if (executable.startsWith("python")) {
                 appendLine("-> Use 'python_execute' with 'script_path' or 'code' to execute Python tasks.")
             } else if (executable == "curl" || executable == "wget") {
                 appendLine("-> Use 'web_open' with parameter 'url' to fetch and read web pages.")
             } else {
-                appendLine("-> Switch to a supported tool (web_open, file_write, python_execute, run_command for safe utilities) to complete the goal.")
+                appendLine("-> Switch to a supported tool or check if package can be installed with 'apt search $executable'.")
             }
         }.trim()
     }
@@ -255,7 +263,8 @@ class RuntimeCapabilityDetector(
         sb.append("\n**WORKSPACE & EXECUTION STANDARDS**:\n")
         sb.append("- Standard folders are pre-created: `src/`, `scripts/`, `data/`, `output/`, `docs/`, `lib/`, `tests/`, `bin/`.\n")
         sb.append("- All file formats are supported: source code, text, json, csv, yaml, images, archives, binaries (via Base64).\n")
-        sb.append("- Package management: install Python packages with `pip install <package>` (stored in `lib/`), and Node modules with `npm install <package>`.\n")
+        sb.append("- Full Ubuntu 22.04 LTS userspace with persistent rootfs, bash, apt, dpkg, deb archive extraction, Python 3, and coreutils.\n")
+        sb.append("- Package management: install Ubuntu packages with `apt install -y <pkg>`, Python packages with `pip install <package>`, and Node modules with `npm install <package>`.\n")
         sb.append("- Both `python_execute` and `run_command` are available for executing code and terminal commands without restrictions.\n")
 
         return sb.toString()
@@ -263,10 +272,20 @@ class RuntimeCapabilityDetector(
 
     companion object {
         private fun defaultSearchPaths(): List<File> {
+            val rootfsDir = com.example.agent.proot.ProotRootfsManager.getInstance().persistentRootfsDir
+            val rootfsDirs = listOf(
+                File(rootfsDir, "usr/local/bin"),
+                File(rootfsDir, "usr/bin"),
+                File(rootfsDir, "bin"),
+                File(rootfsDir, "usr/local/sbin"),
+                File(rootfsDir, "usr/sbin"),
+                File(rootfsDir, "sbin"),
+                File("/data/data/com.termux/files/usr/bin")
+            )
             val pathEnv = System.getenv("PATH") ?: "/system/bin:/system/xbin:/bin:/usr/bin:/usr/local/bin"
-            return pathEnv.split(':')
+            val envDirs = pathEnv.split(':')
                 .map { File(it.trim()) }
-                .filter { it.isDirectory }
+            return (rootfsDirs + envDirs).distinct().filter { it.isDirectory }
         }
     }
 }

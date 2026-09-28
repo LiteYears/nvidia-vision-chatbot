@@ -27,6 +27,14 @@ class ProcessCommandRunner(
         workingDir: File,
         timeoutMs: Long,
         maxOutputBytes: Int
+    ): CommandExecutionResult = run(command, workingDir, timeoutMs, maxOutputBytes, "ubuntu")
+
+    override suspend fun run(
+        command: String,
+        workingDir: File,
+        timeoutMs: Long,
+        maxOutputBytes: Int,
+        environment: String
     ): CommandExecutionResult = withContext(Dispatchers.IO) {
         val trimmed = command.trim()
         if (trimmed.isBlank()) {
@@ -46,7 +54,8 @@ class ProcessCommandRunner(
             command = trimmed,
             workingDir = workingDir,
             timeoutMs = timeoutMs,
-            maxOutputBytes = maxOutputBytes
+            maxOutputBytes = maxOutputBytes,
+            environment = environment
         )
     }
 }

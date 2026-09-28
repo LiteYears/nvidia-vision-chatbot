@@ -9,15 +9,28 @@ import java.util.UUID
 
 /**
  * Tool for displaying a structured visual directory tree of the agent workspace.
- * Helps the autonomous agent quickly understand multi-directory project layouts.
+ * Helps the autonomous agent quickly understand multi-directory project layouts,
+ * while automatically filtering out internal noise directories (.git, node_modules, build)
+ * and preventing symlink recursion loops.
  */
 class FileTreeTool(
     private val workspaceManager: AgentWorkspaceManager = AgentWorkspaceManager.getInstance()
 ) : AgentTool {
 
+    companion object {
+        const val MAX_ENTRIES_DEFAULT = 150
+
+        val DEFAULT_IGNORED_DIRS = setOf(
+            ".git", ".rootfs", "ubuntu_rootfs", "node_modules", "__pycache__", ".gradle",
+            "build", ".idea", ".vscode", "venv", ".venv", ".pytest_cache",
+            ".mypy_cache", "target", "dist", ".cache"
+        )
+    }
+
     override val definition: ToolDefinition = ToolDefinition(
         name = "file_tree",
-        description = "Displays a structured visual directory tree of the agent workspace, showing all directories, files, and sizes.",
+        description = "Displays a structured visual directory tree of the agent workspace, showing all directories, files, and sizes. " +
+            "Automatically filters noise directories (.git, node_modules) and guards against cyclic symlinks.",
         parameters = listOf(
             ToolParameter(
                 name = "path",
@@ -32,6 +45,13 @@ class FileTreeTool(
                 description = "Maximum directory nesting depth to traverse (default: 4, maximum: 8)",
                 required = false,
                 default = 4
+            ),
+            ToolParameter(
+                name = "show_hidden",
+                type = "boolean",
+                description = "Whether to include hidden and build directories like .git or node_modules (default: false)",
+                required = false,
+                default = false
             )
         )
     )
@@ -44,6 +64,12 @@ class FileTreeTool(
             is String -> md.toIntOrNull() ?: 4
             else -> 4
         }.coerceIn(1, 8)
+
+        val showHidden = when (val sh = arguments["show_hidden"] ?: arguments["include_ignored"]) {
+            is Boolean -> sh
+            is String -> sh.equals("true", ignoreCase = true)
+            else -> false
+        }
 
         val targetDir: File
         try {
@@ -75,6 +101,10 @@ class FileTreeTool(
 
         var dirCount = 0
         var fileCount = 0
+        var totalEntries = 0
+        var wasTruncated = false
+        val visitedCanonicals = mutableSetOf<String>()
+
         val sb = StringBuilder()
         val rootRel = try {
             workspaceManager.getRelativePath(targetDir).ifBlank { "." }
@@ -85,13 +115,34 @@ class FileTreeTool(
         sb.appendLine("WORKSPACE TREE ($rootRel):")
 
         fun renderBranch(dir: File, prefix: String, currentDepth: Int) {
-            if (currentDepth > maxDepth) return
-            val entries = dir.listFiles()?.sortedWith(
-                compareBy<File> { !it.isDirectory }.thenBy { it.name.lowercase() }
-            ) ?: return
+            if (currentDepth > maxDepth || totalEntries >= MAX_ENTRIES_DEFAULT) return
 
-            entries.forEachIndexed { index, file ->
-                val isLast = index == entries.size - 1
+            val canonical = try { dir.canonicalPath } catch (_: Exception) { dir.absolutePath }
+            if (!visitedCanonicals.add(canonical)) {
+                sb.appendLine("$prefix└── [Cyclic symlink/directory cycle detected]")
+                return
+            }
+
+            val rawEntries = dir.listFiles() ?: return
+            val filteredEntries = rawEntries.filter { file ->
+                if (showHidden || file == targetDir) {
+                    true
+                } else {
+                    val name = file.name
+                    !name.startsWith(".") && !DEFAULT_IGNORED_DIRS.contains(name.lowercase())
+                }
+            }.sortedWith(
+                compareBy<File> { !it.isDirectory }.thenBy { it.name.lowercase() }
+            )
+
+            filteredEntries.forEachIndexed { index, file ->
+                if (totalEntries >= MAX_ENTRIES_DEFAULT) {
+                    wasTruncated = true
+                    return
+                }
+
+                totalEntries++
+                val isLast = index == filteredEntries.size - 1
                 val connector = if (isLast) "└── " else "├── "
                 val childPrefix = if (isLast) "$prefix    " else "$prefix│   "
 
@@ -116,7 +167,11 @@ class FileTreeTool(
             )
         }
 
-        sb.appendLine("\nTotal: $fileCount file(s), $dirCount directory(ies)")
+        sb.appendLine()
+        if (wasTruncated) {
+            sb.appendLine("[Tree output capped at $MAX_ENTRIES_DEFAULT entries. Pass a specific directory in 'path' to inspect deeper subtrees.]")
+        }
+        sb.appendLine("Total: $fileCount file(s), $dirCount directory(ies)")
 
         return ToolResult.success(
             callId = callId,

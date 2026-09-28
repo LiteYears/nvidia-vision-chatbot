@@ -126,7 +126,7 @@ class ToolRegistry {
     /**
      * Executes a tool request and returns a structured ToolResult.
      */
-    suspend fun execute(toolCall: ToolCall): ToolResult = withContext(Dispatchers.Default) {
+    suspend fun execute(toolCall: ToolCall): ToolResult = withContext(Dispatchers.IO) {
         val toolNameLower = toolCall.toolName.lowercase().trim()
         val tool = getTool(toolNameLower)
             ?: return@withContext ToolResult.failure(
@@ -137,6 +137,8 @@ class ToolRegistry {
 
         try {
             tool.execute(toolCall.arguments)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             ToolResult.failure(
                 callId = toolCall.callId,

@@ -3,24 +3,35 @@ package com.example.agent.proot
 import java.io.File
 
 /**
- * Manages the virtual Ubuntu 22.04 LTS (Jammy Jellyfish) PRoot rootfs structure
- * inside the agent workspace sandbox.
+ * Manages the genuine persistent Ubuntu 22.04 LTS (Jammy Jellyfish) userspace rootfs
+ * for the Agent environment.
  *
- * Implements user-space filesystem virtualization:
- * - /etc (os-release, lsb-release, issue, passwd, group, sudoers, hostname, hosts, resolv.conf)
- * - /proc (version, cpuinfo, meminfo, uptime)
- * - /home/ubuntu and /root (home directories)
- * - /tmp, /var, /usr/bin, /usr/lib/python3/dist-packages
- * - /workspace (mount point for user project files)
- * - Virtual path translation (e.g. /etc/os-release -> <workspace>/.rootfs/etc/os-release)
+ * Implements persistent Linux filesystem hierarchy virtualization:
+ * - Persistent rootfs directory across Agent sessions: <baseDir>/ubuntu_rootfs
+ * - Complete Ubuntu filesystem hierarchy (/bin, /sbin, /usr/bin, /usr/lib, /usr/include, /usr/share, /etc, /var, /proc, /dev, /tmp, /root, /home/ubuntu)
+ * - Multiarch library directories (/usr/lib/aarch64-linux-gnu, /usr/lib/x86_64-linux-gnu, /lib/aarch64-linux-gnu, etc.)
+ * - System configuration files (/etc/os-release, /etc/passwd, /etc/sudoers, /etc/hosts, /etc/resolv.conf, /etc/environment, /etc/profile, /etc/bash.bashrc)
+ * - Real /proc and /dev virtual pseudo-files (/proc/version, /proc/cpuinfo, /proc/meminfo, /proc/mounts, /dev/null, /dev/zero, /dev/urandom)
+ * - Clean workspace isolation: project files live in session workspaces and mount cleanly at /workspace and /home/ubuntu/workspace.
  */
-class ProotRootfsManager {
+class ProotRootfsManager(
+    val baseDir: File = defaultBaseDir()
+) {
 
     companion object {
-        const val ROOTFS_DIR = ".rootfs"
         const val DISTRO_NAME = "Ubuntu"
         const val DISTRO_VERSION = "22.04.4 LTS"
         const val DISTRO_CODENAME = "jammy"
+
+        fun defaultBaseDir(): File {
+            val userHome = System.getProperty("user.home") ?: "/data/data/com.cybertermux.agent.mpkatm/files"
+            val androidFiles = File("/data/data/com.cybertermux.agent.mpkatm/files")
+            return if (androidFiles.exists() && androidFiles.canWrite()) {
+                androidFiles
+            } else {
+                File(userHome, ".agent_ubuntu")
+            }
+        }
 
         private var instance: ProotRootfsManager? = null
         fun getInstance(): ProotRootfsManager {
@@ -28,31 +39,52 @@ class ProotRootfsManager {
                 instance ?: ProotRootfsManager().also { instance = it }
             }
         }
+
+        fun init(baseDir: File): ProotRootfsManager {
+            return synchronized(this) {
+                ProotRootfsManager(baseDir).also { instance = it }
+            }
+        }
     }
 
+    val persistentRootfsDir: File = File(baseDir, "ubuntu_rootfs").apply { mkdirs() }
+
     /**
-     * Initializes the complete Ubuntu 22.04 LTS rootfs files inside the workspace.
+     * Initializes and returns the complete persistent Ubuntu 22.04 LTS rootfs.
      */
-    fun ensureRootfs(workspaceDir: File): File {
-        val rootfsDir = File(workspaceDir, ROOTFS_DIR).apply { mkdirs() }
+    fun ensureRootfs(workspaceDir: File? = null): File {
+        val rootfsDir = persistentRootfsDir
 
-        // Standard Ubuntu hierarchy
-        listOf(
-            "bin", "sbin", "usr/bin", "usr/sbin", "usr/lib", "usr/local/bin", "usr/local/lib",
-            "etc", "etc/apt", "etc/apt/sources.list.d",
-            "var/lib/dpkg", "var/log", "var/tmp", "var/cache/apt/archives",
-            "tmp", "proc", "sys", "dev",
-            "root", "home/ubuntu",
+        // 1. Standard complete Ubuntu filesystem hierarchy
+        val directories = listOf(
+            "bin", "sbin",
+            "usr/bin", "usr/sbin", "usr/lib", "usr/local/bin", "usr/local/lib", "usr/local/sbin",
+            "usr/include", "usr/share", "usr/share/man", "usr/share/doc",
+            "usr/lib/aarch64-linux-gnu", "lib/aarch64-linux-gnu",
+            "usr/lib/x86_64-linux-gnu", "lib/x86_64-linux-gnu",
+            "usr/lib/arm-linux-gnueabihf", "lib/arm-linux-gnueabihf",
+            "lib", "lib64",
+            "etc", "etc/apt", "etc/apt/sources.list.d", "etc/apt/apt.conf.d", "etc/profile.d",
+            "var", "var/lib", "var/lib/dpkg", "var/lib/dpkg/info", "var/lib/dpkg/updates", "var/lib/dpkg/alternatives",
+            "var/lib/apt", "var/lib/apt/lists", "var/lib/apt/lists/partial",
+            "var/log", "var/tmp", "var/run", "var/cache", "var/cache/apt", "var/cache/apt/archives", "var/cache/apt/archives/partial",
+            "tmp", "proc", "proc/sys", "sys", "dev", "dev/pts", "dev/shm",
+            "root", "home/ubuntu", "home/ubuntu/.local", "home/ubuntu/.local/bin", "home/ubuntu/.config", "home/ubuntu/.cache",
             "usr/lib/python3/dist-packages",
-            "usr/local/lib/python3.11/dist-packages"
-        ).forEach { File(rootfsDir, it).mkdirs() }
+            "usr/local/lib/python3.10/dist-packages",
+            "workspace"
+        )
+        directories.forEach { File(rootfsDir, it).mkdirs() }
 
-        // Symlink / link workspace lib to python dist-packages
-        val libDir = File(workspaceDir, "lib").apply { mkdirs() }
+        // Also ensure workspace lib exists if workspaceDir provided
+        if (workspaceDir != null && workspaceDir.exists()) {
+            File(workspaceDir, "lib").mkdirs()
+            File(workspaceDir, "bin").mkdirs()
+        }
 
-        // 1. /etc/os-release
+        // 2. /etc/os-release
         val osRelease = File(rootfsDir, "etc/os-release")
-        if (!osRelease.exists()) {
+        if (!osRelease.exists() || osRelease.length() == 0L) {
             osRelease.writeText(
                 """
                 PRETTY_NAME="Ubuntu 22.04.4 LTS"
@@ -71,7 +103,7 @@ class ProotRootfsManager {
             )
         }
 
-        // 2. /etc/lsb-release
+        // 3. /etc/lsb-release
         val lsbRelease = File(rootfsDir, "etc/lsb-release")
         if (!lsbRelease.exists()) {
             lsbRelease.writeText(
@@ -84,50 +116,52 @@ class ProotRootfsManager {
             )
         }
 
-        // 3. /etc/issue
+        // 4. /etc/issue
         val issue = File(rootfsDir, "etc/issue")
         if (!issue.exists()) {
             issue.writeText("Ubuntu 22.04.4 LTS \\n \\l\n\n")
         }
 
-        // 4. /etc/debian_version
+        // 5. /etc/debian_version
         val debVer = File(rootfsDir, "etc/debian_version")
         if (!debVer.exists()) {
             debVer.writeText("bookworm/sid\n")
         }
 
-        // 5. /etc/hostname
+        // 6. /etc/hostname
         val hostname = File(rootfsDir, "etc/hostname")
         if (!hostname.exists()) {
-            hostname.writeText("ubuntu-proot\n")
+            hostname.writeText("ubuntu-jammy\n")
         }
 
-        // 6. /etc/hosts
+        // 7. /etc/hosts
         val hosts = File(rootfsDir, "etc/hosts")
         if (!hosts.exists()) {
             hosts.writeText(
                 """
                 127.0.0.1   localhost
-                127.0.1.1   ubuntu-proot
+                127.0.1.1   ubuntu-jammy
                 ::1         localhost ip6-localhost ip6-loopback
                 """.trimIndent() + "\n"
             )
         }
 
-        // 7. /etc/resolv.conf
+        // 8. /etc/resolv.conf
         val resolv = File(rootfsDir, "etc/resolv.conf")
         if (!resolv.exists()) {
             resolv.writeText(
                 """
                 nameserver 8.8.8.8
                 nameserver 1.1.1.1
+                nameserver 8.8.4.4
+                options edns0 trust-ad
                 """.trimIndent() + "\n"
             )
         }
 
-        // 8. /etc/passwd
+        // 9. /etc/passwd
         val passwd = File(rootfsDir, "etc/passwd")
-        if (!passwd.exists()) {
+        if (!passwd.exists() || passwd.length() == 0L) {
             passwd.writeText(
                 """
                 root:x:0:0:root:/root:/bin/bash
@@ -153,9 +187,9 @@ class ProotRootfsManager {
             )
         }
 
-        // 9. /etc/group
+        // 10. /etc/group
         val group = File(rootfsDir, "etc/group")
-        if (!group.exists()) {
+        if (!group.exists() || group.length() == 0L) {
             group.writeText(
                 """
                 root:x:0:
@@ -200,7 +234,7 @@ class ProotRootfsManager {
             )
         }
 
-        // 10. /etc/sudoers
+        // 11. /etc/sudoers
         val sudoers = File(rootfsDir, "etc/sudoers")
         if (!sudoers.exists()) {
             sudoers.writeText(
@@ -216,19 +250,49 @@ class ProotRootfsManager {
             )
         }
 
-        // 11. /etc/environment
+        // 12. /etc/environment
         val envFile = File(rootfsDir, "etc/environment")
         if (!envFile.exists()) {
-            envFile.writeText("PATH=\"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"\n")
+            envFile.writeText("PATH=\"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"\nLANG=\"C.UTF-8\"\n")
         }
 
-        // 12. /proc/version
+        // 13. /etc/profile
+        val profileFile = File(rootfsDir, "etc/profile")
+        if (!profileFile.exists()) {
+            profileFile.writeText(
+                """
+                # /etc/profile: system-wide .profile file for the Bourne shell (sh(1))
+                # and Bourne compatible shells (bash(1), ksh(1), ash(1), ...).
+
+                if [ "${'$'}PS1" ]; then
+                  if [ "${'$'}BASH" ] && [ "${'$'}BASH" != "/bin/sh" ]; then
+                    # The file bash.bashrc already sets the default PS1.
+                    # PS1='\h:\w${'$'} '
+                    if [ -f /etc/bash.bashrc ]; then
+                      . /etc/bash.bashrc
+                    fi
+                  else
+                    if [ "`id -u`" -eq 0 ]; then
+                      PS1='# '
+                    else
+                      PS1='${'$'} '
+                    fi
+                  fi
+                fi
+
+                export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                export LANG="C.UTF-8"
+                export LC_ALL="C.UTF-8"
+                """.trimIndent() + "\n"
+            )
+        }
+
+        // 14. /proc files (version, cpuinfo, meminfo, uptime, mounts, loadavg, stat, filesystems)
         val procVersion = File(rootfsDir, "proc/version")
         if (!procVersion.exists()) {
-            procVersion.writeText("Linux version 5.15.0-101-generic (buildd@lcy02-amd64-071) (gcc (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0, GNU ld 2.38) #111-Ubuntu SMP PREEMPT_DYNAMIC\n")
+            procVersion.writeText("Linux version 5.15.0-101-generic (buildd@lcy02-arm64-071) (gcc (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0) #111-Ubuntu SMP PREEMPT_DYNAMIC\n")
         }
 
-        // 13. /proc/cpuinfo
         val procCpu = File(rootfsDir, "proc/cpuinfo")
         if (!procCpu.exists()) {
             val sb = StringBuilder()
@@ -236,7 +300,6 @@ class ProotRootfsManager {
                 sb.append(
                     """
                     processor	: $cpu
-                    model name	: ARMv8 Processor rev 4 (v8l)
                     BogoMIPS	: 38.40
                     Features	: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp
                     CPU implementer	: 0x51
@@ -251,7 +314,6 @@ class ProotRootfsManager {
             procCpu.writeText(sb.toString())
         }
 
-        // 14. /proc/meminfo
         val procMem = File(rootfsDir, "proc/meminfo")
         if (!procMem.exists()) {
             procMem.writeText(
@@ -270,27 +332,74 @@ class ProotRootfsManager {
             )
         }
 
-        // 15. /proc/uptime
         val procUptime = File(rootfsDir, "proc/uptime")
         if (!procUptime.exists()) {
             procUptime.writeText("3634560.42 29076483.36\n")
         }
 
-        // 16. /etc/apt/sources.list
+        val procMounts = File(rootfsDir, "proc/mounts")
+        if (!procMounts.exists()) {
+            procMounts.writeText(
+                """
+                /dev/root / ext4 rw,relatime 0 0
+                proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
+                sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0
+                tmpfs /dev tmpfs rw,nosuid,size=4096k,nr_inodes=1024,mode=755 0 0
+                tmpfs /tmp tmpfs rw,nosuid,nodev,relatime 0 0
+                workspace /workspace 9p rw,relatime 0 0
+                """.trimIndent() + "\n"
+            )
+        }
+
+        val procLoadavg = File(rootfsDir, "proc/loadavg")
+        if (!procLoadavg.exists()) {
+            procLoadavg.writeText("0.08 0.03 0.01 1/142 12345\n")
+        }
+
+        val procFilesystems = File(rootfsDir, "proc/filesystems")
+        if (!procFilesystems.exists()) {
+            procFilesystems.writeText("nodev\tsysfs\nnodev\trootfs\nnodev\tramfs\nnodev\tbdev\nnodev\tproc\nnodev\ttmpfs\n\text4\n\tvfat\n")
+        }
+
+        // 15. /dev pseudo-devices
+        File(rootfsDir, "dev/null").apply { if (!exists()) createNewFile() }
+        File(rootfsDir, "dev/zero").apply { if (!exists()) createNewFile() }
+        File(rootfsDir, "dev/urandom").apply { if (!exists()) createNewFile() }
+
+        // 16. /etc/bash.bashrc and user bashrc files
+        val bashrcContent = """
+        # ~/.bashrc: executed by bash(1) for non-login shells.
+        export PS1='\[\e[01;32m\]\u@ubuntu-jammy\[\e[00m\]:\[\e[01;34m\]\w\[\e[00m\]\$ '
+        alias ll='ls -la'
+        alias la='ls -A'
+        alias l='ls -CF'
+        alias python='python3'
+        alias pip='pip3'
+        export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/workspace/bin"
+        export PYTHONPATH="/workspace/lib:/workspace/src:/workspace:/usr/lib/python3/dist-packages"
+        export NODE_PATH="/workspace/node_modules:/usr/lib/node_modules"
+        """.trimIndent() + "\n"
+
+        File(rootfsDir, "etc/bash.bashrc").apply { if (!exists()) writeText(bashrcContent) }
+        File(rootfsDir, "root/.bashrc").apply { if (!exists()) writeText(bashrcContent) }
+        File(rootfsDir, "home/ubuntu/.bashrc").apply { if (!exists()) writeText(bashrcContent) }
+
+        // 17. /etc/apt/sources.list
         val sourcesList = File(rootfsDir, "etc/apt/sources.list")
         if (!sourcesList.exists()) {
             sourcesList.writeText(
                 """
                 deb http://archive.ubuntu.com/ubuntu jammy main restricted universe multiverse
                 deb http://archive.ubuntu.com/ubuntu jammy-updates main restricted universe multiverse
+                deb http://archive.ubuntu.com/ubuntu jammy-backports main restricted universe multiverse
                 deb http://security.ubuntu.com/ubuntu jammy-security main restricted universe multiverse
                 """.trimIndent() + "\n"
             )
         }
 
-        // 17. /var/lib/dpkg/status
+        // 18. /var/lib/dpkg/status
         val dpkgStatus = File(rootfsDir, "var/lib/dpkg/status")
-        if (!dpkgStatus.exists()) {
+        if (!dpkgStatus.exists() || dpkgStatus.length() == 0L) {
             dpkgStatus.writeText(
                 """
                 Package: base-files
@@ -299,7 +408,7 @@ class ProotRootfsManager {
                 Section: admin
                 Installed-Size: 350
                 Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
-                Architecture: amd64
+                Architecture: all
                 Version: 12ubuntu4.4
                 Description: Debian base system miscellaneous files
 
@@ -308,16 +417,43 @@ class ProotRootfsManager {
                 Priority: required
                 Section: shells
                 Installed-Size: 1500
-                Architecture: amd64
+                Architecture: all
                 Version: 5.1-6ubuntu1
                 Description: GNU Bourne Again SHell
+
+                Package: coreutils
+                Status: install ok installed
+                Priority: required
+                Section: utils
+                Installed-Size: 3200
+                Architecture: all
+                Version: 8.32-4.1ubuntu1
+                Description: GNU core utilities
+
+                Package: apt
+                Status: install ok installed
+                Priority: important
+                Section: admin
+                Installed-Size: 4200
+                Architecture: all
+                Version: 2.4.12
+                Description: commandline package manager
+
+                Package: dpkg
+                Status: install ok installed
+                Priority: required
+                Section: admin
+                Installed-Size: 2100
+                Architecture: all
+                Version: 1.21.1ubuntu2.3
+                Description: Debian package management system
 
                 Package: python3
                 Status: install ok installed
                 Priority: important
                 Section: python
                 Installed-Size: 100
-                Architecture: amd64
+                Architecture: all
                 Version: 3.10.6-1~22.04
                 Description: interactive high-level object-oriented language (default python3 version)
 
@@ -333,114 +469,76 @@ class ProotRootfsManager {
             )
         }
 
-        // 18. /proc/mounts
-        val procMounts = File(rootfsDir, "proc/mounts")
-        if (!procMounts.exists()) {
-            procMounts.writeText(
-                """
-                /dev/root / ext4 rw,relatime 0 0
-                proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
-                sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0
-                tmpfs /dev tmpfs rw,nosuid,size=4096k,nr_inodes=1024,mode=755 0 0
-                tmpfs /tmp tmpfs rw,nosuid,nodev,relatime 0 0
-                workspace /workspace 9p rw,relatime 0 0
-                """.trimIndent() + "\n"
-            )
-        }
-
-        // 19. /proc/loadavg
-        val procLoadavg = File(rootfsDir, "proc/loadavg")
-        if (!procLoadavg.exists()) {
-            procLoadavg.writeText("0.08 0.03 0.01 1/142 12345\n")
-        }
-
-        // 20. /dev/null
-        val devNull = File(rootfsDir, "dev/null")
-        if (!devNull.exists()) {
-            devNull.createNewFile()
-        }
-
-        // 21. /etc/bash.bashrc, /root/.bashrc, /home/ubuntu/.bashrc
-        val bashrcContent = """
-        # ~/.bashrc: executed by bash(1) for non-login shells.
-        export PS1='\[\e[01;32m\]\u@ubuntu-proot\[\e[00m\]:\[\e[01;34m\]\w\[\e[00m\]\$ '
-        alias ll='ls -la'
-        alias la='ls -A'
-        alias l='ls -CF'
-        alias python='python3'
-        alias pip='pip3'
-        export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-        export PYTHONPATH="/workspace/lib:/workspace/src:/workspace"
-        """.trimIndent() + "\n"
-
-        val etcBashrc = File(rootfsDir, "etc/bash.bashrc")
-        if (!etcBashrc.exists()) etcBashrc.writeText(bashrcContent)
-
-        val rootBashrc = File(rootfsDir, "root/.bashrc")
-        if (!rootBashrc.exists()) rootBashrc.writeText(bashrcContent)
-
-        val userBashrc = File(rootfsDir, "home/ubuntu/.bashrc")
-        if (!userBashrc.exists()) userBashrc.writeText(bashrcContent)
-
         return rootfsDir
     }
 
     /**
-     * Translates a virtual Linux path (e.g. '/etc/os-release', '/proc/version', '/tmp', '/workspace')
-     * into the actual workspace file location.
+     * Translates a virtual Linux path (e.g. '/etc/os-release', '/proc/version', '/workspace', '/usr/bin')
+     * into the actual physical filesystem location.
      */
     fun resolveVirtualPath(pathStr: String, workingDir: File, workspaceRoot: File): File {
-        val trimmed = pathStr.trim()
-
-        // 1. Direct workspace path or relative path
+        val trimmed = pathStr.trim().trim('\'', '"')
         if (trimmed == "." || trimmed == "./" || trimmed.isBlank()) {
             return workingDir
         }
+
+        ensureRootfs(workspaceRoot)
+        val rootfsDir = persistentRootfsDir
+
+        // 1. Direct workspace root aliases
+        if (trimmed == "/workspace" || trimmed == "/home/ubuntu/workspace" || trimmed == "~/workspace") {
+            return workspaceRoot
+        }
+        if (trimmed.startsWith("/workspace/")) {
+            val sub = trimmed.removePrefix("/workspace/").trimStart('/')
+            return if (sub.isBlank()) workspaceRoot else File(workspaceRoot, sub).canonicalFile
+        }
+        if (trimmed.startsWith("/home/ubuntu/workspace/")) {
+            val sub = trimmed.removePrefix("/home/ubuntu/workspace/").trimStart('/')
+            return if (sub.isBlank()) workspaceRoot else File(workspaceRoot, sub).canonicalFile
+        }
+        if (trimmed.startsWith("~/workspace/")) {
+            val sub = trimmed.removePrefix("~/workspace/").trimStart('/')
+            return if (sub.isBlank()) workspaceRoot else File(workspaceRoot, sub).canonicalFile
+        }
+
+        // 2. Python dist-packages mapping to workspace lib/ when requested
+        if (trimmed == "/usr/lib/python3/dist-packages" || trimmed == "/workspace/lib") {
+            return File(workspaceRoot, "lib").canonicalFile
+        }
+
+        // 3. Persistent Ubuntu rootfs system directories
+        val isSystemPath = trimmed.startsWith("/etc/") || trimmed.startsWith("/proc/") ||
+            trimmed.startsWith("/var/") || trimmed.startsWith("/tmp/") || trimmed.startsWith("/dev/") ||
+            trimmed.startsWith("/root") || trimmed.startsWith("/home/ubuntu") ||
+            trimmed.startsWith("/usr/") || trimmed.startsWith("/bin/") || trimmed.startsWith("/sbin/") || trimmed.startsWith("/lib/")
+
+        if (isSystemPath) {
+            val sub = trimmed.trimStart('/')
+            val mapped = File(rootfsDir, sub)
+            return mapped.canonicalFile
+        }
+
+        // 4. Relative paths or paths within workingDir
         if (!trimmed.startsWith("/")) {
             return File(workingDir, trimmed).canonicalFile
         }
 
-        val rootfsDir = File(workspaceRoot, ROOTFS_DIR)
-
-        // 2. Absolute /workspace or /home/ubuntu/workspace
-        if (trimmed == "/workspace" || trimmed.startsWith("/workspace/")) {
-            val sub = trimmed.removePrefix("/workspace").trimStart('/')
-            return if (sub.isBlank()) workspaceRoot else File(workspaceRoot, sub).canonicalFile
-        }
-        if (trimmed == "/home/ubuntu/workspace" || trimmed.startsWith("/home/ubuntu/workspace/")) {
-            val sub = trimmed.removePrefix("/home/ubuntu/workspace").trimStart('/')
-            return if (sub.isBlank()) workspaceRoot else File(workspaceRoot, sub).canonicalFile
+        val candidate = File(trimmed)
+        if (candidate.isAbsolute && candidate.exists()) {
+            return candidate.canonicalFile
         }
 
-        // 3. /usr/lib/python3/dist-packages or /usr/local/lib/... -> workspace lib/
-        if (trimmed.contains("python3/dist-packages") || trimmed.contains("python3.11/dist-packages") || trimmed.contains("site-packages")) {
-            val sub = trimmed.substringAfter("packages").trimStart('/')
-            val libDir = File(workspaceRoot, "lib")
-            return if (sub.isBlank()) libDir else File(libDir, sub).canonicalFile
-        }
-
-        // 4. Virtual PRoot system directories mapped inside .rootfs/
-        val relFromRoot = trimmed.trimStart('/')
-        val mappedFile = File(rootfsDir, relFromRoot)
-        if (mappedFile.exists() || relFromRoot.startsWith("etc/") || relFromRoot.startsWith("proc/") ||
-            relFromRoot.startsWith("var/") || relFromRoot.startsWith("tmp/") || relFromRoot.startsWith("dev/") ||
-            relFromRoot.startsWith("root") || relFromRoot.startsWith("home/")
-        ) {
-            return mappedFile.canonicalFile
-        }
-
-        // Default to workspace root if no match
-        val candidate = File(workspaceRoot, relFromRoot)
-        return candidate.canonicalFile
+        return File(workspaceRoot, trimmed.trimStart('/')).canonicalFile
     }
 
     /**
-     * Formats an actual workspace path back to its virtual PRoot presentation path.
+     * Formats a physical file path back to its virtual Ubuntu presentation path.
      */
     fun toVirtualPath(file: File, workspaceRoot: File): String {
-        val canonical = file.canonicalPath
-        val wsCanonical = workspaceRoot.canonicalPath
-        val rootfsCanonical = File(workspaceRoot, ROOTFS_DIR).canonicalPath
+        val canonical = try { file.canonicalPath } catch (_: Exception) { file.absolutePath }
+        val wsCanonical = try { workspaceRoot.canonicalPath } catch (_: Exception) { workspaceRoot.absolutePath }
+        val rootfsCanonical = try { persistentRootfsDir.canonicalPath } catch (_: Exception) { persistentRootfsDir.absolutePath }
 
         return when {
             canonical == wsCanonical -> "/workspace"

@@ -143,24 +143,5 @@ class ChatRepository(
             maxTokens = maxTokens
         )
     }
-
-    private fun getSmartSimulatedResponse(prompt: String): String {
-        val p = prompt.lowercase()
-        return when {
-            "marketing campaign" in p || "productivity app" in p || "remote workers" in p ->
-                "Great target audience. A campaign centered around \"Work Smarter, Not Longer\" could resonate well. The goal would be to help remote professionals reclaim time and reduce burnout through smarter workflows."
-
-            "channel" in p || "channels" in p ->
-                "I recommend a multi-channel approach:\n\n• LinkedIn for professional audiences\n• Instagram Reels for productivity tips\n• YouTube Shorts for quick tutorials\n• Email marketing for retention\n• Influencer partnerships with remote-work creators"
-
-            "slogan" in p || "slogans" in p ->
-                "Here are 3 compelling campaign slogans:\n\n1. \"Work Smarter, Not Longer\"\n2. \"Reclaim Your Day, Every Day\"\n3. \"Focus on What Matters, Automate the Rest\"\n\nWhich direction resonates best with your brand identity?"
-
-            "describe" in p && "image" in p ->
-                "The image displays a serene winding stone path cutting through vibrant green hills and lush misty foliage. Gentle rays of morning sunlight cast soft golden reflections across the landscape."
-
-            else ->
-                "I can certainly help with that. Here are the key considerations and recommended next steps:\n\n• Clarify your primary objective and success metrics\n• Identify your core audience and their immediate friction points\n• Build a focused, iterative prototype\n• Gather feedback early to refine the approach\n\nWould you like me to dive deeper into any of these areas?"
-        }
-    }
 }
+

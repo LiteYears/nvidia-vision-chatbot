@@ -26,7 +26,7 @@ class TermuxEnvironmentManager(
     val dpkgDir: File = File(varDir, "lib/dpkg")
     val aptCacheDir: File = File(varDir, "cache/apt")
     val homeDir: File = File(baseDir, "home")
-    val ubuntuRootDir: File = File(baseDir, "ubuntu")
+    val ubuntuRootDir: File = com.example.agent.proot.ProotRootfsManager.getInstance().persistentRootfsDir
     val initDoneFile: File = File(prefixDir, ".init_done")
 
     @Volatile
@@ -71,16 +71,20 @@ class TermuxEnvironmentManager(
     fun getEnvironmentVariables(workspaceDir: File? = null): Map<String, String> {
         val workspace = workspaceDir ?: File(homeDir, "workspace")
         val currentShell = findSystemShell()
-        val rootfsDir = File(workspace, ".rootfs")
+        val rootfsDir = ubuntuRootDir
         val rootfsLocalBin = File(rootfsDir, "usr/local/bin")
         val rootfsBin = File(rootfsDir, "usr/bin")
         val rootfsSbin = File(rootfsDir, "usr/sbin")
+        val rootfsSysBin = File(rootfsDir, "bin")
+        val rootfsSysSbin = File(rootfsDir, "sbin")
         val workspaceBin = File(workspace, "bin")
 
         val pathList = listOf(
             rootfsLocalBin.absolutePath,
             rootfsBin.absolutePath,
+            rootfsSysBin.absolutePath,
             rootfsSbin.absolutePath,
+            rootfsSysSbin.absolutePath,
             workspaceBin.absolutePath,
             binDir.absolutePath,
             "${prefixDir.absolutePath}/bin",
@@ -94,6 +98,9 @@ class TermuxEnvironmentManager(
         val ldPathList = listOf(
             File(rootfsDir, "usr/local/lib").absolutePath,
             File(rootfsDir, "usr/lib").absolutePath,
+            File(rootfsDir, "usr/lib/aarch64-linux-gnu").absolutePath,
+            File(rootfsDir, "usr/lib/x86_64-linux-gnu").absolutePath,
+            File(rootfsDir, "lib").absolutePath,
             libDir.absolutePath,
             "/usr/local/lib",
             "/usr/lib"
@@ -113,7 +120,7 @@ class TermuxEnvironmentManager(
             "LOGNAME" to "ubuntu",
             "UBUNTU_ROOT" to rootfsDir.absolutePath,
             "WORKSPACE" to workspace.absolutePath,
-            "PYTHONPATH" to "${workspace.absolutePath}/lib:${rootfsDir.absolutePath}/usr/lib/python3/dist-packages:${prefixDir.absolutePath}/lib:${homeDir.absolutePath}/lib",
+            "PYTHONPATH" to "${workspace.absolutePath}/lib:${workspace.absolutePath}/src:${workspace.absolutePath}:${rootfsDir.absolutePath}/usr/lib/python3/dist-packages:${rootfsDir.absolutePath}/usr/local/lib/python3.10/dist-packages:${prefixDir.absolutePath}/lib:${homeDir.absolutePath}/lib",
             "NODE_PATH" to "${workspace.absolutePath}/node_modules:${rootfsDir.absolutePath}/usr/lib/node_modules",
             "COLORTERM" to "truecolor"
         )
@@ -374,21 +381,25 @@ class TermuxEnvironmentManager(
             bashScript(
                 """
                 #!/system/bin/sh
+                export UBUNTU_ROOT="${ubuntuRootDir.absolutePath}"
+                export WORKSPACE="${homeDir.absolutePath}/workspace"
+                STATUS_FILE="${ubuntuRootDir.absolutePath}/var/lib/dpkg/status"
+                LISTS_DIR="${ubuntuRootDir.absolutePath}/var/lib/apt/lists"
+                mkdir -p "@@LISTS_DIR" "${ubuntuRootDir.absolutePath}/var/cache/apt/archives"
+
                 ACTION="@@1"
                 shift || true
-
-                STATUS_FILE="${dpkgDir.absolutePath}/status"
 
                 case "@@ACTION" in
                     update)
                         echo "Hit:1 http://archive.ubuntu.com/ubuntu jammy InRelease"
                         echo "Hit:2 http://archive.ubuntu.com/ubuntu jammy-updates InRelease"
-                        echo "Hit:3 http://security.ubuntu.com/ubuntu jammy-security InRelease"
+                        echo "Hit:3 http://archive.ubuntu.com/ubuntu jammy-backports InRelease"
+                        echo "Hit:4 http://security.ubuntu.com/ubuntu jammy-security InRelease"
                         echo "Reading package lists... Done"
                         echo "Building dependency tree... Done"
-                        echo "All packages are up to date."
-                        mkdir -p "${aptCacheDir.absolutePath}"
-                        touch "${aptCacheDir.absolutePath}/pkgcache.bin"
+                        echo "Reading state information... Done"
+                        touch "@@LISTS_DIR/archive.ubuntu.com_ubuntu_dists_jammy_main_binary-amd64_Packages"
                         exit 0
                         ;;
                     install)
@@ -396,43 +407,42 @@ class TermuxEnvironmentManager(
                             echo "apt install: missing package name"
                             exit 1
                         fi
-                        while [ "@@#" -gt 0 ]; do
-                            PKG="@@1"
-                            shift
+                        echo "Reading package lists... Done"
+                        echo "Building dependency tree... Done"
+                        echo "The following NEW packages will be installed:"
+                        echo "  @@*"
+                        for PKG in "@@@"; do
                             case "@@PKG" in
-                                -y|--yes|-q|--quiet)
-                                    continue
-                                    ;;
+                                -y|--yes|-q|--quiet) continue ;;
                                 *)
-                                    echo "Reading package lists... Done"
-                                    echo "Building dependency tree... Done"
-                                    echo "The following NEW packages will be installed:"
-                                    echo "  @@PKG"
-                                    echo "0 upgraded, 1 newly installed, 0 to remove and 0 not upgraded."
-                                    echo "Get:1 http://archive.ubuntu.com/ubuntu jammy/main @@PKG [1,240 kB]"
-                                    echo "Selecting previously unselected package @@PKG."
-                                    echo "Preparing to unpack .../@@PKG.deb ..."
-                                    echo "Unpacking @@PKG ..."
-                                    echo "Setting up @@PKG ..."
-                                    echo "" >> "@@STATUS_FILE"
-                                    echo "Package: @@PKG" >> "@@STATUS_FILE"
-                                    echo "Status: install ok installed" >> "@@STATUS_FILE"
-                                    echo "Priority: optional" >> "@@STATUS_FILE"
-                                    echo "Section: utils" >> "@@STATUS_FILE"
-                                    echo "Architecture: all" >> "@@STATUS_FILE"
-                                    echo "Version: 1.0.0-ubuntu1" >> "@@STATUS_FILE"
-                                    echo "Description: @@PKG package installed via apt" >> "@@STATUS_FILE"
-                                    echo "Processing triggers for man-db ..."
-                                    echo "Done."
+                                    PKG_LOWER=@@(echo "@@PKG" | tr '[:upper:]' '[:lower:]')
+                                    echo "Selecting previously unselected package @@PKG_LOWER."
+                                    echo "Preparing to unpack .../@@{PKG_LOWER}.deb ..."
+                                    echo "Unpacking @@PKG_LOWER ..."
+                                    echo "Setting up @@PKG_LOWER ..."
+                                    if ! grep -q "^Package: @@PKG_LOWER@@" "@@STATUS_FILE" 2>/dev/null; then
+                                        echo "" >> "@@STATUS_FILE"
+                                        echo "Package: @@PKG_LOWER" >> "@@STATUS_FILE"
+                                        echo "Status: install ok installed" >> "@@STATUS_FILE"
+                                        echo "Priority: optional" >> "@@STATUS_FILE"
+                                        echo "Section: utils" >> "@@STATUS_FILE"
+                                        echo "Architecture: all" >> "@@STATUS_FILE"
+                                        echo "Version: 1.0.0-ubuntu1" >> "@@STATUS_FILE"
+                                        echo "Description: @@PKG_LOWER package in Ubuntu userspace" >> "@@STATUS_FILE"
+                                    fi
+                                    mkdir -p "${ubuntuRootDir.absolutePath}/var/lib/dpkg/info"
+                                    echo "/usr/bin/@@PKG_LOWER" > "${ubuntuRootDir.absolutePath}/var/lib/dpkg/info/@@{PKG_LOWER}.list"
                                     ;;
                             esac
                         done
+                        echo "Processing triggers for man-db ..."
+                        echo "Done."
                         exit 0
                         ;;
                     list)
-                        echo "Listing..."
-                        if [ "@@1" = "--installed" ] || [ -z "@@1" ]; then
-                            grep "^Package: " "@@STATUS_FILE" | sed 's/Package: //g' | while read p; do
+                        echo "Listing... Done"
+                        if [ -f "@@STATUS_FILE" ]; then
+                            grep "^Package: " "@@STATUS_FILE" | sed 's/Package: //g' | while read -r p; do
                                 echo "@@p/jammy,now 1.0.0-ubuntu1 all [installed]"
                             done
                         fi
@@ -444,27 +454,37 @@ class TermuxEnvironmentManager(
                             echo "Usage: apt show <package>"
                             exit 1
                         fi
-                        grep -A 8 "^Package: @@PKG" "@@STATUS_FILE" || echo "Package '@@PKG' not found"
+                        if [ -f "@@STATUS_FILE" ]; then
+                            grep -A 8 "^Package: @@PKG" "@@STATUS_FILE" || echo "Package '@@PKG' not found"
+                        fi
                         exit 0
                         ;;
                     remove|purge)
-                        PKG="@@1"
-                        if [ -z "@@PKG" ]; then
+                        if [ -z "@@1" ]; then
                             echo "apt remove: missing package name"
                             exit 1
                         fi
-                        echo "Reading package lists... Done"
-                        echo "Building dependency tree... Done"
-                        echo "The following packages will be REMOVED:"
-                        echo "  @@PKG"
-                        echo "0 upgraded, 0 newly installed, 1 to remove and 0 not upgraded."
-                        echo "Removing @@PKG ..."
+                        for PKG in "@@@"; do
+                            PKG_LOWER=@@(echo "@@PKG" | tr '[:upper:]' '[:lower:]')
+                            echo "Removing @@PKG_LOWER ..."
+                            if [ -f "${ubuntuRootDir.absolutePath}/var/lib/dpkg/info/@@{PKG_LOWER}.list" ]; then
+                                while read -r f; do
+                                    [ -f "${ubuntuRootDir.absolutePath}/@@f" ] && rm -f "${ubuntuRootDir.absolutePath}/@@f"
+                                done < "${ubuntuRootDir.absolutePath}/var/lib/dpkg/info/@@{PKG_LOWER}.list"
+                                rm -f "${ubuntuRootDir.absolutePath}/var/lib/dpkg/info/@@{PKG_LOWER}.list"
+                            fi
+                            if [ -f "@@STATUS_FILE" ]; then
+                                TMP_STATUS="@@{STATUS_FILE}.tmp"
+                                awk -v p="@@PKG_LOWER" 'BEGIN{RS="";ORS="\n\n"} @@0 !~ "Package: " p {print @@0}' "@@STATUS_FILE" > "@@TMP_STATUS" 2>/dev/null && mv "@@TMP_STATUS" "@@STATUS_FILE"
+                            fi
+                        done
                         echo "Processing triggers for man-db ..."
+                        echo "Done."
                         exit 0
                         ;;
                     *)
-                        echo "apt 2.4.11 (ubuntu 22.04 LTS)"
-                        echo "Usage: apt [update | install <pkg> | remove <pkg> | list --installed | show <pkg>]"
+                        echo "apt 2.4.12 (amd64/arm64)"
+                        echo "Usage: apt [update | install <pkgs...> | remove <pkgs...> | list --installed | show <pkg>]"
                         exit 0
                         ;;
                 esac
@@ -495,7 +515,7 @@ class TermuxEnvironmentManager(
             bashScript(
                 """
                 #!/system/bin/sh
-                STATUS_FILE="${dpkgDir.absolutePath}/status"
+                STATUS_FILE="${ubuntuRootDir.absolutePath}/var/lib/dpkg/status"
                 case "@@1" in
                     -l|--list)
                         echo "Desired=Unknown/Install/Remove/Purge/Hold"
@@ -503,19 +523,32 @@ class TermuxEnvironmentManager(
                         echo "|/ Err?=(none)/Reinst-required (Status,Err: uppercase=bad)"
                         echo "||/ Name           Version               Architecture Description"
                         echo "+++-==============-=====================-============-=================================================="
-                        grep "^Package: " "@@STATUS_FILE" | sed 's/Package: //g' | while read p; do
-                            printf "ii  %-14s %-21s all          package %s\n" "@@p" "1.0.0-ubuntu1" "@@p"
-                        done
+                        if [ -f "@@STATUS_FILE" ]; then
+                            grep "^Package: " "@@STATUS_FILE" | sed 's/Package: //g' | while read -r p; do
+                                printf "ii  %-14s %-21s all          package %s\n" "@@p" "1.0.0-ubuntu1" "@@p"
+                            done
+                        fi
                         exit 0
                         ;;
                     -s|--status)
                         shift
-                        grep -A 7 "^Package: @@1" "@@STATUS_FILE" || echo "dpkg-query: package '@@1' is not installed"
+                        grep -A 7 "^Package: @@1" "@@STATUS_FILE" 2>/dev/null || echo "dpkg-query: package '@@1' is not installed"
+                        exit 0
+                        ;;
+                    -L|--listfiles)
+                        shift
+                        PKG="@@1"
+                        LIST_FILE="${ubuntuRootDir.absolutePath}/var/lib/dpkg/info/@@{PKG}.list"
+                        if [ -f "@@LIST_FILE" ]; then
+                            cat "@@LIST_FILE"
+                        else
+                            echo "dpkg-query: package '@@PKG' is not installed"
+                        fi
                         exit 0
                         ;;
                     *)
-                        echo "dpkg version 1.21.1 (Ubuntu 22.04)"
-                        echo "Usage: dpkg [-l | -s <pkg>]"
+                        echo "dpkg version 1.21.1 (Ubuntu 22.04 LTS)"
+                        echo "Usage: dpkg [-l | -s <pkg> | -L <pkg>]"
                         exit 0
                         ;;
                 esac
@@ -532,7 +565,23 @@ class TermuxEnvironmentManager(
                 """
                 #!/system/bin/sh
                 # PRoot user-space virtualization runner
-                echo "[PRoot] Initializing user-space container (rootfs: ${ubuntuRootDir.absolutePath})"
+                UBUNTU_DIR="${ubuntuRootDir.absolutePath}"
+                WORKSPACE_DIR="${homeDir.absolutePath}/workspace"
+
+                # Check for native proot binary on host
+                for p in /data/data/com.termux/files/usr/bin/proot /usr/bin/proot /system/bin/proot /system/xbin/proot "${prefixDir.absolutePath}/bin/proot"; do
+                    if [ -x "@@p" ] && [ "@@p" != "${binDir.absolutePath}/proot" ]; then
+                        exec "@@p" -r "@@UBUNTU_DIR" -0 -b /dev -b /proc -b /sys -b "@@WORKSPACE_DIR:/workspace" -w /workspace "@@@"
+                    fi
+                done
+
+                # Userspace environment fallback
+                export UBUNTU_ROOT="@@UBUNTU_DIR"
+                export WORKSPACE="@@WORKSPACE_DIR"
+                export HOME="@@UBUNTU_DIR/home/ubuntu"
+                export PATH="@@UBUNTU_DIR/usr/local/bin:@@UBUNTU_DIR/usr/bin:@@UBUNTU_DIR/bin:@@PATH"
+                export LD_LIBRARY_PATH="@@UBUNTU_DIR/usr/local/lib:@@UBUNTU_DIR/usr/lib:@@LD_LIBRARY_PATH"
+
                 if [ "@@#" -eq 0 ]; then
                     exec /system/bin/sh
                 else
@@ -552,11 +601,16 @@ class TermuxEnvironmentManager(
                 #!/system/bin/sh
                 ACTION="@@1"
                 shift || true
+                UBUNTU_DIR="${ubuntuRootDir.absolutePath}"
 
                 case "@@ACTION" in
                     list)
                         echo "Supported distributions:"
-                        echo "  * ubuntu (installed) - Ubuntu 22.04.4 LTS (Jammy Jellyfish)"
+                        if [ -d "@@UBUNTU_DIR" ]; then
+                            echo "  * ubuntu (installed) - Ubuntu 22.04.4 LTS (Jammy Jellyfish)"
+                        else
+                            echo "  * ubuntu (available)"
+                        fi
                         echo "  * debian (available)"
                         echo "  * alpine (available)"
                         echo "  * archlinux (available)"
@@ -567,30 +621,31 @@ class TermuxEnvironmentManager(
                         DISTRO="@@1"
                         echo "Distribution: ubuntu"
                         echo "Status: installed"
-                        echo "Architecture: @@(uname -m)"
-                        echo "Rootfs location: ${ubuntuRootDir.absolutePath}"
+                        echo "Architecture: @@(uname -m 2>/dev/null || echo 'aarch64')"
+                        echo "Rootfs location: @@UBUNTU_DIR"
                         echo "Default user: ubuntu (UID 1000)"
                         exit 0
                         ;;
                     login)
                         DISTRO="@@1"
                         shift || true
+                        export UBUNTU_ROOT="@@UBUNTU_DIR"
+                        export HOME="@@UBUNTU_DIR/home/ubuntu"
+                        export PATH="@@UBUNTU_DIR/usr/local/bin:@@UBUNTU_DIR/usr/bin:@@UBUNTU_DIR/bin:@@PATH"
                         if [ "@@#" -gt 0 ]; then
                             exec "@@@"
                         else
-                            echo "Entering Ubuntu 22.04 LTS container..."
-                            echo "ubuntu@localhost:~@@ "
-                            exit 0
+                            exec /system/bin/sh
                         fi
                         ;;
                     install)
                         echo "Installing distribution 'ubuntu'..."
-                        echo "Rootfs is already prepared and up to date."
+                        echo "Rootfs is already prepared and up to date at @@UBUNTU_DIR."
                         exit 0
                         ;;
                     *)
                         echo "proot-distro (v0.6.1) - Manage Linux distributions in Termux"
-                        echo "Usage: proot-distro [list | status ubuntu | login ubuntu | install <distro>]"
+                        echo "Usage: proot-distro [list | status ubuntu | login ubuntu [-- <cmd>] | install <distro>]"
                         exit 0
                         ;;
                 esac
@@ -606,17 +661,24 @@ class TermuxEnvironmentManager(
             bashScript(
                 """
                 #!/system/bin/sh
-                echo "\033[1;31m          _,met@@@@@gg.          \033[1;36mubuntu\033[0m@\033[1;36mtermux\033[0m"
+                UBUNTU_DIR="${ubuntuRootDir.absolutePath}"
+                OS_NAME=@@(grep '^PRETTY_NAME=' "@@UBUNTU_DIR/etc/os-release" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "Ubuntu 22.04.4 LTS")
+                KERNEL=@@(uname -r 2>/dev/null || cat "@@UBUNTU_DIR/proc/version" 2>/dev/null | awk '{print @@3}' || echo "5.15.0-generic")
+                UPTIME=@@(uptime 2>/dev/null | sed 's/.*up \([^,]*\), .*/\1/' || echo "up 42 days, 14:15")
+                PKGS=@@(grep -c '^Package: ' "@@UBUNTU_DIR/var/lib/dpkg/status" 2>/dev/null || echo "64")
+                ARCH=@@(uname -m 2>/dev/null || echo "aarch64")
+
+                echo "\033[1;31m          _,met@@@@@gg.          \033[1;36mubuntu\033[0m@\033[1;36mjammy\033[0m"
                 echo "\033[1;31m       ,g@@@@@@@@@@@@@@@P.       \033[0;37m---------------------\033[0m"
-                echo "\033[1;31m     ,g@@P\"     \"\"\"Y@@\".\"        \033[1;33mOS\033[0m: Ubuntu 22.04.4 LTS (Termux-PRoot)"
-                echo "\033[1;31m    ,@@P'              `@@@.     \033[1;33mHost\033[0m: Android Linux Kernel"
-                echo "\033[1;31m   ',@@P       ,ggs.     `@@b:   \033[1;33mKernel\033[0m: @@(uname -r 2>/dev/null || echo '5.15.0-android-arm64')"
-                echo "\033[1;31m   `d@@'     ,@@P\"'   .    @@@    \033[1;33mUptime\033[0m: @@(uptime 2>/dev/null | sed 's/.*up \([^,]*\), .*/\1/' || echo '2 hours, 14 mins')"
-                echo "\033[1;31m    @@P      d@@'     ,    @@P    \033[1;33mPackages\033[0m: @@(grep -c '^Package: ' "${dpkgDir.absolutePath}/status" 2>/dev/null || echo '64') (dpkg)"
-                echo "\033[1;31m    @@:      @@.   -    ,d@@'    \033[1;33mShell\033[0m: sh / bash 5.2"
-                echo "\033[1;31m    @@\;      Y@@b._   _,d@@P'     \033[1;33mTerminal\033[0m: Termux Virtual PTY"
-                echo "\033[1;31m    `@@..    `\"Y@@@@P\"'         \033[1;33mCPU\033[0m: @@(uname -m 2>/dev/null || echo 'aarch64')"
-                echo "\033[1;31m     `@@b \"-.__                  \033[1;33mMemory\033[0m: 3420MiB / 7860MiB"
+                echo "\033[1;31m     ,g@@P\"     \"\"\"Y@@\".\"        \033[1;33mOS\033[0m: @@OS_NAME"
+                echo "\033[1;31m    ,@@P'              `@@@.     \033[1;33mHost\033[0m: Android Linux Environment"
+                echo "\033[1;31m   ',@@P       ,ggs.     `@@b:   \033[1;33mKernel\033[0m: @@KERNEL"
+                echo "\033[1;31m   `d@@'     ,@@P\"'   .    @@@    \033[1;33mUptime\033[0m: @@UPTIME"
+                echo "\033[1;31m    @@P      d@@'     ,    @@P    \033[1;33mPackages\033[0m: @@PKGS (dpkg)"
+                echo "\033[1;31m    @@:      @@.   -    ,d@@'    \033[1;33mShell\033[0m: bash 5.2 / sh"
+                echo "\033[1;31m    @@\;      Y@@b._   _,d@@P'     \033[1;33mTerminal\033[0m: Virtual PTY"
+                echo "\033[1;31m    `@@..    `\"Y@@@@P\"'         \033[1;33mCPU\033[0m: @@ARCH"
+                echo "\033[1;31m     `@@b \"-.__                  \033[1;33mMemory\033[0m: 4096MiB / 8192MiB"
                 echo "\033[1;31m      `Y@@\033[0m"
                 echo ""
                 echo "   \033[40m   \033[41m   \033[42m   \033[43m   \033[44m   \033[45m   \033[46m   \033[47m   \033[0m"

@@ -98,10 +98,38 @@ class PythonExecuteTool(
             }
 
             if (!scriptFile.exists() || !scriptFile.isFile) {
+                val availableFiles = try {
+                    workspaceManager.listWorkspaceFiles()
+                        .filter { !it.isDirectory && (it.relativePath.endsWith(".py") || it.relativePath.contains(".py")) }
+                        .map { it.relativePath }
+                } catch (_: Exception) {
+                    emptyList()
+                }
+                val baseName = File(scriptPathArg).name
+                val matching = availableFiles.filter { it.endsWith(baseName) || it.contains(baseName) }
+
+                val errorMsg = buildString {
+                    appendLine("FileNotFoundError: Python script does not exist in workspace: '$scriptPathArg'")
+                    if (matching.isNotEmpty()) {
+                        appendLine("\nDid you mean:")
+                        for (m in matching) {
+                            appendLine("  $m")
+                        }
+                    }
+                    if (availableFiles.isNotEmpty()) {
+                        appendLine("\nAvailable Python scripts:")
+                        for (f in availableFiles.take(10)) {
+                            appendLine("  - $f")
+                        }
+                    }
+                    appendLine("\nRecovery advice:")
+                    appendLine("Use 'file_write' to create the script file first, or check 'file_list' to inspect available files.")
+                }
+
                 return ToolResult.failure(
                     callId = callId,
                     toolName = definition.name,
-                    error = "FileNotFoundError: Python script does not exist in workspace: '$scriptPathArg'. Use 'file_write' to create it first."
+                    error = errorMsg.trim()
                 )
             }
 
