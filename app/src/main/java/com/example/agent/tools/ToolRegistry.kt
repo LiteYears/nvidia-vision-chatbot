@@ -136,10 +136,11 @@ class ToolRegistry {
         sb.append("- All file types are supported: text, source code, JSON/CSV/YAML data, and binary files/images/archives (using `encoding: 'base64'` in `file_read` / `file_write`).\n")
         sb.append("- Targeted code edits & diffs: ALWAYS use `file_patch` to modify, fix, or improve specific functions and code sections without rewriting entire files.\n")
         sb.append("- Project ZIP Archives: unpack project codebases using `archive_extract` (e.g. `path: 'project.zip'`). Once extracted, inspect with `file_tree` and patch with `file_patch`.\n")
-        sb.append("- Package management:\n")
-        sb.append("  * Python: run `pip install <package>` (or `pip list`) via `run_command`. Packages install to `lib/` and are automatically discoverable.\n")
-        sb.append("  * Node.js: run `npm init -y`, `npm install <package>`, and `npm run <cmd>` via `run_command`.\n")
-        sb.append("  * Script execution: run with `python3 <file.py>`, `node <file.js>`, or `python_execute`.\n")
+        sb.append("- Ubuntu-like Bash Shell & Python 3 Environment:\n")
+        sb.append("  * Terminal shell: run Linux/bash commands ('python3 script.py', 'pip install <pkg>', 'pip uninstall -y <pkg>', 'ls -la', 'uname -a', 'which <cmd>') via `run_command`.\n")
+        sb.append("  * Python package management: run `pip install <package>`, `pip uninstall -y <package>`, `pip list`, `pip show <pkg>` via `run_command`. Packages install to `lib/` and are immediately importable in Python.\n")
+        sb.append("  * Compound commands: use `cmd1 && cmd2` or `cmd1 ; cmd2` to chain installation and script execution.\n")
+        sb.append("  * Script execution: execute Python with `run_command` (e.g. `python3 script.py` or `python3 -c \"...\"`) or `python_execute`.\n")
 
         return sb.toString()
     }

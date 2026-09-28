@@ -425,8 +425,8 @@ object HtmlContentExtractor {
         var text = input
         text = text.replace("[TOOL_RESULT:", "[tool_result_ref:")
         text = text.replace("[SUBTASK STATUS:", "[subtask_status_ref:")
-        text = text.replace("```tool_call", "```tool_call_text")
-        text = text.replace("```tool_result", "```tool_result_text")
+        text = text.replace("```tool_call", "```escaped_tool_call")
+        text = text.replace("```tool_result", "```escaped_tool_result")
         text = text.replace("<|im_start|>", "&lt;|im_start|&gt;")
         text = text.replace("<|im_end|>", "&lt;|im_end|&gt;")
         text = text.replace("<|system|>", "&lt;|system|&gt;")

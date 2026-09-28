@@ -22,6 +22,7 @@ import com.example.agent.tools.workspace.FileChangeType
 import com.example.agent.tools.workspace.VerificationStatus
 import java.io.File
 import com.example.data.local.ChatDatabase
+import com.example.data.model.AgentReflection
 import com.example.data.model.AgentSession
 import com.example.data.model.AgentStep
 import com.example.data.model.AgentTaskStatus
@@ -948,33 +949,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun buildAgentSystemPrompt(goal: String): String {
         val toolsPrompt = toolRegistry.formatToolsForPrompt()
-        return "You are an autonomous engineering agent with coding and execution tools.\n\n" +
+        return "You are an autonomous engineering agent with top-tier coding workflows (Claude Code, OpenCode, Codex style).\n\n" +
             "USER OBJECTIVE: \"$goal\"\n\n" +
             "$toolsPrompt\n\n" +
-            "EXECUTION GUIDELINES:\n" +
-            "- Act as an expert coding agent: understand user goals, inspect existing code before editing, determine necessary steps, execute them, inspect results, and verify the final state.\n" +
-            "- INSPECTION & DISCOVERY BEFORE EDITING:\n" +
-            "  * Never modify code blind. When asked to modify, extend, or integrate features in an existing project, first inspect the project structure (with 'file_list' or 'file_tree'), locate relevant files (with 'file_search'), and examine existing implementations (with 'file_read') to understand architecture, state management, and interfaces before making changes.\n" +
-            "- SURGICAL & MULTI-FILE CODE MODIFICATIONS:\n" +
-            "  * Plan minimal targeted changes. When modifying or extending existing source code files, prefer 'file_patch' over rewriting entire files with 'file_write'. 'file_patch' applies targeted surgical diffs without truncating large files.\n" +
-            "  * For multi-file feature additions (e.g. settings screens, persistence, agent integrations), modify each affected component cleanly across files.\n" +
-            "- TESTING, BUILD & VERIFICATION MANDATE:\n" +
-            "  * Never claim a task is complete without testing and verifying the implementation. Run build/test commands ('run_command' or 'python_execute') and inspect stdout/stderr.\n" +
-            "  * If compilation or tests produce errors or tracebacks, observe the diagnostics, formulate repairs, apply them with 'file_patch' or 'file_write', and retest to verify.\n" +
-            "- DYNAMIC PLAN ADAPTATION & RECOVERY:\n" +
-            "  * If results differ from expectations, an approach fails, or dependencies are missing, do not repeat the failing action blindly.\n" +
-            "  * Adapt your plan: output an updated ```plan block with revised or recovery subtasks (marking completed steps [x], failed steps [!], in-progress steps [/], and pending steps [ ]).\n" +
-            "- Package & dependency management: install Python libraries via 'pip install <package>' (installed into workspace lib/) and Node modules via 'npm install <package>' using 'run_command'.\n" +
-            "- You can run shell commands, scripts, and terminal tools (python3, pip, node, npm, git, bash) using 'run_command' without restrictions.\n" +
-            "- For Python tasks: Execute Python code using 'python_execute' or via 'run_command'.\n" +
-            "- For Web Research & Information Gathering:\n" +
-            "  * Understand the user query and generate an appropriate, tailored search query adapted to the topic.\n" +
-            "  * Do NOT hardcode or default to Wikipedia as the primary source. Avoid Wikipedia when specialized registries (such as IP/WHOIS/RDAP, CVE databases, official documentation, or package indices) are more authoritative.\n" +
-            "  * Do not assume the first search result is sufficient: search across multiple relevant websites when the task requires it.\n" +
-            "  * Distinguish search-result snippets from actual page content. Snippets are brief previews; invoke 'web_open' on authoritative candidate URLs to retrieve and read full, verified content.\n" +
-            "  * If initial search results are irrelevant, insufficient, or incomplete, automatically perform a follow-up 'web_search' with refined keywords or open additional sources.\n" +
-            "  * Synthesize verified findings with source context, and cite your sources using markdown links [Source Title](URL).\n" +
-            "- Only deliver your final response once the execution has verified the desired output."
+            "WORKFLOW MANDATE (CLAUDE CODE / OPENCODE / CODEX STYLE):\n" +
+            "- CONTINUOUS REFLECTION & EXECUTION LOOP:\n" +
+            "  * Never restrict yourself to rigid artificial limits. Continuously reflect, discover, edit, write, test, and improve until the user's objective is completely achieved and verified.\n" +
+            "  * Before invoking each tool (or when analyzing findings), concisely explain your reasoning and next intent in a short, focused reflection (1-2 sentences). For example:\n" +
+            "    \"the file contains python code that needed to be updated the user said add some imports to it so i need to look for the correct imports required...\"\n" +
+            "  * Follow your reflection immediately with the appropriate ```tool_call``` block.\n" +
+            "- CODE INSPECTION & DISCOVERY BEFORE EDITING:\n" +
+            "  * Never modify code blindly. First inspect project structure ('file_list' / 'file_tree'), locate candidate files ('file_search'), and read existing files ('file_read') to understand architecture and requirements.\n" +
+            "- SURGICAL & MULTI-FILE EDITING:\n" +
+            "  * Prefer surgical diffs with 'file_patch' for modifying existing files without truncating or rewriting.\n" +
+            "  * Use 'file_write' when creating new files or when a full rewrite is cleaner.\n" +
+            "  * For multi-file changes, edit each affected file cleanly.\n" +
+            "- TESTING & CONTINUOUS IMPROVEMENT:\n" +
+            "  * Always test and verify after editing ('run_command' or 'python_execute').\n" +
+            "  * Observe diagnostics/stdout/stderr. If errors occur, reflect on the traceback, formulate fixes, apply them with 'file_patch', and re-test until clean.\n" +
+            "- DYNAMIC PLAN ADAPTATION:\n" +
+            "  * Adapt your approach if an initial attempt fails. You may output updated ```plan blocks with revised milestones.\n" +
+            "- FINAL COMPLETE DELIVERABLE:\n" +
+            "  * Only provide your complete, final text answer (without any ```tool_call``` block) when all steps are completed and verified."
     }
 
     fun sendAgentFollowUp(overrideText: String? = null) {
@@ -1036,7 +1032,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     companion object {
-        private const val MAX_AUTONOMOUS_TOOL_STEPS = 10
+        private const val MAX_AUTONOMOUS_TOOL_STEPS = 30
         private const val MAX_CONSECUTIVE_NUDGES = 2
         private const val MAX_TOTAL_NUDGES = 4
     }
@@ -1045,6 +1041,25 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { cur ->
             val curSession = cur.currentAgentSession ?: return@update cur
             val s = curSession.copy(status = status, updatedAt = System.currentTimeMillis())
+            cur.copy(
+                currentAgentSession = s,
+                agentSessions = cur.agentSessions.map { if (it.id == curSession.id) s else it }
+            )
+        }
+    }
+
+    private fun addReflectionToSession(thought: String, timestamp: Long = System.currentTimeMillis()) {
+        val cleanThought = thought.trim()
+        if (cleanThought.isBlank()) return
+        _uiState.update { cur ->
+            val curSession = cur.currentAgentSession ?: return@update cur
+            if (curSession.reflections.lastOrNull()?.thought == cleanThought) return@update cur
+            val reflection = AgentReflection(
+                thought = cleanThought,
+                timestamp = timestamp
+            )
+            val updatedReflections = curSession.reflections + reflection
+            val s = curSession.copy(reflections = updatedReflections, updatedAt = System.currentTimeMillis())
             cur.copy(
                 currentAgentSession = s,
                 agentSessions = cur.agentSessions.map { if (it.id == curSession.id) s else it }
@@ -1160,14 +1175,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 // 2. STATE: USING_TOOL
                 updateAgentSessionStatus(AgentTaskStatus.USING_TOOL)
 
-                val preToolNarrative = ToolCallParser.stripToolCalls(rawResponse)
-                val intermediateContent = if (preToolNarrative.isNotBlank()) {
-                    "$preToolNarrative\n\n*(Step ${currentPlan.stepCount}/${currentPlan.maxSteps}: Subtask: ${activeSubtask?.description ?: "Executing"} | Tool: '${toolCall.toolName}')*"
-                } else {
-                    "*(Step ${currentPlan.stepCount}/${currentPlan.maxSteps}: Subtask: ${activeSubtask?.description ?: "Executing"} | Tool: '${toolCall.toolName}')*"
+                val preToolNarrative = ToolCallParser.stripToolCalls(rawResponse).trim()
+                if (preToolNarrative.isNotBlank()) {
+                    addReflectionToSession(preToolNarrative)
                 }
-
-                updateAssistantStreamingContent(assistantMessageId, intermediateContent)
 
                 // Execute the requested tool safely via the modular registry
                 val toolResult = toolRegistry.execute(toolCall)
@@ -1371,10 +1382,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
                     val preToolNarrative = rawResponse.trim()
                     if (preToolNarrative.isNotBlank()) {
-                        updateAssistantStreamingContent(
-                            assistantMessageId,
-                            "$preToolNarrative\n\n*(Nudge $consecutiveNudges/$MAX_CONSECUTIVE_NUDGES: Awaiting tool invocation for \"${activeSubtask?.description}\")*"
-                        )
+                        addReflectionToSession(preToolNarrative)
                     }
 
                     // Add past turn to ongoing history

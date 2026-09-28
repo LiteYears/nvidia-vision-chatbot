@@ -48,8 +48,8 @@ class RuntimeCapabilityDetector(
                 id = "shell_utilities",
                 name = "Shell Workspace Utilities",
                 type = CapabilityType.SHELL_EXECUTABLE,
-                isAvailable = hasShellSh,
-                description = "Shell utilities for workspace inspection, text manipulation, and process orchestration (ls, cat, grep, find, wc, echo, sort, mkdir, cp, mv).",
+                isAvailable = true,
+                description = "Ubuntu-like bash shell utilities for workspace inspection, text manipulation, and process orchestration (ls, cat, grep, find, wc, echo, sort, mkdir, cp, mv, uname, whoami, which, date, env).",
                 primaryTool = "run_command",
                 notes = "Useful for directory inspection and piping text data within the workspace.",
                 alternatives = listOf("run_command")
@@ -58,20 +58,20 @@ class RuntimeCapabilityDetector(
                 id = "shell_python",
                 name = "Python 3 CLI",
                 type = CapabilityType.SHELL_EXECUTABLE,
-                isAvailable = hasShellPython,
-                description = "System shell Python 3 CLI environment. Runs scripts, pip modules, and commands via 'run_command'.",
-                primaryTool = if (hasShellPython) "run_command" else "python_execute",
-                notes = if (hasShellPython) "Available in environment (supports 'python3 <script>' or 'python <script>')." else "Use 'python_execute'.",
-                alternatives = listOf("python_execute")
+                isAvailable = true,
+                description = "Ubuntu-like Python 3 CLI environment. Runs scripts, pip modules, and commands via 'run_command' (e.g. 'python3 script.py', 'python3 -c \"...\"').",
+                primaryTool = "run_command",
+                notes = "Always available via run_command and python_execute.",
+                alternatives = listOf("run_command", "python_execute")
             ),
             RuntimeCapability(
                 id = "pip",
                 name = "Pip Package Manager",
                 type = CapabilityType.SHELL_EXECUTABLE,
-                isAvailable = hasShellPip || true,
-                description = "Python package manager for installing and managing dependencies. Run 'pip install <package>' or 'pip list' via 'run_command'.",
+                isAvailable = true,
+                description = "Python package manager for installing, uninstalling, and managing dependencies. Run 'pip install <package>', 'pip uninstall -y <package>', 'pip list', 'pip show <package>' via 'run_command'.",
                 primaryTool = "run_command",
-                notes = "Packages are installed into workspace lib/ and are immediately available to import in Python scripts.",
+                notes = "Packages install into workspace lib/ and are immediately available to import in Python scripts.",
                 alternatives = listOf("run_command")
             ),
             RuntimeCapability(
@@ -114,15 +114,25 @@ class RuntimeCapabilityDetector(
         val clean = executableName.trim().removeSurrounding("\"").removeSurrounding("'")
         if (clean.isBlank()) return false
 
+        // Built-in workspace environment tools are always available
+        val lower = clean.lowercase()
+        if (lower in setOf(
+                "python", "python3", "py", "pip", "pip3", "bash", "sh",
+                "uname", "whoami", "hostname", "which", "date", "env", "printenv",
+                "apt", "apt-get", "df", "free", "uptime", "clear", "true", "false",
+                "echo", "pwd", "curl", "wget", "ls", "cat", "mkdir", "touch", "rm", "cp", "mv", "grep", "wc", "head", "tail", "find"
+            )
+        ) {
+            return true
+        }
+
         // If absolute path provided
         if (clean.startsWith("/")) {
             val f = File(clean)
             return f.exists() && f.canExecute() && !f.isDirectory
         }
 
-        val candidates = when (clean.lowercase()) {
-            "python" -> listOf("python", "python3")
-            "pip" -> listOf("pip", "pip3")
+        val candidates = when (lower) {
             "node" -> listOf("node", "nodejs")
             "npm" -> listOf("npm", "npx")
             else -> listOf(clean)

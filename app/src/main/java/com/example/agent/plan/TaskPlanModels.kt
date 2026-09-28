@@ -69,7 +69,9 @@ data class TaskPlan(
         get() = subtasks.size
 
     val allSubtasksCompleted: Boolean
-        get() = subtasks.isNotEmpty() && subtasks.all { it.status == SubtaskStatus.COMPLETED }
+        get() = subtasks.isNotEmpty() &&
+            subtasks.any { it.status == SubtaskStatus.COMPLETED } &&
+            subtasks.none { it.status == SubtaskStatus.PENDING || it.status == SubtaskStatus.RUNNING }
 
     val isStepLimitExceeded: Boolean
         get() = stepCount >= maxSteps

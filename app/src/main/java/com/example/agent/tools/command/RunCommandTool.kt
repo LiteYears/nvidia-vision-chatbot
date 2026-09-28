@@ -21,14 +21,15 @@ class RunCommandTool(
 
     override val definition: ToolDefinition = ToolDefinition(
         name = "run_command",
-        description = "Executes shell commands, scripts, and terminal utilities (including python3, pip, node, npm, bash, git). " +
-            "Returns stdout, stderr, exit code, and execution duration. " +
-            "Automatically resolves environment paths (PATH, PYTHONPATH, NODE_PATH) so local libraries in lib/ and node_modules/ are directly accessible.",
+        description = "Executes commands inside the Ubuntu-like workspace bash shell and Python 3 environment. " +
+            "Supports running scripts ('python3 script.py', 'python3 -c \"...\"'), package management ('pip install <package>', 'pip uninstall -y <package>', 'pip list', 'pip show <package>'), " +
+            "compound commands ('cmd1 && cmd2', 'cmd1 ; cmd2'), and Linux terminal utilities (bash, ls, cat, grep, find, wc, echo, curl, wget, uname, whoami, which, date, env, apt). " +
+            "Packages install into workspace lib/ and are immediately discoverable and importable. Returns stdout, stderr, exit code, and execution duration.",
         parameters = listOf(
             ToolParameter(
                 name = "command",
                 type = "string",
-                description = "The shell command to execute (e.g. 'pip install <pkg>', 'node script.js', 'npm init -y', 'python3 script.py', 'ls -la', 'git status'). Note: for entering websites and reading news, use 'web_open' or 'web_search'.",
+                description = "The shell command to execute (e.g. 'pip install requests', 'pip uninstall -y requests', 'python3 script.py', 'python3 -c \"import requests; ...\"', 'ls -la', 'uname -a').",
                 required = true
             ),
             ToolParameter(
@@ -152,7 +153,7 @@ class RunCommandTool(
                 }
             }
             ToolResult.failure(callId = callId, toolName = definition.name, error = errorMsg.trim())
-        } else if (execResult.exitCode != 0) {
+        } else if (execResult.exitCode != 0 && !(execResult.isTruncated && execResult.exitCode == 141)) {
             val isUnavailable = execResult.exitCode == 127 ||
                 execResult.stderr.contains("inaccessible or not found", ignoreCase = true) ||
                 (execResult.stderr.contains("not found", ignoreCase = true) && !capabilityDetector.isExecutableAvailable(cleanExec))

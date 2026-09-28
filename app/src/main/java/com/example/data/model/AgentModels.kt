@@ -27,6 +27,12 @@ data class AgentStep(
     val timestamp: Long = System.currentTimeMillis()
 )
 
+data class AgentReflection(
+    val id: String = UUID.randomUUID().toString(),
+    val thought: String,
+    val timestamp: Long = System.currentTimeMillis()
+)
+
 data class ToolExecutionRecord(
     val callId: String = UUID.randomUUID().toString(),
     val messageId: String? = null,
@@ -48,5 +54,27 @@ data class AgentSession(
     val steps: List<AgentStep> = emptyList(),
     val plan: TaskPlan? = null,
     val messages: List<ChatMessage> = emptyList(),
-    val toolExecutions: List<ToolExecutionRecord> = emptyList()
+    val toolExecutions: List<ToolExecutionRecord> = emptyList(),
+    val reflections: List<AgentReflection> = emptyList()
 )
+
+sealed interface AgentFeedItem {
+    val id: String
+    val timestamp: Long
+
+    data class Message(val message: ChatMessage) : AgentFeedItem {
+        override val id: String get() = message.id
+        override val timestamp: Long get() = message.timestamp
+    }
+
+    data class Reflection(val reflection: AgentReflection) : AgentFeedItem {
+        override val id: String get() = reflection.id
+        override val timestamp: Long get() = reflection.timestamp
+    }
+
+    data class Tool(val record: ToolExecutionRecord) : AgentFeedItem {
+        override val id: String get() = record.callId
+        override val timestamp: Long get() = record.timestamp
+    }
+}
+

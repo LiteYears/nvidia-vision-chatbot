@@ -7,8 +7,12 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.security.MessageDigest
+import java.text.SimpleDateFormat
 import java.util.Base64
+import java.util.Calendar
+import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.regex.MatchResult
 import java.util.regex.Pattern
@@ -379,12 +383,17 @@ class PythonLexer(private val input: String, private val filename: String) {
                 continue
             }
 
-            // Identifiers / Keywords / f-strings
-            if (c == 'f' && pos + 1 < input.length && (input[pos + 1] == '"' || input[pos + 1] == '\'')) {
+            // String literals with prefixes (f, r, b, rf, fr, rb, br, etc.)
+            val prefixMatch = matchStringPrefix()
+            if (prefixMatch != null) {
                 val startCol = col
-                pos++
-                col++
-                val strToken = readString(isFString = true, startCol = startCol)
+                pos += prefixMatch.length
+                col += prefixMatch.length
+                val strToken = readString(
+                    isFString = prefixMatch.isFString,
+                    isRaw = prefixMatch.isRaw,
+                    startCol = startCol
+                )
                 tokens.add(strToken)
                 continue
             }
@@ -510,7 +519,35 @@ class PythonLexer(private val input: String, private val filename: String) {
         col = 1
     }
 
-    private fun readString(isFString: Boolean, startCol: Int): Token {
+    private data class StringPrefix(val isFString: Boolean, val isRaw: Boolean, val length: Int)
+
+    private fun matchStringPrefix(): StringPrefix? {
+        val rem = input.length - pos
+        if (rem >= 3) {
+            val two = input.substring(pos, pos + 2).lowercase()
+            val nextC = input[pos + 2]
+            if (nextC == '"' || nextC == '\'') {
+                when (two) {
+                    "rf", "fr" -> return StringPrefix(isFString = true, isRaw = true, length = 2)
+                    "rb", "br" -> return StringPrefix(isFString = false, isRaw = true, length = 2)
+                }
+            }
+        }
+        if (rem >= 2) {
+            val one = input[pos].lowercaseChar()
+            val nextC = input[pos + 1]
+            if (nextC == '"' || nextC == '\'') {
+                when (one) {
+                    'f' -> return StringPrefix(isFString = true, isRaw = false, length = 1)
+                    'r' -> return StringPrefix(isFString = false, isRaw = true, length = 1)
+                    'b', 'u' -> return StringPrefix(isFString = false, isRaw = false, length = 1)
+                }
+            }
+        }
+        return null
+    }
+
+    private fun readString(isFString: Boolean, isRaw: Boolean = false, startCol: Int): Token {
         val quote = input[pos]
         val isTriple = pos + 2 < input.length && input[pos + 1] == quote && input[pos + 2] == quote
         pos += if (isTriple) 3 else 1
@@ -532,7 +569,7 @@ class PythonLexer(private val input: String, private val filename: String) {
                 }
             }
 
-            if (input[pos] == '\\' && pos + 1 < input.length) {
+            if (!isRaw && input[pos] == '\\' && pos + 1 < input.length) {
                 pos++
                 col++
                 when (input[pos]) {
@@ -549,6 +586,11 @@ class PythonLexer(private val input: String, private val filename: String) {
                 }
                 pos++
                 col++
+                continue
+            } else if (isRaw && input[pos] == '\\' && pos + 1 < input.length && input[pos + 1] == quote) {
+                sb.append(quote)
+                pos += 2
+                col += 2
                 continue
             }
 
@@ -1446,9 +1488,6 @@ class PythonInterpreter(
             }
             is PyStmt.With -> {
                 val ctxObj = evalExpr(stmt.expr, scope)
-                if (ctxObj !is SandboxedFile) {
-                    throw PythonRuntimeException("TypeError", "'${ctxObj?.javaClass?.simpleName}' object does not support the context manager protocol", stmt.line)
-                }
                 if (stmt.asName != null) {
                     scope[stmt.asName] = ctxObj
                 }
@@ -1458,7 +1497,10 @@ class PythonInterpreter(
                         if (res is ReturnSignal || res is BreakSignal || res is ContinueSignal) return res
                     }
                 } finally {
-                    ctxObj.close()
+                    when (ctxObj) {
+                        is SandboxedFile -> ctxObj.close()
+                        is PyHttpResponse -> ctxObj.close()
+                    }
                 }
             }
             is PyStmt.Import -> {
@@ -1602,6 +1644,9 @@ class PythonInterpreter(
     }
 
     private fun pyAdd(left: Any?, right: Any?, line: Int): Any? {
+        if (left is PyDateTime && right is PyTimeDelta) return left.add(right)
+        if (left is PyDate && right is PyTimeDelta) return left.add(right)
+        if (left is PyTimeDelta && right is PyTimeDelta) return left.add(right)
         if (left is String || right is String) {
             return if (left is String && right is String) left + right
             else throw PythonRuntimeException("TypeError", "can only concatenate str (not \"${right?.javaClass?.simpleName ?: "None"}\") to str", line)
@@ -1617,6 +1662,11 @@ class PythonInterpreter(
     }
 
     private fun pySub(left: Any?, right: Any?, line: Int): Any? {
+        if (left is PyDateTime && right is PyTimeDelta) return left.subtract(right)
+        if (left is PyDateTime && right is PyDateTime) return left.difference(right)
+        if (left is PyDate && right is PyTimeDelta) return left.subtract(right)
+        if (left is PyDate && right is PyDate) return left.difference(right)
+        if (left is PyTimeDelta && right is PyTimeDelta) return left.subtract(right)
         val (n1, n2, isFloat) = toNumbers(left, right, line, "-")
         return if (isFloat) n1.toDouble() - n2.toDouble() else n1.toLong() - n2.toLong()
     }
@@ -1671,11 +1721,17 @@ class PythonInterpreter(
     private fun pyEquals(left: Any?, right: Any?): Boolean {
         if (left == null && right == null) return true
         if (left == null || right == null) return false
+        if (left is PyDateTime && right is PyDateTime) return left.epochMillis == right.epochMillis
+        if (left is PyDate && right is PyDate) return left.toEpochDay() == right.toEpochDay()
+        if (left is PyTimeDelta && right is PyTimeDelta) return left.totalSeconds() == right.totalSeconds()
         if (left is Number && right is Number) return left.toDouble() == right.toDouble()
         return left == right
     }
 
     private fun pyCompare(left: Any?, right: Any?, line: Int): Int {
+        if (left is PyDateTime && right is PyDateTime) return left.epochMillis.compareTo(right.epochMillis)
+        if (left is PyDate && right is PyDate) return left.toEpochDay().compareTo(right.toEpochDay())
+        if (left is PyTimeDelta && right is PyTimeDelta) return left.totalSeconds().compareTo(right.totalSeconds())
         if (left is Number && right is Number) {
             return left.toDouble().compareTo(right.toDouble())
         }
@@ -1766,8 +1822,88 @@ class PythonInterpreter(
                 "readline" -> PyBuiltinFunc("readline") { _, _ -> obj.readline() }
                 "readlines" -> PyBuiltinFunc("readlines") { _, _ -> obj.readlines().toMutableList() }
                 "getcode" -> PyBuiltinFunc("getcode") { _, _ -> obj.getcode() }
-                "status" -> obj.getcode()
+                "close" -> PyBuiltinFunc("close") { _, _ -> obj.close() }
+                "status", "code" -> obj.code.toLong()
+                "headers" -> obj.headers.toMutableMap()
+                "__enter__" -> PyBuiltinFunc("__enter__") { _, _ -> obj }
+                "__exit__" -> PyBuiltinFunc("__exit__") { _, _ -> obj.close(); null }
                 else -> throw PythonRuntimeException("AttributeError", "'HTTPResponse' object has no attribute '$name'", line)
+            }
+        }
+        if (obj is PyRequestsResponse) {
+            return when (name) {
+                "text" -> obj.text
+                "content" -> obj.content
+                "status_code" -> obj.status_code
+                "headers" -> obj.headers.toMutableMap()
+                "ok" -> obj.ok
+                "url" -> obj.url
+                "encoding" -> obj.encoding
+                "json" -> PyBuiltinFunc("json") { _, _ -> obj.json() }
+                "raise_for_status" -> PyBuiltinFunc("raise_for_status") { _, _ ->
+                    if (obj.status_code >= 400) {
+                        throw PythonRuntimeException("HTTPError", "HTTP ${obj.status_code} Error: ${obj.text.take(200)}", line)
+                    }
+                    null
+                }
+                else -> throw PythonRuntimeException("AttributeError", "'Response' object has no attribute '$name'", line)
+            }
+        }
+        if (obj is PyDateTime) {
+            return when (name) {
+                "year" -> obj.year
+                "month" -> obj.month
+                "day" -> obj.day
+                "hour" -> obj.hour
+                "minute" -> obj.minute
+                "second" -> obj.second
+                "microsecond" -> obj.microsecond
+                "strftime" -> PyBuiltinFunc("strftime") { args, _ ->
+                    val fmt = args.firstOrNull()?.toString() ?: "%Y-%m-%d %H:%M:%S"
+                    obj.strftime(fmt)
+                }
+                "isoformat" -> PyBuiltinFunc("isoformat") { _, _ -> obj.isoformat() }
+                "timestamp" -> PyBuiltinFunc("timestamp") { _, _ -> obj.timestamp() }
+                "date" -> PyBuiltinFunc("date") { _, _ -> obj.toDate() }
+                "time" -> PyBuiltinFunc("time") { _, _ -> obj.toTime() }
+                "weekday" -> PyBuiltinFunc("weekday") { _, _ -> obj.weekday() }
+                "isoweekday" -> PyBuiltinFunc("isoweekday") { _, _ -> obj.isoweekday() }
+                "replace" -> PyBuiltinFunc("replace") { _, kwargs -> obj.replace(kwargs) }
+                else -> throw PythonRuntimeException("AttributeError", "'datetime.datetime' object has no attribute '$name'", line)
+            }
+        }
+        if (obj is PyDate) {
+            return when (name) {
+                "year" -> obj.year.toLong()
+                "month" -> obj.month.toLong()
+                "day" -> obj.day.toLong()
+                "strftime" -> PyBuiltinFunc("strftime") { args, _ ->
+                    val fmt = args.firstOrNull()?.toString() ?: "%Y-%m-%d"
+                    obj.strftime(fmt)
+                }
+                "isoformat" -> PyBuiltinFunc("isoformat") { _, _ -> obj.isoformat() }
+                "weekday" -> PyBuiltinFunc("weekday") { _, _ -> obj.weekday() }
+                "isoweekday" -> PyBuiltinFunc("isoweekday") { _, _ -> obj.isoweekday() }
+                else -> throw PythonRuntimeException("AttributeError", "'datetime.date' object has no attribute '$name'", line)
+            }
+        }
+        if (obj is PyTime) {
+            return when (name) {
+                "hour" -> obj.hour.toLong()
+                "minute" -> obj.minute.toLong()
+                "second" -> obj.second.toLong()
+                "microsecond" -> obj.microsecond.toLong()
+                "isoformat" -> PyBuiltinFunc("isoformat") { _, _ -> obj.isoformat() }
+                else -> throw PythonRuntimeException("AttributeError", "'datetime.time' object has no attribute '$name'", line)
+            }
+        }
+        if (obj is PyTimeDelta) {
+            return when (name) {
+                "days" -> obj.days
+                "seconds" -> obj.seconds
+                "microseconds" -> obj.microseconds
+                "total_seconds" -> PyBuiltinFunc("total_seconds") { _, _ -> obj.totalSeconds() }
+                else -> throw PythonRuntimeException("AttributeError", "'datetime.timedelta' object has no attribute '$name'", line)
             }
         }
         if (obj is SandboxedFile) {
@@ -1777,6 +1913,8 @@ class PythonInterpreter(
                 "readlines" -> PyBuiltinFunc("readlines") { _, _ -> obj.readlines() }
                 "write" -> PyBuiltinFunc("write") { args, _ -> obj.write(pyStr(args.firstOrNull())) }
                 "close" -> PyBuiltinFunc("close") { _, _ -> obj.close() }
+                "__enter__" -> PyBuiltinFunc("__enter__") { _, _ -> obj }
+                "__exit__" -> PyBuiltinFunc("__exit__") { _, _ -> obj.close(); null }
                 else -> throw PythonRuntimeException("AttributeError", "'file' object has no attribute '$name'", line)
             }
         }
@@ -1785,6 +1923,14 @@ class PythonInterpreter(
                 "upper" -> PyBuiltinFunc("upper") { _, _ -> obj.uppercase(Locale.US) }
                 "lower" -> PyBuiltinFunc("lower") { _, _ -> obj.lowercase(Locale.US) }
                 "strip" -> PyBuiltinFunc("strip") { _, _ -> obj.trim() }
+                "lstrip" -> PyBuiltinFunc("lstrip") { _, _ -> obj.trimStart() }
+                "rstrip" -> PyBuiltinFunc("rstrip") { _, _ -> obj.trimEnd() }
+                "title" -> PyBuiltinFunc("title") { _, _ ->
+                    obj.split(" ").joinToString(" ") { it.replaceFirstChar { c -> c.uppercase(Locale.US) } }
+                }
+                "capitalize" -> PyBuiltinFunc("capitalize") { _, _ -> obj.replaceFirstChar { it.uppercase(Locale.US) } }
+                "decode" -> PyBuiltinFunc("decode") { _, _ -> obj }
+                "encode" -> PyBuiltinFunc("encode") { _, _ -> obj }
                 "split" -> PyBuiltinFunc("split") { args, _ ->
                     val delim = args.firstOrNull()?.toString()
                     if (delim != null) obj.split(delim).toMutableList() else obj.trim().split(Regex("\\s+")).toMutableList()
@@ -1804,6 +1950,25 @@ class PythonInterpreter(
                 "count" -> PyBuiltinFunc("count") { args, _ ->
                     val sub = pyStr(args.firstOrNull())
                     if (sub.isEmpty()) 0L else obj.windowed(sub.length).count { it == sub }.toLong()
+                }
+                "isdigit" -> PyBuiltinFunc("isdigit") { _, _ -> obj.isNotEmpty() && obj.all { it.isDigit() } }
+                "isalpha" -> PyBuiltinFunc("isalpha") { _, _ -> obj.isNotEmpty() && obj.all { it.isLetter() } }
+                "isalnum" -> PyBuiltinFunc("isalnum") { _, _ -> obj.isNotEmpty() && obj.all { it.isLetterOrDigit() } }
+                "isspace" -> PyBuiltinFunc("isspace") { _, _ -> obj.isNotEmpty() && obj.all { it.isWhitespace() } }
+                "format" -> PyBuiltinFunc("format") { args, kwargs ->
+                    val strObj = obj as String
+                    var res = strObj
+                    args.forEachIndexed { i, arg ->
+                        res = res.replace("{$i}", pyStr(arg))
+                    }
+                    kwargs.forEach { (k, v) ->
+                        res = res.replace("{$k}", pyStr(v))
+                    }
+                    var emptyIdx = 0
+                    while (res.contains("{}") && emptyIdx < args.size) {
+                        res = res.replaceFirst("{}", pyStr(args[emptyIdx++]))
+                    }
+                    res
                 }
                 else -> throw PythonRuntimeException("AttributeError", "'str' object has no attribute '$name'", line)
             }
@@ -1948,6 +2113,10 @@ class PythonInterpreter(
             is Float -> obj.toString()
             is Long -> obj.toString()
             is Int -> obj.toString()
+            is PyDateTime -> obj.toString()
+            is PyDate -> obj.toString()
+            is PyTime -> obj.toString()
+            is PyTimeDelta -> obj.toString()
             is List<*> -> "[${obj.joinToString(", ") { pyRepr(it) }}]"
             is Map<*, *> -> "{${obj.entries.joinToString(", ") { "'${it.key}': ${pyRepr(it.value)}" }}}"
             else -> obj.toString()
@@ -1957,6 +2126,9 @@ class PythonInterpreter(
     private fun pyRepr(obj: Any?): String {
         return when (obj) {
             is String -> "'$obj'"
+            is PyDateTime -> "datetime.datetime(${obj.year}, ${obj.month}, ${obj.day}, ${obj.hour}, ${obj.minute}, ${obj.second})"
+            is PyDate -> "datetime.date(${obj.year}, ${obj.month}, ${obj.day})"
+            is PyTimeDelta -> "datetime.timedelta(days=${obj.days}, seconds=${obj.seconds})"
             else -> pyStr(obj)
         }
     }
@@ -2173,8 +2345,18 @@ class PythonInterpreter(
 
     private fun handleImport(module: String, alias: String?, scope: MutableMap<String, Any?>, line: Int) {
         val pyMod = resolveModule(module, line)
-        val targetName = alias ?: (if (module.contains('.')) module.substringBefore('.') else module)
-        scope[targetName] = pyMod
+        if (alias != null) {
+            scope[alias] = pyMod
+        } else if (module.contains('.')) {
+            val rootName = module.substringBefore('.')
+            val rootMod = resolveModule(rootName, line)
+            val subName = module.substringAfterLast('.')
+            val updatedMembers = rootMod.members.toMutableMap()
+            updatedMembers[subName] = pyMod
+            scope[rootName] = PyModule(rootMod.name, updatedMembers)
+        } else {
+            scope[module] = pyMod
+        }
     }
 
     private fun handleFromImport(module: String, items: List<Pair<String, String?>>, scope: MutableMap<String, Any?>, line: Int) {
@@ -2506,42 +2688,385 @@ class PythonInterpreter(
             }
             "urllib" -> {
                 val reqMembers = mapOf<String, Any?>(
-                    "urlopen" to PyBuiltinFunc("urlopen") { args, _ ->
-                        val urlStr = pyStr(args.firstOrNull())
-                        executePythonHttpUrlopen(urlStr, line)
+                    "Request" to PyBuiltinFunc("Request") { args, kwargs ->
+                        val url = pyStr(args.firstOrNull() ?: kwargs["url"])
+                        val data = args.getOrNull(1) ?: kwargs["data"]
+                        val headersArg = (args.getOrNull(2) ?: kwargs["headers"]) as? Map<*, *>
+                        val headers = mutableMapOf<String, String>()
+                        headersArg?.forEach { (k, v) -> if (k != null && v != null) headers[k.toString()] = v.toString() }
+                        val method = (kwargs["method"] ?: args.getOrNull(3))?.toString()
+                        PyRequest(url, data, headers, method)
+                    },
+                    "urlopen" to PyBuiltinFunc("urlopen") { args, kwargs ->
+                        val target = args.firstOrNull() ?: kwargs["url"]
+                        executePythonHttpUrlopen(target, line)
                     }
                 )
                 val parseMembers = mapOf<String, Any?>(
                     "quote" to PyBuiltinFunc("quote") { args, _ -> java.net.URLEncoder.encode(pyStr(args.firstOrNull()), "UTF-8") },
-                    "unquote" to PyBuiltinFunc("unquote") { args, _ -> java.net.URLDecoder.decode(pyStr(args.firstOrNull()), "UTF-8") }
+                    "unquote" to PyBuiltinFunc("unquote") { args, _ -> java.net.URLDecoder.decode(pyStr(args.firstOrNull()), "UTF-8") },
+                    "urlencode" to PyBuiltinFunc("urlencode") { args, _ ->
+                        val map = args.firstOrNull() as? Map<*, *> ?: emptyMap<Any, Any>()
+                        map.entries.joinToString("&") { (k, v) ->
+                            "${java.net.URLEncoder.encode(k.toString(), "UTF-8")}=${java.net.URLEncoder.encode(v.toString(), "UTF-8")}"
+                        }
+                    }
+                )
+                val errorMembers = mapOf<String, Any?>(
+                    "URLError" to PyBuiltinFunc("URLError") { args, _ -> PythonRuntimeException("URLError", pyStr(args.firstOrNull()), line) },
+                    "HTTPError" to PyBuiltinFunc("HTTPError") { args, _ -> PythonRuntimeException("HTTPError", pyStr(args.firstOrNull()), line) }
                 )
                 val urllibMembers = mapOf<String, Any?>(
                     "request" to PyModule("urllib.request", reqMembers),
-                    "parse" to PyModule("urllib.parse", parseMembers)
+                    "parse" to PyModule("urllib.parse", parseMembers),
+                    "error" to PyModule("urllib.error", errorMembers)
                 )
                 PyModule("urllib", urllibMembers)
             }
             "urllib.request" -> {
                 val reqMembers = mapOf<String, Any?>(
-                    "urlopen" to PyBuiltinFunc("urlopen") { args, _ ->
-                        val urlStr = pyStr(args.firstOrNull())
-                        executePythonHttpUrlopen(urlStr, line)
+                    "Request" to PyBuiltinFunc("Request") { args, kwargs ->
+                        val url = pyStr(args.firstOrNull() ?: kwargs["url"])
+                        val data = args.getOrNull(1) ?: kwargs["data"]
+                        val headersArg = (args.getOrNull(2) ?: kwargs["headers"]) as? Map<*, *>
+                        val headers = mutableMapOf<String, String>()
+                        headersArg?.forEach { (k, v) -> if (k != null && v != null) headers[k.toString()] = v.toString() }
+                        val method = (kwargs["method"] ?: args.getOrNull(3))?.toString()
+                        PyRequest(url, data, headers, method)
+                    },
+                    "urlopen" to PyBuiltinFunc("urlopen") { args, kwargs ->
+                        val target = args.firstOrNull() ?: kwargs["url"]
+                        executePythonHttpUrlopen(target, line)
                     }
                 )
                 PyModule("urllib.request", reqMembers)
             }
+            "urllib.error" -> {
+                val errorMembers = mapOf<String, Any?>(
+                    "URLError" to PyBuiltinFunc("URLError") { args, _ -> PythonRuntimeException("URLError", pyStr(args.firstOrNull()), line) },
+                    "HTTPError" to PyBuiltinFunc("HTTPError") { args, _ -> PythonRuntimeException("HTTPError", pyStr(args.firstOrNull()), line) }
+                )
+                PyModule("urllib.error", errorMembers)
+            }
             "urllib.parse" -> {
                 val parseMembers = mapOf<String, Any?>(
                     "quote" to PyBuiltinFunc("quote") { args, _ -> java.net.URLEncoder.encode(pyStr(args.firstOrNull()), "UTF-8") },
-                    "unquote" to PyBuiltinFunc("unquote") { args, _ -> java.net.URLDecoder.decode(pyStr(args.firstOrNull()), "UTF-8") }
+                    "unquote" to PyBuiltinFunc("unquote") { args, _ -> java.net.URLDecoder.decode(pyStr(args.firstOrNull()), "UTF-8") },
+                    "urlencode" to PyBuiltinFunc("urlencode") { args, _ ->
+                        val map = args.firstOrNull() as? Map<*, *> ?: emptyMap<Any, Any>()
+                        map.entries.joinToString("&") { (k, v) ->
+                            "${java.net.URLEncoder.encode(k.toString(), "UTF-8")}=${java.net.URLEncoder.encode(v.toString(), "UTF-8")}"
+                        }
+                    }
                 )
                 PyModule("urllib.parse", parseMembers)
             }
+            "datetime" -> {
+                val dtClassMembers = mapOf<String, Any?>(
+                    "now" to PyBuiltinFunc("now") { _, _ -> PyDateTime.now() },
+                    "utcnow" to PyBuiltinFunc("utcnow") { _, _ -> PyDateTime.utcnow() },
+                    "today" to PyBuiltinFunc("today") { _, _ -> PyDateTime.now() },
+                    "fromtimestamp" to PyBuiltinFunc("fromtimestamp") { args, _ ->
+                        val ts = (args.firstOrNull() as? Number)?.toDouble() ?: 0.0
+                        PyDateTime.fromTimestamp(ts)
+                    },
+                    "strptime" to PyBuiltinFunc("strptime") { args, _ ->
+                        val dateStr = pyStr(args.firstOrNull())
+                        val fmt = pyStr(args.getOrNull(1) ?: "%Y-%m-%d %H:%M:%S")
+                        PyDateTime.strptime(dateStr, fmt)
+                    },
+                    "combine" to PyBuiltinFunc("combine") { args, _ ->
+                        val d = args.firstOrNull() as? PyDate ?: PyDate(2026, 1, 1)
+                        val t = args.getOrNull(1) as? PyTime ?: PyTime(0, 0, 0)
+                        PyDateTime.create(d.year, d.month, d.day, t.hour, t.minute, t.second, t.microsecond)
+                    }
+                )
+                val dtConstructor = PyBuiltinFunc("datetime") { args, kwargs ->
+                    if (args.isEmpty() && kwargs.isEmpty()) PyDateTime.now()
+                    else {
+                        val y = ((args.getOrNull(0) ?: kwargs["year"]) as? Number)?.toInt() ?: 2026
+                        val m = ((args.getOrNull(1) ?: kwargs["month"]) as? Number)?.toInt() ?: 1
+                        val d = ((args.getOrNull(2) ?: kwargs["day"]) as? Number)?.toInt() ?: 1
+                        val h = ((args.getOrNull(3) ?: kwargs["hour"]) as? Number)?.toInt() ?: 0
+                        val min = ((args.getOrNull(4) ?: kwargs["minute"]) as? Number)?.toInt() ?: 0
+                        val sec = ((args.getOrNull(5) ?: kwargs["second"]) as? Number)?.toInt() ?: 0
+                        val us = ((args.getOrNull(6) ?: kwargs["microsecond"]) as? Number)?.toInt() ?: 0
+                        PyDateTime.create(y, m, d, h, min, sec, us)
+                    }
+                }
+                val dateConstructor = PyBuiltinFunc("date") { args, kwargs ->
+                    val y = ((args.getOrNull(0) ?: kwargs["year"]) as? Number)?.toInt() ?: 2026
+                    val m = ((args.getOrNull(1) ?: kwargs["month"]) as? Number)?.toInt() ?: 1
+                    val d = ((args.getOrNull(2) ?: kwargs["day"]) as? Number)?.toInt() ?: 1
+                    PyDate(y, m, d)
+                }
+                val timeConstructor = PyBuiltinFunc("time") { args, kwargs ->
+                    val h = ((args.getOrNull(0) ?: kwargs["hour"]) as? Number)?.toInt() ?: 0
+                    val m = ((args.getOrNull(1) ?: kwargs["minute"]) as? Number)?.toInt() ?: 0
+                    val s = ((args.getOrNull(2) ?: kwargs["second"]) as? Number)?.toInt() ?: 0
+                    val us = ((args.getOrNull(3) ?: kwargs["microsecond"]) as? Number)?.toInt() ?: 0
+                    PyTime(h, m, s, us)
+                }
+                val timedeltaConstructor = PyBuiltinFunc("timedelta") { args, kwargs ->
+                    val days = (kwargs["days"] ?: args.getOrNull(0)) as? Number ?: 0
+                    val sec = (kwargs["seconds"] ?: args.getOrNull(1)) as? Number ?: 0
+                    val micro = (kwargs["microseconds"] ?: args.getOrNull(2)) as? Number ?: 0
+                    val ms = (kwargs["milliseconds"] ?: args.getOrNull(3)) as? Number ?: 0
+                    val min = (kwargs["minutes"] ?: args.getOrNull(4)) as? Number ?: 0
+                    val hr = (kwargs["hours"] ?: args.getOrNull(5)) as? Number ?: 0
+                    val wks = (kwargs["weeks"] ?: args.getOrNull(6)) as? Number ?: 0
+                    PyTimeDelta(
+                        days = days.toLong() + wks.toLong() * 7,
+                        seconds = sec.toLong() + min.toLong() * 60 + hr.toLong() * 3600,
+                        microseconds = micro.toLong() + ms.toLong() * 1000
+                    )
+                }
+                val tzUtc = PyTimeZone("UTC", 0)
+                val timezoneModule = mapOf<String, Any?>("utc" to tzUtc)
+
+                val members = mutableMapOf<String, Any?>(
+                    "datetime" to dtConstructor,
+                    "date" to dateConstructor,
+                    "time" to timeConstructor,
+                    "timedelta" to timedeltaConstructor,
+                    "timezone" to PyModule("datetime.timezone", timezoneModule)
+                )
+                dtClassMembers.forEach { (k, v) -> members[k] = v }
+                PyModule("datetime", members)
+            }
+            "calendar" -> {
+                val members = mapOf<String, Any?>(
+                    "monthrange" to PyBuiltinFunc("monthrange") { args, _ ->
+                        val y = (args.getOrNull(0) as? Number)?.toInt() ?: 2026
+                        val m = (args.getOrNull(1) as? Number)?.toInt() ?: 1
+                        val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+                            clear()
+                            set(y, m - 1, 1)
+                        }
+                        val firstDow = ((cal.get(Calendar.DAY_OF_WEEK) + 5) % 7).toLong()
+                        val daysInMonth = cal.getActualMaximum(Calendar.DAY_OF_MONTH).toLong()
+                        listOf(firstDow, daysInMonth).toMutableList()
+                    },
+                    "isleap" to PyBuiltinFunc("isleap") { args, _ ->
+                        val y = (args.firstOrNull() as? Number)?.toInt() ?: 2026
+                        (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0))
+                    },
+                    "day_name" to listOf("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday").toMutableList(),
+                    "month_name" to listOf("", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December").toMutableList()
+                )
+                PyModule("calendar", members)
+            }
+            "collections" -> {
+                val members = mapOf<String, Any?>(
+                    "defaultdict" to PyBuiltinFunc("defaultdict") { _, _ -> mutableMapOf<String, Any?>() },
+                    "Counter" to PyBuiltinFunc("Counter") { args, _ ->
+                        val seq = args.firstOrNull() as? List<*> ?: emptyList<Any?>()
+                        val counts = mutableMapOf<String, Long>()
+                        for (item in seq) {
+                            val k = pyStr(item)
+                            counts[k] = (counts[k] ?: 0L) + 1L
+                        }
+                        counts
+                    },
+                    "deque" to PyBuiltinFunc("deque") { args, _ ->
+                        (args.firstOrNull() as? List<*>)?.toMutableList() ?: mutableListOf<Any?>()
+                    },
+                    "OrderedDict" to PyBuiltinFunc("OrderedDict") { _, _ -> mutableMapOf<String, Any?>() }
+                )
+                PyModule("collections", members)
+            }
+            "itertools" -> {
+                val members = mapOf<String, Any?>(
+                    "chain" to PyBuiltinFunc("chain") { args, _ ->
+                        val res = mutableListOf<Any?>()
+                        for (a in args) {
+                            if (a is List<*>) res.addAll(a)
+                        }
+                        res
+                    },
+                    "count" to PyBuiltinFunc("count") { args, _ ->
+                        val start = (args.firstOrNull() as? Number)?.toLong() ?: 0L
+                        (0..999).map { start + it }.toMutableList()
+                    },
+                    "cycle" to PyBuiltinFunc("cycle") { args, _ ->
+                        (args.firstOrNull() as? List<*>)?.toMutableList() ?: mutableListOf<Any?>()
+                    },
+                    "repeat" to PyBuiltinFunc("repeat") { args, _ ->
+                        val item = args.firstOrNull()
+                        val times = (args.getOrNull(1) as? Number)?.toInt() ?: 1
+                        MutableList(times.coerceIn(0, 1000)) { item }
+                    }
+                )
+                PyModule("itertools", members)
+            }
+            "functools" -> {
+                val members = mapOf<String, Any?>(
+                    "reduce" to PyBuiltinFunc("reduce") { args, _ ->
+                        val func = args.getOrNull(0)
+                        val seq = args.getOrNull(1) as? List<*> ?: emptyList<Any?>()
+                        if (seq.isEmpty()) null
+                        else {
+                            var acc: Any? = seq[0]
+                            for (idx in 1 until seq.size) {
+                                if (func is PyBuiltinFunc) {
+                                    acc = func.invoke(listOf(acc, seq[idx]), emptyMap())
+                                }
+                            }
+                            acc
+                        }
+                    },
+                    "partial" to PyBuiltinFunc("partial") { args, _ -> args.firstOrNull() },
+                    "lru_cache" to PyBuiltinFunc("lru_cache") { _, _ ->
+                        PyBuiltinFunc("decorator") { inner, _ -> inner.firstOrNull() }
+                    }
+                )
+                PyModule("functools", members)
+            }
+            "uuid" -> {
+                val members = mapOf<String, Any?>(
+                    "uuid4" to PyBuiltinFunc("uuid4") { _, _ -> java.util.UUID.randomUUID().toString() },
+                    "uuid1" to PyBuiltinFunc("uuid1") { _, _ -> java.util.UUID.randomUUID().toString() }
+                )
+                PyModule("uuid", members)
+            }
+            "copy" -> {
+                val members = mapOf<String, Any?>(
+                    "copy" to PyBuiltinFunc("copy") { args, _ ->
+                        when (val a = args.firstOrNull()) {
+                            is List<*> -> a.toMutableList()
+                            is Map<*, *> -> a.toMutableMap()
+                            else -> a
+                        }
+                    },
+                    "deepcopy" to PyBuiltinFunc("deepcopy") { args, _ ->
+                        when (val a = args.firstOrNull()) {
+                            is List<*> -> a.toMutableList()
+                            is Map<*, *> -> a.toMutableMap()
+                            else -> a
+                        }
+                    }
+                )
+                PyModule("copy", members)
+            }
+            "typing" -> {
+                val members = mapOf<String, Any?>(
+                    "Any" to "Any",
+                    "List" to "List",
+                    "Dict" to "Dict",
+                    "Set" to "Set",
+                    "Tuple" to "Tuple",
+                    "Optional" to "Optional",
+                    "Union" to "Union",
+                    "Callable" to "Callable"
+                )
+                PyModule("typing", members)
+            }
+            "shutil" -> {
+                val members = mapOf<String, Any?>(
+                    "copy" to PyBuiltinFunc("copy") { args, _ ->
+                        val src = workspaceManager.resolvePath(pyStr(args.firstOrNull()))
+                        val dst = workspaceManager.resolvePath(pyStr(args.getOrNull(1)))
+                        src.copyTo(dst, overwrite = true)
+                        dst.canonicalPath
+                    },
+                    "copy2" to PyBuiltinFunc("copy2") { args, _ ->
+                        val src = workspaceManager.resolvePath(pyStr(args.firstOrNull()))
+                        val dst = workspaceManager.resolvePath(pyStr(args.getOrNull(1)))
+                        src.copyTo(dst, overwrite = true)
+                        dst.canonicalPath
+                    },
+                    "move" to PyBuiltinFunc("move") { args, _ ->
+                        val src = workspaceManager.resolvePath(pyStr(args.firstOrNull()))
+                        val dst = workspaceManager.resolvePath(pyStr(args.getOrNull(1)))
+                        src.renameTo(dst)
+                        dst.canonicalPath
+                    },
+                    "rmtree" to PyBuiltinFunc("rmtree") { args, _ ->
+                        val target = workspaceManager.resolvePath(pyStr(args.firstOrNull()))
+                        target.deleteRecursively()
+                        null
+                    }
+                )
+                PyModule("shutil", members)
+            }
+            "csv" -> {
+                val members = mapOf<String, Any?>(
+                    "reader" to PyBuiltinFunc("reader") { args, _ ->
+                        val lines = when (val a = args.firstOrNull()) {
+                            is SandboxedFile -> a.readlines()
+                            is List<*> -> a.map { it.toString() }
+                            else -> emptyList()
+                        }
+                        lines.map { l -> l.split(",").map { it.trim() }.toMutableList() }.toMutableList()
+                    }
+                )
+                PyModule("csv", members)
+            }
+            "requests" -> {
+                val reqsMembers = mapOf<String, Any?>(
+                    "get" to PyBuiltinFunc("get") { args, kwargs ->
+                        var url = pyStr(args.firstOrNull() ?: kwargs["url"])
+                        val paramsArg = kwargs["params"] ?: (if (args.size > 1 && args[1] is Map<*, *>) args[1] else null)
+                        if (paramsArg is Map<*, *>) {
+                            val q = paramsArg.entries.joinToString("&") { (k, v) ->
+                                "${java.net.URLEncoder.encode(k.toString(), "UTF-8")}=${java.net.URLEncoder.encode(v.toString(), "UTF-8")}"
+                            }
+                            if (q.isNotBlank()) {
+                                url = if (url.contains("?")) "$url&$q" else "$url?$q"
+                            }
+                        }
+                        val headersArg = (kwargs["headers"] ?: (if (args.size > 2) args[2] else null)) as? Map<*, *>
+                        val headers = mutableMapOf<String, String>()
+                        headersArg?.forEach { (k, v) -> if (k != null && v != null) headers[k.toString()] = v.toString() }
+                        val req = PyRequest(url, null, headers, "GET")
+                        val resp = executePythonHttpUrlopen(req, line)
+                        PyRequestsResponse(resp, url) { parseJsonToPy(it) }
+                    },
+                    "post" to PyBuiltinFunc("post") { args, kwargs ->
+                        var url = pyStr(args.firstOrNull() ?: kwargs["url"])
+                        val paramsArg = kwargs["params"]
+                        if (paramsArg is Map<*, *>) {
+                            val q = paramsArg.entries.joinToString("&") { (k, v) ->
+                                "${java.net.URLEncoder.encode(k.toString(), "UTF-8")}=${java.net.URLEncoder.encode(v.toString(), "UTF-8")}"
+                            }
+                            if (q.isNotBlank()) {
+                                url = if (url.contains("?")) "$url&$q" else "$url?$q"
+                            }
+                        }
+                        val jsonArg = kwargs["json"]
+                        val dataArg = kwargs["data"] ?: args.getOrNull(1)
+                        val postBody = when {
+                            jsonArg != null -> pyJsonDumps(jsonArg)
+                            dataArg != null -> pyStr(dataArg)
+                            else -> null
+                        }
+                        val headersArg = (kwargs["headers"] ?: args.getOrNull(2)) as? Map<*, *>
+                        val headers = mutableMapOf<String, String>()
+                        if (jsonArg != null) headers["Content-Type"] = "application/json"
+                        headersArg?.forEach { (k, v) -> if (k != null && v != null) headers[k.toString()] = v.toString() }
+                        val req = PyRequest(url, postBody, headers, "POST")
+                        val resp = executePythonHttpUrlopen(req, line)
+                        PyRequestsResponse(resp, url) { parseJsonToPy(it) }
+                    }
+                )
+                PyModule("requests", reqsMembers)
+            }
             else -> {
                 // Workspace module resolution
+                val cleanSub = module.replace('.', '/')
                 val candidatePaths = listOf(
-                    "$module.py",
-                    "${module.replace('.', '/')}.py"
+                    "lib/$cleanSub/__init__.py",
+                    "lib/$cleanSub.py",
+                    "lib/$module/__init__.py",
+                    "lib/$module.py",
+                    "src/$cleanSub/__init__.py",
+                    "src/$cleanSub.py",
+                    "src/$module/__init__.py",
+                    "src/$module.py",
+                    "$cleanSub/__init__.py",
+                    "$cleanSub.py",
+                    "$module/__init__.py",
+                    "$module.py"
                 )
                 var resolvedFile: File? = null
                 for (p in candidatePaths) {
@@ -2575,6 +3100,7 @@ class PythonInterpreter(
                     for ((k, v) in modScope) {
                         if (!k.startsWith("__")) {
                             modMembers[k] = v
+                            moduleObj.members[k] = v
                         }
                     }
                     moduleObj
@@ -2588,26 +3114,85 @@ class PythonInterpreter(
         return pyMod
     }
 
-    private fun executePythonHttpUrlopen(urlStr: String, line: Int): PyHttpResponse {
-        val targetUrl = if (urlStr.startsWith("http://", ignoreCase = true) || urlStr.startsWith("https://", ignoreCase = true)) {
-            urlStr
+    private fun executePythonHttpUrlopen(requestOrUrl: Any?, line: Int): PyHttpResponse {
+        val targetUrl: String
+        val customHeaders = mutableMapOf<String, String>()
+        var httpMethod = "GET"
+        var postData: String? = null
+
+        when (requestOrUrl) {
+            is PyRequest -> {
+                targetUrl = requestOrUrl.url
+                customHeaders.putAll(requestOrUrl.headers)
+                if (requestOrUrl.method != null) httpMethod = requestOrUrl.method
+                if (requestOrUrl.data != null) {
+                    postData = pyStr(requestOrUrl.data)
+                    if (requestOrUrl.method == null) httpMethod = "POST"
+                }
+            }
+            else -> {
+                targetUrl = pyStr(requestOrUrl)
+            }
+        }
+
+        var fullUrl = if (targetUrl.startsWith("http://", ignoreCase = true) || targetUrl.startsWith("https://", ignoreCase = true)) {
+            targetUrl
         } else {
-            "https://$urlStr"
+            "https://$targetUrl"
         }
-        return try {
-            val url = java.net.URL(targetUrl)
-            val conn = url.openConnection() as java.net.HttpURLConnection
-            conn.instanceFollowRedirects = true
-            conn.connectTimeout = 12000
-            conn.readTimeout = 15000
-            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-            val code = conn.responseCode
-            val stream = if (code in 200..399) conn.inputStream else conn.errorStream ?: java.io.ByteArrayInputStream(ByteArray(0))
-            val text = stream.bufferedReader().use { it.readText() }
-            PyHttpResponse(code, text)
-        } catch (e: Exception) {
-            throw PythonRuntimeException("URLError", "Failed to open URL '$targetUrl': ${e.message}", line)
+
+        var hops = 0
+        while (hops < 6) {
+            try {
+                val urlObj = java.net.URL(fullUrl)
+                val conn = urlObj.openConnection() as java.net.HttpURLConnection
+                conn.instanceFollowRedirects = false
+                conn.connectTimeout = 15000
+                conn.readTimeout = 20000
+                conn.requestMethod = httpMethod
+                conn.setRequestProperty(
+                    "User-Agent",
+                    customHeaders["User-Agent"] ?: customHeaders["user-agent"]
+                        ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
+                conn.setRequestProperty("Accept", "application/json, text/plain, */*")
+                customHeaders.forEach { (k, v) ->
+                    if (!k.equals("User-Agent", ignoreCase = true)) {
+                        conn.setRequestProperty(k, v)
+                    }
+                }
+
+                if (postData != null && (httpMethod == "POST" || httpMethod == "PUT" || httpMethod == "PATCH")) {
+                    conn.doOutput = true
+                    conn.outputStream.bufferedWriter(Charsets.UTF_8).use { it.write(postData) }
+                }
+
+                val code = conn.responseCode
+                if (code in listOf(301, 302, 303, 307, 308)) {
+                    val location = conn.getHeaderField("Location")
+                    if (!location.isNullOrBlank()) {
+                        fullUrl = java.net.URL(urlObj, location).toString()
+                        hops++
+                        if (code == 303) httpMethod = "GET"
+                        continue
+                    }
+                }
+
+                val stream = if (code in 200..399) conn.inputStream else conn.errorStream ?: java.io.ByteArrayInputStream(ByteArray(0))
+                val text = stream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                val respHeaders = mutableMapOf<String, String>()
+                conn.headerFields.forEach { (k, v) ->
+                    if (k != null) respHeaders[k.lowercase(Locale.US)] = v.joinToString(", ")
+                }
+                return PyHttpResponse(code, text, respHeaders)
+            } catch (e: Exception) {
+                if (hops > 0) {
+                    throw PythonRuntimeException("URLError", "Failed following redirect to '$fullUrl': ${e.message}", line)
+                }
+                throw PythonRuntimeException("URLError", "Failed to open URL '$fullUrl': ${e.message}", line)
+            }
         }
+        throw PythonRuntimeException("URLError", "Too many redirects attempting to open '$targetUrl'", line)
     }
 
     private fun pyJsonDumps(obj: Any?): String {
@@ -2833,11 +3418,279 @@ class PyModule(val name: String, membersInput: Map<String, Any?> = emptyMap()) {
     fun getMember(name: String): Any? = members[name]
 }
 
-class PyHttpResponse(val code: Int, val content: String) {
+class PyRequest(
+    val url: String,
+    val data: Any? = null,
+    val headers: MutableMap<String, String> = mutableMapOf(),
+    val method: String? = null
+)
+
+class PyHttpResponse(
+    val code: Int,
+    val content: String,
+    val headers: Map<String, String> = emptyMap()
+) {
+    var isClosed = false
     fun read(): String = content
     fun readline(): String = content.lines().firstOrNull() ?: ""
     fun readlines(): List<String> = content.lines()
     fun getcode(): Long = code.toLong()
+    fun close() { isClosed = true }
+}
+
+class PyRequestsResponse(
+    private val httpResp: PyHttpResponse,
+    val url: String = "",
+    private val jsonParser: (String) -> Any?
+) {
+    val text: String get() = httpResp.content
+    val content: String get() = httpResp.content
+    val status_code: Long get() = httpResp.code.toLong()
+    val headers: Map<String, String> get() = httpResp.headers
+    val ok: Boolean get() = httpResp.code in 200..399
+    val encoding: String = "utf-8"
+    fun json(): Any? = jsonParser(httpResp.content)
+}
+
+class PyTimeZone(val name: String, val offsetSeconds: Int = 0) {
+    override fun toString(): String = name
+}
+
+class PyTimeDelta(
+    val days: Long = 0,
+    val seconds: Long = 0,
+    val microseconds: Long = 0
+) {
+    fun totalSeconds(): Double = days * 86400.0 + seconds + (microseconds.toDouble() / 1_000_000.0)
+
+    fun add(other: PyTimeDelta): PyTimeDelta {
+        val totalSec = this.totalSeconds() + other.totalSeconds()
+        val d = (totalSec / 86400).toLong()
+        val s = (totalSec % 86400).toLong()
+        val us = ((totalSec - (d * 86400 + s)) * 1_000_000).toLong()
+        return PyTimeDelta(d, s, us)
+    }
+
+    fun subtract(other: PyTimeDelta): PyTimeDelta {
+        val totalSec = this.totalSeconds() - other.totalSeconds()
+        val d = (totalSec / 86400).toLong()
+        val s = (totalSec % 86400).toLong()
+        val us = ((totalSec - (d * 86400 + s)) * 1_000_000).toLong()
+        return PyTimeDelta(d, s, us)
+    }
+
+    override fun toString(): String {
+        val hours = seconds / 3600
+        val mins = (seconds % 3600) / 60
+        val secs = seconds % 60
+        return if (days != 0L) {
+            val dayWord = if (days == 1L || days == -1L) "day" else "days"
+            String.format(Locale.US, "%d %s, %d:%02d:%02d", days, dayWord, hours, mins, secs)
+        } else {
+            String.format(Locale.US, "%d:%02d:%02d", hours, mins, secs)
+        }
+    }
+}
+
+class PyDate(val year: Int, val month: Int, val day: Int) {
+    fun toEpochDay(): Long {
+        val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+            clear()
+            set(year, month - 1, day)
+        }
+        return cal.timeInMillis / 86400000L
+    }
+
+    fun weekday(): Long {
+        val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+            clear()
+            set(year, month - 1, day)
+        }
+        val dow = cal.get(Calendar.DAY_OF_WEEK)
+        return ((dow + 5) % 7).toLong()
+    }
+
+    fun isoweekday(): Long = weekday() + 1
+
+    fun isoformat(): String = String.format(Locale.US, "%04d-%02d-%02d", year, month, day)
+
+    fun strftime(format: String): String {
+        val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+            clear()
+            set(year, month - 1, day)
+        }
+        return formatPyDate(cal.time, format, TimeZone.getTimeZone("UTC"))
+    }
+
+    fun add(delta: PyTimeDelta): PyDate {
+        val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+            clear()
+            set(year, month - 1, day)
+            add(Calendar.DAY_OF_YEAR, delta.days.toInt())
+            add(Calendar.SECOND, delta.seconds.toInt())
+        }
+        return PyDate(cal.get(Calendar.YEAR), cal.get(Calendar.MONTH) + 1, cal.get(Calendar.DAY_OF_MONTH))
+    }
+
+    fun subtract(delta: PyTimeDelta): PyDate {
+        val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+            clear()
+            set(year, month - 1, day)
+            add(Calendar.DAY_OF_YEAR, -delta.days.toInt())
+            add(Calendar.SECOND, -delta.seconds.toInt())
+        }
+        return PyDate(cal.get(Calendar.YEAR), cal.get(Calendar.MONTH) + 1, cal.get(Calendar.DAY_OF_MONTH))
+    }
+
+    fun difference(other: PyDate): PyTimeDelta {
+        val days = this.toEpochDay() - other.toEpochDay()
+        return PyTimeDelta(days, 0, 0)
+    }
+
+    override fun toString(): String = isoformat()
+}
+
+class PyTime(val hour: Int, val minute: Int, val second: Int, val microsecond: Int = 0) {
+    fun isoformat(): String = String.format(Locale.US, "%02d:%02d:%02d", hour, minute, second)
+    override fun toString(): String = isoformat()
+}
+
+class PyDateTime(
+    val epochMillis: Long,
+    val timeZone: TimeZone = TimeZone.getDefault()
+) {
+    private val calendar: Calendar get() = Calendar.getInstance(timeZone).apply { timeInMillis = epochMillis }
+
+    val year: Long get() = calendar.get(Calendar.YEAR).toLong()
+    val month: Long get() = (calendar.get(Calendar.MONTH) + 1).toLong()
+    val day: Long get() = calendar.get(Calendar.DAY_OF_MONTH).toLong()
+    val hour: Long get() = calendar.get(Calendar.HOUR_OF_DAY).toLong()
+    val minute: Long get() = calendar.get(Calendar.MINUTE).toLong()
+    val second: Long get() = calendar.get(Calendar.SECOND).toLong()
+    val microsecond: Long get() = (calendar.get(Calendar.MILLISECOND) * 1000).toLong()
+
+    fun weekday(): Long {
+        val dow = calendar.get(Calendar.DAY_OF_WEEK)
+        return ((dow + 5) % 7).toLong()
+    }
+
+    fun isoweekday(): Long = weekday() + 1
+    fun timestamp(): Double = epochMillis / 1000.0
+    fun toDate(): PyDate = PyDate(year.toInt(), month.toInt(), day.toInt())
+    fun toTime(): PyTime = PyTime(hour.toInt(), minute.toInt(), second.toInt(), microsecond.toInt())
+
+    fun isoformat(): String {
+        return String.format(
+            Locale.US,
+            "%04d-%02d-%02dT%02d:%02d:%02d",
+            year, month, day, hour, minute, second
+        )
+    }
+
+    fun strftime(format: String): String = formatPyDate(calendar.time, format, timeZone)
+
+    fun add(delta: PyTimeDelta): PyDateTime {
+        val newMillis = epochMillis + (delta.totalSeconds() * 1000).toLong()
+        return PyDateTime(newMillis, timeZone)
+    }
+
+    fun subtract(delta: PyTimeDelta): PyDateTime {
+        val newMillis = epochMillis - (delta.totalSeconds() * 1000).toLong()
+        return PyDateTime(newMillis, timeZone)
+    }
+
+    fun difference(other: PyDateTime): PyTimeDelta {
+        val diffSec = (this.epochMillis - other.epochMillis) / 1000.0
+        val d = (diffSec / 86400).toLong()
+        val s = (diffSec % 86400).toLong()
+        return PyTimeDelta(d, s, 0)
+    }
+
+    fun replace(kwargs: Map<String, Any?>): PyDateTime {
+        val cal = Calendar.getInstance(timeZone).apply { timeInMillis = epochMillis }
+        (kwargs["year"] as? Number)?.let { cal.set(Calendar.YEAR, it.toInt()) }
+        (kwargs["month"] as? Number)?.let { cal.set(Calendar.MONTH, it.toInt() - 1) }
+        (kwargs["day"] as? Number)?.let { cal.set(Calendar.DAY_OF_MONTH, it.toInt()) }
+        (kwargs["hour"] as? Number)?.let { cal.set(Calendar.HOUR_OF_DAY, it.toInt()) }
+        (kwargs["minute"] as? Number)?.let { cal.set(Calendar.MINUTE, it.toInt()) }
+        (kwargs["second"] as? Number)?.let { cal.set(Calendar.SECOND, it.toInt()) }
+        return PyDateTime(cal.timeInMillis, timeZone)
+    }
+
+    override fun toString(): String {
+        return String.format(
+            Locale.US,
+            "%04d-%02d-%02d %02d:%02d:%02d",
+            year, month, day, hour, minute, second
+        )
+    }
+
+    companion object {
+        fun now(tz: TimeZone = TimeZone.getDefault()): PyDateTime = PyDateTime(System.currentTimeMillis(), tz)
+        fun utcnow(): PyDateTime = PyDateTime(System.currentTimeMillis(), TimeZone.getTimeZone("UTC"))
+        fun fromTimestamp(ts: Double, tz: TimeZone = TimeZone.getDefault()): PyDateTime = PyDateTime((ts * 1000).toLong(), tz)
+
+        fun create(
+            year: Int,
+            month: Int,
+            day: Int,
+            hour: Int = 0,
+            minute: Int = 0,
+            second: Int = 0,
+            microsecond: Int = 0,
+            tz: TimeZone = TimeZone.getDefault()
+        ): PyDateTime {
+            val cal = Calendar.getInstance(tz).apply {
+                clear()
+                set(year, month - 1, day, hour, minute, second)
+                set(Calendar.MILLISECOND, microsecond / 1000)
+            }
+            return PyDateTime(cal.timeInMillis, tz)
+        }
+
+        fun strptime(dateStr: String, format: String): PyDateTime {
+            val jFormat = format
+                .replace("%Y", "yyyy")
+                .replace("%y", "yy")
+                .replace("%m", "MM")
+                .replace("%d", "dd")
+                .replace("%H", "HH")
+                .replace("%I", "hh")
+                .replace("%M", "mm")
+                .replace("%S", "ss")
+                .replace("%p", "a")
+                .replace("%B", "MMMM")
+                .replace("%b", "MMM")
+                .replace("%A", "EEEE")
+                .replace("%a", "EEE")
+                .replace("%Z", "z")
+                .replace("%z", "Z")
+            val sdf = SimpleDateFormat(jFormat, Locale.US)
+            val parsed = try { sdf.parse(dateStr) } catch (_: Exception) { null } ?: Date()
+            return PyDateTime(parsed.time)
+        }
+    }
+}
+
+fun formatPyDate(date: Date, format: String, tz: TimeZone): String {
+    val jFormat = format
+        .replace("%Y", "yyyy")
+        .replace("%y", "yy")
+        .replace("%m", "MM")
+        .replace("%d", "dd")
+        .replace("%H", "HH")
+        .replace("%I", "hh")
+        .replace("%M", "mm")
+        .replace("%S", "ss")
+        .replace("%p", "a")
+        .replace("%B", "MMMM")
+        .replace("%b", "MMM")
+        .replace("%A", "EEEE")
+        .replace("%a", "EEE")
+        .replace("%Z", "z")
+        .replace("%z", "Z")
+    val sdf = SimpleDateFormat(jFormat, Locale.US).apply { timeZone = tz }
+    return sdf.format(date)
 }
 
 class SandboxedFile(

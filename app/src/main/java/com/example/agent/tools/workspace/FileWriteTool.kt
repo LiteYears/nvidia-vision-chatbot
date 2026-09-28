@@ -72,7 +72,12 @@ class FileWriteTool(
             is String -> a.equals("true", ignoreCase = true)
             else -> false
         }
-        val encoding = arguments["encoding"]?.toString()?.trim()?.lowercase() ?: "utf-8"
+        val isBase64Arg = when (val b = arguments["is_base64"]) {
+            is Boolean -> b
+            is String -> b.equals("true", ignoreCase = true)
+            else -> false
+        }
+        val encoding = if (isBase64Arg) "base64" else (arguments["encoding"]?.toString()?.trim()?.lowercase() ?: "utf-8")
 
         val targetFile: File
         try {

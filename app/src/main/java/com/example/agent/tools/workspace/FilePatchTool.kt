@@ -222,7 +222,7 @@ class FilePatchTool(
 
             return PatchApplicationResult(
                 isSuccess = false,
-                errorMessage = "target_content was not found in the file. Tip: Call 'file_read' to inspect the exact lines, or use 'file_write' to update the complete file.",
+                errorMessage = "Could not find target_content in the file. Tip: Call 'file_read' to inspect the exact lines, or use 'file_write' to update the complete file.",
                 newContent = originalContent,
                 linesRemoved = 0,
                 linesAdded = 0

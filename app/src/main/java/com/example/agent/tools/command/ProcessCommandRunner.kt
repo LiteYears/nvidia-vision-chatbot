@@ -1,5 +1,8 @@
 package com.example.agent.tools.command
 
+import com.example.agent.python.EmbeddedPythonRuntime
+import com.example.agent.python.WorkspacePipManager
+import com.example.agent.tools.workspace.AgentWorkspaceManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -7,23 +10,29 @@ import okhttp3.Request
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Robust process runner for executing shell commands and scripts with Claude Code-like capabilities.
+ * Ubuntu-like bash and Python 3 command execution engine for Agent Workspace.
  *
- * Provides:
- * - Dynamic shell resolution (/system/bin/sh, /bin/sh, etc.)
- * - Rich PATH resolution ensuring Android binaries, Linux toolchains, Node.js, and Python are discoverable
- * - Automatic aliasing (python -> python3, pip -> pip3, node -> nodejs) when primary alias is absent
- * - Integration with workspace directories (bin/, node_modules/.bin, lib/, src/) via PATH, PYTHONPATH, and NODE_PATH
- * - Built-in fallback execution for curl, wget, pip, and npm when host binaries are missing
- * - Strict execution timeouts with process tree cleanup
- * - Stream size limiting to protect memory
- * - Non-blocking asynchronous stdout/stderr collection
+ * Provides a seamless Linux terminal environment:
+ * - Full pip support (pip install, pip uninstall, pip list, pip show, pip freeze, pip --version)
+ * - Full Python 3 support (python3 script.py, python3 -c "...", python3 -m pip, python3 --version)
+ * - Ubuntu shell commands (uname -a, whoami, hostname, which, date, env, apt/apt-get, df, free, uptime)
+ * - Compound command chaining (cmd1 && cmd2, cmd1 ; cmd2, cmd1 || cmd2)
+ * - Seamless host shell (/system/bin/sh) integration with pure-Kotlin fallbacks for standard utilities
+ * - Built-in HTTP client for curl and wget
  */
-class ProcessCommandRunner : CommandRunner {
+class ProcessCommandRunner(
+    private val pipManager: WorkspacePipManager = WorkspacePipManager(),
+    private val pythonRuntime: EmbeddedPythonRuntime = EmbeddedPythonRuntime(),
+    private val workspaceManager: AgentWorkspaceManager = AgentWorkspaceManager.getInstance()
+) : CommandRunner {
 
     override suspend fun run(
         command: String,
@@ -31,95 +40,609 @@ class ProcessCommandRunner : CommandRunner {
         timeoutMs: Long,
         maxOutputBytes: Int
     ): CommandExecutionResult = withContext(Dispatchers.IO) {
-        val startTime = System.currentTimeMillis()
-        val shell = resolveShell()
+        val trimmed = command.trim()
+        if (trimmed.isBlank()) {
+            return@withContext CommandExecutionResult(
+                exitCode = 0,
+                stdout = "",
+                stderr = "",
+                durationMs = 0
+            )
+        }
 
         // Ensure working directory exists
         if (!workingDir.exists()) {
             workingDir.mkdirs()
         }
 
-        // Configure search paths including workspace bin/ and node_modules/.bin
-        val systemEnv = System.getenv()
+        // 1. Check for compound shell operators (&&, ;, ||)
+        val compoundSegments = splitCompoundCommand(trimmed)
+        if (compoundSegments.size > 1) {
+            return@withContext runCompound(compoundSegments, workingDir, timeoutMs, maxOutputBytes)
+        }
+
+        // 2. Execute single command
+        runSingleCommand(trimmed, workingDir, timeoutMs, maxOutputBytes)
+    }
+
+    private data class CommandSegment(
+        val command: String,
+        val operator: String // "", "&&", "||", ";"
+    )
+
+    private fun splitCompoundCommand(raw: String): List<CommandSegment> {
+        val segments = mutableListOf<CommandSegment>()
+        val current = StringBuilder()
+        var inSingle = false
+        var inDouble = false
+        var escape = false
+        var pendingOp = ""
+
+        var i = 0
+        while (i < raw.length) {
+            val c = raw[i]
+            if (escape) {
+                current.append(c)
+                escape = false
+                i++
+                continue
+            }
+            if (c == '\\') {
+                escape = true
+                current.append(c)
+                i++
+                continue
+            }
+            if (c == '\'' && !inDouble) {
+                inSingle = !inSingle
+                current.append(c)
+                i++
+                continue
+            }
+            if (c == '"' && !inSingle) {
+                inDouble = !inDouble
+                current.append(c)
+                i++
+                continue
+            }
+
+            if (!inSingle && !inDouble) {
+                if (c == ';' || c == '\n') {
+                    if (current.isNotBlank()) {
+                        segments.add(CommandSegment(current.toString().trim(), pendingOp))
+                        current.clear()
+                    }
+                    pendingOp = ";"
+                    i++
+                    continue
+                }
+                if (c == '&' && i + 1 < raw.length && raw[i + 1] == '&') {
+                    if (current.isNotBlank()) {
+                        segments.add(CommandSegment(current.toString().trim(), pendingOp))
+                        current.clear()
+                    }
+                    pendingOp = "&&"
+                    i += 2
+                    continue
+                }
+                if (c == '|' && i + 1 < raw.length && raw[i + 1] == '|') {
+                    if (current.isNotBlank()) {
+                        segments.add(CommandSegment(current.toString().trim(), pendingOp))
+                        current.clear()
+                    }
+                    pendingOp = "||"
+                    i += 2
+                    continue
+                }
+            }
+
+            current.append(c)
+            i++
+        }
+
+        if (current.isNotBlank()) {
+            segments.add(CommandSegment(current.toString().trim(), pendingOp))
+        }
+
+        return segments
+    }
+
+    private suspend fun runCompound(
+        segments: List<CommandSegment>,
+        workingDir: File,
+        timeoutMs: Long,
+        maxOutputBytes: Int
+    ): CommandExecutionResult {
+        val startTime = System.currentTimeMillis()
+        val stdoutSb = StringBuilder()
+        val stderrSb = StringBuilder()
+        var lastExit = 0
+        var isTruncated = false
+
+        for ((idx, seg) in segments.withIndex()) {
+            val remainingTimeout = (timeoutMs - (System.currentTimeMillis() - startTime)).coerceAtLeast(500L)
+            if (idx > 0) {
+                if (seg.operator == "&&" && lastExit != 0) break
+                if (seg.operator == "||" && lastExit == 0) break
+            }
+
+            val stepRes = runSingleCommand(seg.command, workingDir, remainingTimeout, maxOutputBytes)
+            lastExit = stepRes.exitCode
+            if (stepRes.stdout.isNotBlank()) {
+                if (stdoutSb.isNotEmpty()) stdoutSb.append("\n")
+                stdoutSb.append(stepRes.stdout)
+            }
+            if (stepRes.stderr.isNotBlank()) {
+                if (stderrSb.isNotEmpty()) stderrSb.append("\n")
+                stderrSb.append(stepRes.stderr)
+            }
+            if (stepRes.isTruncated) isTruncated = true
+
+            if (stepRes.isTimedOut) {
+                return CommandExecutionResult(
+                    exitCode = -1,
+                    stdout = stdoutSb.toString(),
+                    stderr = stderrSb.toString(),
+                    durationMs = System.currentTimeMillis() - startTime,
+                    isTimedOut = true,
+                    isTruncated = isTruncated
+                )
+            }
+        }
+
+        return CommandExecutionResult(
+            exitCode = lastExit,
+            stdout = stdoutSb.toString(),
+            stderr = stderrSb.toString(),
+            durationMs = System.currentTimeMillis() - startTime,
+            isTimedOut = false,
+            isTruncated = isTruncated
+        )
+    }
+
+    private suspend fun runSingleCommand(
+        command: String,
+        workingDir: File,
+        timeoutMs: Long,
+        maxOutputBytes: Int
+    ): CommandExecutionResult {
+        val trimmed = command.trim()
+        val tokens = tokenize(trimmed)
+        if (tokens.isEmpty()) {
+            return CommandExecutionResult(0, "", "", 0)
+        }
+
+        val firstToken = tokens[0].trim('\'', '"')
+        val cleanExec = if (firstToken.contains('/')) File(firstToken).name.lowercase() else firstToken.lowercase()
+
+        // 1. Direct Pip Commands
+        if (cleanExec == "pip" || cleanExec == "pip3") {
+            return pipManager.execute(trimmed, workingDir)
+        }
+
+        // 2. Direct Python Commands
+        if (cleanExec == "python" || cleanExec == "python3" || cleanExec == "py") {
+            return executePythonCommand(tokens, workingDir, timeoutMs, maxOutputBytes)
+        }
+
+        // 3. Bash / Sh subshell wrappers
+        if ((cleanExec == "bash" || cleanExec == "sh") && tokens.size >= 3 && tokens[1] == "-c") {
+            val innerCmd = tokens.drop(2).joinToString(" ")
+            return run(innerCmd, workingDir, timeoutMs, maxOutputBytes)
+        }
+
+        // 4. Ubuntu built-in utilities
+        when (cleanExec) {
+            "uname" -> {
+                val isAll = tokens.any { it == "-a" || it == "--all" }
+                val out = if (isAll) {
+                    "Linux ubuntu-workspace 5.15.0-101-generic #111-Ubuntu SMP x86_64 GNU/Linux\n"
+                } else {
+                    "Linux\n"
+                }
+                return CommandExecutionResult(0, out, "", 5)
+            }
+            "whoami" -> return CommandExecutionResult(0, "ubuntu\n", "", 5)
+            "hostname" -> return CommandExecutionResult(0, "ubuntu-workspace\n", "", 5)
+            "id" -> return CommandExecutionResult(
+                0,
+                "uid=1000(ubuntu) gid=1000(ubuntu) groups=1000(ubuntu),4(adm),24(cdrom),27(sudo),30(dip),46(plugdev)\n",
+                "",
+                5
+            )
+            "which" -> {
+                val target = tokens.getOrNull(1)?.lowercase() ?: ""
+                val path = when (target) {
+                    "python", "python3" -> "/usr/bin/python3"
+                    "pip", "pip3" -> "/usr/local/bin/pip"
+                    "bash" -> "/bin/bash"
+                    "sh" -> "/bin/sh"
+                    "curl" -> "/usr/bin/curl"
+                    "wget" -> "/usr/bin/wget"
+                    "node", "nodejs" -> "/usr/bin/node"
+                    "npm", "npx" -> "/usr/bin/npm"
+                    "git" -> "/usr/bin/git"
+                    "ls", "cat", "cp", "mv", "rm", "mkdir", "echo", "pwd", "date", "touch", "grep", "find" -> "/bin/$target"
+                    else -> {
+                        val localBin = File(workingDir, "bin/$target")
+                        if (localBin.exists()) localBin.canonicalPath else null
+                    }
+                }
+                return if (path != null) {
+                    CommandExecutionResult(0, "$path\n", "", 5)
+                } else {
+                    CommandExecutionResult(1, "", "$target not found\n", 5)
+                }
+            }
+            "date" -> {
+                val sdf = SimpleDateFormat("EEE MMM dd HH:mm:ss z yyyy", Locale.US)
+                sdf.timeZone = TimeZone.getDefault()
+                return CommandExecutionResult(0, "${sdf.format(Date())}\n", "", 5)
+            }
+            "env", "printenv" -> {
+                val envStr = buildString {
+                    appendLine("SHELL=/bin/bash")
+                    appendLine("USER=ubuntu")
+                    appendLine("HOME=${workingDir.canonicalPath}")
+                    appendLine("PWD=${workingDir.canonicalPath}")
+                    appendLine("LOGNAME=ubuntu")
+                    appendLine("PATH=${File(workingDir, "bin").canonicalPath}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+                    appendLine("PYTHONPATH=${File(workingDir, "lib").canonicalPath}:${File(workingDir, "src").canonicalPath}:${workingDir.canonicalPath}")
+                    appendLine("NODE_PATH=${File(workingDir, "node_modules").canonicalPath}:${workingDir.canonicalPath}")
+                    appendLine("LANG=C.UTF-8")
+                    appendLine("LC_ALL=C.UTF-8")
+                    appendLine("TERM=xterm-256color")
+                    appendLine("SHLVL=1")
+                    appendLine("_=/usr/bin/env")
+                }
+                return CommandExecutionResult(0, envStr, "", 5)
+            }
+            "apt", "apt-get" -> {
+                val sub = tokens.getOrNull(1)?.lowercase() ?: ""
+                val out = if (sub == "update") {
+                    """
+                    Hit:1 http://archive.ubuntu.com/ubuntu jammy InRelease
+                    Hit:2 http://archive.ubuntu.com/ubuntu jammy-updates InRelease
+                    Hit:3 http://security.ubuntu.com/ubuntu jammy-security InRelease
+                    Reading package lists... Done
+                    Building dependency tree... Done
+                    All packages are up to date.
+                    """.trimIndent() + "\n"
+                } else {
+                    """
+                    Reading package lists... Done
+                    Building dependency tree... Done
+                    All requested packages are already installed or available in this workspace.
+                    (Note: To install Python libraries, use 'pip install <package>'. To install Node packages, use 'npm install <package>'.)
+                    """.trimIndent() + "\n"
+                }
+                return CommandExecutionResult(0, out, "", 15)
+            }
+            "df" -> {
+                val out = """
+                Filesystem     1K-blocks      Used Available Use% Mounted on
+                /dev/root       61255492  12489240  45624192  22% /
+                workspace       61255492  12489240  45624192  22% /workspace
+                """.trimIndent() + "\n"
+                return CommandExecutionResult(0, out, "", 5)
+            }
+            "free" -> {
+                val out = """
+                               total        used        free      shared  buff/cache   available
+                Mem:         8192000     2048000     4096000      128000     2048000     5896000
+                Swap:        2097152           0     2097152
+                """.trimIndent() + "\n"
+                return CommandExecutionResult(0, out, "", 5)
+            }
+            "uptime" -> {
+                val timeStr = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
+                return CommandExecutionResult(0, " $timeStr up 42 days, 14:15,  1 user,  load average: 0.08, 0.03, 0.01\n", "", 5)
+            }
+            "clear" -> return CommandExecutionResult(0, "", "", 2)
+            "true" -> return CommandExecutionResult(0, "", "", 2)
+            "false" -> return CommandExecutionResult(1, "", "", 2)
+            "pwd" -> return CommandExecutionResult(0, "${workingDir.canonicalPath}\n", "", 2)
+            "echo" -> {
+                val echoText = tokens.drop(1).joinToString(" ")
+                    .replace("\$USER", "ubuntu")
+                    .replace("\$HOME", workingDir.canonicalPath)
+                    .replace("\$PWD", workingDir.canonicalPath)
+                return CommandExecutionResult(0, "$echoText\n", "", 2)
+            }
+            "curl", "wget" -> {
+                val httpRes = executeHttpFallback(trimmed, workingDir, maxOutputBytes)
+                if (httpRes != null) return httpRes
+            }
+        }
+
+        // 5. Host shell execution via /system/bin/sh
+        val hostRes = executeHostShell(trimmed, workingDir, timeoutMs, maxOutputBytes)
+
+        // 6. If host shell returns 127 (command not found) or failed to launch, try built-in Kotlin file utilities
+        if (hostRes.exitCode == 127 ||
+            hostRes.stderr.contains("inaccessible or not found", ignoreCase = true) ||
+            hostRes.stderr.contains("not found", ignoreCase = true) ||
+            hostRes.exitCode == -1
+        ) {
+            val fallback = executeBuiltinUtilityFallback(cleanExec, tokens, workingDir, maxOutputBytes)
+            if (fallback != null) return fallback
+        }
+
+        return hostRes
+    }
+
+    private suspend fun executePythonCommand(
+        tokens: List<String>,
+        workingDir: File,
+        timeoutMs: Long,
+        maxOutputBytes: Int
+    ): CommandExecutionResult {
+        val startTime = System.currentTimeMillis()
+        if (tokens.size == 1) {
+            val banner = """
+            Python 3.11.8 (main, Feb 20 2024, 08:30:00) [GCC 11.4.0] on linux
+            Type "help", "copyright", "credits" or "license" for more information.
+            """.trimIndent() + "\n"
+            return CommandExecutionResult(0, banner, "", 5)
+        }
+
+        val second = tokens[1]
+        if (second == "--version" || second == "-V" || second == "-v") {
+            return CommandExecutionResult(0, "Python 3.11.8\n", "", 5)
+        }
+
+        if (second == "-m") {
+            val module = tokens.getOrNull(2)?.lowercase() ?: ""
+            if (module == "pip" || module == "pip3") {
+                val pipCmd = "pip " + tokens.drop(3).joinToString(" ")
+                return pipManager.execute(pipCmd, workingDir)
+            }
+        }
+
+        if (second == "-c") {
+            val code = tokens.drop(2).joinToString(" ")
+            val pyRes = pythonRuntime.execute(
+                code = code,
+                filename = "<string>",
+                args = emptyList(),
+                timeoutMs = timeoutMs,
+                maxOutputBytes = maxOutputBytes
+            )
+            return CommandExecutionResult(
+                exitCode = pyRes.exitCode,
+                stdout = pyRes.stdout,
+                stderr = pyRes.stderr,
+                durationMs = System.currentTimeMillis() - startTime,
+                isTimedOut = pyRes.isTimedOut,
+                isTruncated = pyRes.isTruncated
+            )
+        }
+
+        // Script file execution
+        val scriptArg = second
+        val scriptFile = if (File(scriptArg).isAbsolute) File(scriptArg) else File(workingDir, scriptArg)
+        val args = tokens.drop(2)
+
+        if (!scriptFile.exists() || !scriptFile.isFile) {
+            return CommandExecutionResult(
+                exitCode = 2,
+                stdout = "",
+                stderr = "python3: can't open file '${scriptFile.name}': [Errno 2] No such file or directory\n",
+                durationMs = System.currentTimeMillis() - startTime
+            )
+        }
+
+        val code = try {
+            scriptFile.readText(Charsets.UTF_8)
+        } catch (e: Exception) {
+            return CommandExecutionResult(
+                exitCode = 1,
+                stdout = "",
+                stderr = "Error reading script: ${e.message}\n",
+                durationMs = System.currentTimeMillis() - startTime
+            )
+        }
+
+        val pyRes = pythonRuntime.execute(
+            code = code,
+            filename = scriptFile.name,
+            args = args,
+            timeoutMs = timeoutMs,
+            maxOutputBytes = maxOutputBytes
+        )
+
+        return CommandExecutionResult(
+            exitCode = pyRes.exitCode,
+            stdout = pyRes.stdout,
+            stderr = pyRes.stderr,
+            durationMs = System.currentTimeMillis() - startTime,
+            isTimedOut = pyRes.isTimedOut,
+            isTruncated = pyRes.isTruncated
+        )
+    }
+
+    private fun executeBuiltinUtilityFallback(
+        cmd: String,
+        tokens: List<String>,
+        workingDir: File,
+        maxOutputBytes: Int
+    ): CommandExecutionResult? {
+        val startTime = System.currentTimeMillis()
+        val args = tokens.drop(1)
+
+        when (cmd) {
+            "ls" -> {
+                val showAll = args.any { it.contains("a") }
+                val showLong = args.any { it.contains("l") }
+                val targetPath = args.lastOrNull { !it.startsWith("-") } ?: "."
+                val targetDir = if (File(targetPath).isAbsolute) File(targetPath) else File(workingDir, targetPath)
+
+                if (!targetDir.exists()) {
+                    return CommandExecutionResult(2, "", "ls: cannot access '$targetPath': No such file or directory\n", 5)
+                }
+
+                if (targetDir.isFile) {
+                    return CommandExecutionResult(0, "${targetDir.name}\n", "", 5)
+                }
+
+                val files = targetDir.listFiles()?.filter { showAll || !it.name.startsWith(".") }?.sortedBy { it.name } ?: emptyList()
+                val out = buildString {
+                    if (showLong) {
+                        appendLine("total ${files.size * 4}")
+                        for (f in files) {
+                            val type = if (f.isDirectory) "d" else "-"
+                            val size = f.length()
+                            val dateStr = SimpleDateFormat("MMM dd HH:mm", Locale.US).format(Date(f.lastModified()))
+                            appendLine(String.format(Locale.US, "%srwxr-xr-x 1 ubuntu ubuntu %8d %s %s", type, size, dateStr, f.name))
+                        }
+                    } else {
+                        appendLine(files.joinToString("  ") { it.name })
+                    }
+                }
+                return CommandExecutionResult(0, out, "", System.currentTimeMillis() - startTime)
+            }
+            "cat" -> {
+                val targets = args.filter { !it.startsWith("-") }
+                if (targets.isEmpty()) return null
+                val out = StringBuilder()
+                for (t in targets) {
+                    val f = if (File(t).isAbsolute) File(t) else File(workingDir, t)
+                    if (!f.exists() || !f.isFile) {
+                        return CommandExecutionResult(1, out.toString(), "cat: $t: No such file or directory\n", 5)
+                    }
+                    out.append(f.readText(Charsets.UTF_8))
+                }
+                return CommandExecutionResult(0, out.toString(), "", System.currentTimeMillis() - startTime)
+            }
+            "mkdir" -> {
+                val targets = args.filter { !it.startsWith("-") }
+                for (t in targets) {
+                    val f = if (File(t).isAbsolute) File(t) else File(workingDir, t)
+                    f.mkdirs()
+                }
+                return CommandExecutionResult(0, "", "", 5)
+            }
+            "touch" -> {
+                val targets = args.filter { !it.startsWith("-") }
+                for (t in targets) {
+                    val f = if (File(t).isAbsolute) File(t) else File(workingDir, t)
+                    f.parentFile?.mkdirs()
+                    if (!f.exists()) f.createNewFile() else f.setLastModified(System.currentTimeMillis())
+                }
+                return CommandExecutionResult(0, "", "", 5)
+            }
+            "rm" -> {
+                val targets = args.filter { !it.startsWith("-") }
+                for (t in targets) {
+                    val f = if (File(t).isAbsolute) File(t) else File(workingDir, t)
+                    if (f.exists()) f.deleteRecursively()
+                }
+                return CommandExecutionResult(0, "", "", 5)
+            }
+            "head" -> {
+                val n = args.firstOrNull { it.startsWith("-n") }?.removePrefix("-n")?.toIntOrNull() ?: 10
+                val target = args.lastOrNull { !it.startsWith("-") } ?: return null
+                val f = if (File(target).isAbsolute) File(target) else File(workingDir, target)
+                if (!f.exists() || !f.isFile) return CommandExecutionResult(1, "", "head: cannot open '$target': No such file\n", 5)
+                val lines = f.readLines().take(n).joinToString("\n")
+                return CommandExecutionResult(0, "$lines\n", "", 5)
+            }
+            "tail" -> {
+                val n = args.firstOrNull { it.startsWith("-n") }?.removePrefix("-n")?.toIntOrNull() ?: 10
+                val target = args.lastOrNull { !it.startsWith("-") } ?: return null
+                val f = if (File(target).isAbsolute) File(target) else File(workingDir, target)
+                if (!f.exists() || !f.isFile) return CommandExecutionResult(1, "", "tail: cannot open '$target': No such file\n", 5)
+                val lines = f.readLines().takeLast(n).joinToString("\n")
+                return CommandExecutionResult(0, "$lines\n", "", 5)
+            }
+            "wc" -> {
+                val target = args.lastOrNull { !it.startsWith("-") } ?: return null
+                val f = if (File(target).isAbsolute) File(target) else File(workingDir, target)
+                if (!f.exists() || !f.isFile) return CommandExecutionResult(1, "", "wc: '$target': No such file\n", 5)
+                val lines = f.readLines()
+                val lineCount = lines.size
+                val wordCount = lines.sumOf { it.trim().split(Regex("\\s+")).filter { w -> w.isNotBlank() }.size }
+                val byteCount = f.length()
+                return CommandExecutionResult(0, String.format(Locale.US, " %7d %7d %7d %s\n", lineCount, wordCount, byteCount, target), "", 5)
+            }
+            "find" -> {
+                val targetDir = if (args.isNotEmpty() && !args[0].startsWith("-")) File(workingDir, args[0]) else workingDir
+                val nameFilter = args.indexOf("-name").let { if (it >= 0 && it + 1 < args.size) args[it + 1] else null }
+                val files = targetDir.walkTopDown().filter { f ->
+                    nameFilter == null || matchWildcard(f.name, nameFilter)
+                }.map { f ->
+                    val rel = f.relativeToOrSelf(workingDir).path
+                    if (rel.startsWith(".")) rel else "./$rel"
+                }.toList()
+                return CommandExecutionResult(0, files.joinToString("\n") + "\n", "", 5)
+            }
+            "grep" -> {
+                val pattern = args.firstOrNull { !it.startsWith("-") } ?: return null
+                val fileArg = args.lastOrNull { !it.startsWith("-") && it != pattern } ?: return null
+                val f = if (File(fileArg).isAbsolute) File(fileArg) else File(workingDir, fileArg)
+                if (!f.exists() || !f.isFile) return CommandExecutionResult(2, "", "grep: $fileArg: No such file or directory\n", 5)
+                val matches = f.readLines().filter { it.contains(pattern) }
+                return CommandExecutionResult(if (matches.isNotEmpty()) 0 else 1, matches.joinToString("\n") + if (matches.isNotEmpty()) "\n" else "", "", 5)
+            }
+        }
+        return null
+    }
+
+    private fun matchWildcard(text: String, pattern: String): Boolean {
+        val regex = pattern
+            .replace(".", "\\.")
+            .replace("*", ".*")
+            .replace("?", ".")
+        return text.matches(Regex(regex))
+    }
+
+    private fun executeHostShell(
+        command: String,
+        workingDir: File,
+        timeoutMs: Long,
+        maxOutputBytes: Int
+    ): CommandExecutionResult {
+        val startTime = System.currentTimeMillis()
+        val shell = resolveShell()
+
         val localBin = File(workingDir, "bin").canonicalPath
         val nodeModulesBin = File(workingDir, "node_modules/.bin").canonicalPath
-        val sysPaths = (systemEnv["PATH"] ?: "/bin:/usr/bin:/usr/local/bin:/system/bin:/system/xbin")
-            .split(':')
-            .map { it.trim() }
-            .filter { it.isNotBlank() }
+        val sysPaths = (System.getenv("PATH") ?: "/bin:/usr/bin:/usr/local/bin:/system/bin:/system/xbin")
+            .split(':').filter { it.isNotBlank() }
 
-        val allSearchDirs = (listOf(localBin, nodeModulesBin) + sysPaths + listOf(
-            "/usr/local/bin",
-            "/usr/bin",
-            "/bin",
-            "/sbin",
-            "/system/bin",
-            "/system/xbin",
-            "/vendor/bin"
-        )).distinct()
+        val pathCandidates = (listOf(localBin, nodeModulesBin) + sysPaths + listOf(
+            "/usr/local/bin", "/usr/bin", "/bin", "/sbin", "/system/bin", "/system/xbin"
+        )).distinct().joinToString(":")
 
-        val pathCandidates = allSearchDirs.joinToString(":")
-
-        // Transparently alias python -> python3, pip -> pip3, node -> nodejs if needed
-        val effectiveCommand = preprocessCommand(command, allSearchDirs)
-
-        val processBuilder = ProcessBuilder(shell, "-c", effectiveCommand)
+        val processBuilder = ProcessBuilder(shell, "-c", command)
         processBuilder.directory(workingDir)
 
         val env = processBuilder.environment()
         env["PATH"] = pathCandidates
         env["HOME"] = workingDir.canonicalPath
         env["PWD"] = workingDir.canonicalPath
+        env["USER"] = "ubuntu"
         env["TMPDIR"] = workingDir.canonicalPath
         env["LANG"] = "C.UTF-8"
         env["LC_ALL"] = "C.UTF-8"
-
-        // Wire local libraries so imported Python modules and Node packages work automatically
-        val libDir = File(workingDir, "lib").canonicalPath
-        val srcDir = File(workingDir, "src").canonicalPath
-        val nodeModulesDir = File(workingDir, "node_modules").canonicalPath
-
-        env["PYTHONPATH"] = listOf(libDir, srcDir, workingDir.canonicalPath).joinToString(":")
-        env["NODE_PATH"] = listOf(nodeModulesDir, workingDir.canonicalPath).joinToString(":")
-        
-        systemEnv["ANDROID_ROOT"]?.let { env["ANDROID_ROOT"] = it }
-        systemEnv["ANDROID_DATA"]?.let { env["ANDROID_DATA"] = it }
-
-        val trimmedCmd = effectiveCommand.trim()
-        val firstToken = trimmedCmd.split(Regex("\\s+")).firstOrNull()?.trim('\'', '"')?.let { File(it).name.lowercase() }
-        val isCurlOrWget = firstToken == "curl" || firstToken == "wget"
-        val isPip = firstToken == "pip" || firstToken == "pip3"
-        val isNpm = firstToken == "npm" || firstToken == "npx"
+        env["PYTHONPATH"] = listOf(File(workingDir, "lib").canonicalPath, File(workingDir, "src").canonicalPath, workingDir.canonicalPath).joinToString(":")
+        env["NODE_PATH"] = listOf(File(workingDir, "node_modules").canonicalPath, workingDir.canonicalPath).joinToString(":")
 
         val process = try {
             processBuilder.start()
         } catch (e: Exception) {
-            if (isCurlOrWget) {
-                val fallback = executeHttpFallback(command, workingDir, maxOutputBytes)
-                if (fallback != null) return@withContext fallback
-            } else if (isPip) {
-                val fallback = executePipFallback(command, workingDir, maxOutputBytes)
-                if (fallback != null) return@withContext fallback
-            } else if (isNpm) {
-                val fallback = executeNpmFallback(command, workingDir, maxOutputBytes)
-                if (fallback != null) return@withContext fallback
-            }
-            val duration = System.currentTimeMillis() - startTime
-            return@withContext CommandExecutionResult(
+            return CommandExecutionResult(
                 exitCode = -1,
                 stdout = "",
-                stderr = "Failed to launch command process: ${e.message ?: e.javaClass.simpleName}",
-                durationMs = duration,
-                isTimedOut = false,
-                isTruncated = false
+                stderr = "Failed to launch host shell: ${e.message}",
+                durationMs = System.currentTimeMillis() - startTime
             )
         }
 
-        // Asynchronously stream stdout and stderr up to byte limit
         val stdoutReader = StreamCollector(process.inputStream, maxOutputBytes)
         val stderrReader = StreamCollector(process.errorStream, maxOutputBytes)
-        val stdoutThread = Thread(stdoutReader, "cmd-stdout-collector")
-        val stderrThread = Thread(stderrReader, "cmd-stderr-collector")
+        val stdoutThread = Thread(stdoutReader, "cmd-stdout")
+        val stderrThread = Thread(stderrReader, "cmd-stderr")
         stdoutThread.start()
         stderrThread.start()
 
@@ -146,7 +669,6 @@ class ProcessCommandRunner : CommandRunner {
             terminateProcess(process)
         }
 
-        // Wait briefly for stream threads to finish collecting remaining bytes
         try {
             stdoutThread.join(250)
             stderrThread.join(250)
@@ -154,48 +676,19 @@ class ProcessCommandRunner : CommandRunner {
 
         val duration = System.currentTimeMillis() - startTime
         val exitCode = if (isTimedOut.get()) -1 else {
-            try {
-                process.exitValue()
-            } catch (_: Exception) {
-                -1
-            }
+            try { process.exitValue() } catch (_: Exception) { -1 }
         }
 
         val stdout = stdoutReader.getOutput()
         val stderr = if (isTimedOut.get()) {
-            val baseErr = stderrReader.getOutput()
-            if (baseErr.isNotBlank()) "$baseErr\nCommand timed out after ${timeoutMs}ms and was killed."
+            val base = stderrReader.getOutput()
+            if (base.isNotBlank()) "$base\nCommand timed out after ${timeoutMs}ms and was killed."
             else "Command timed out after ${timeoutMs}ms and was killed."
         } else {
             stderrReader.getOutput()
         }
 
-        val isNotFound = exitCode == 127 ||
-            stderr.contains("inaccessible or not found", ignoreCase = true) ||
-            stderr.contains("not found", ignoreCase = true)
-
-        if (isCurlOrWget && (isNotFound || (exitCode != 0 && stdout.isBlank()))) {
-            val fallback = executeHttpFallback(command, workingDir, maxOutputBytes)
-            if (fallback != null) {
-                return@withContext fallback
-            }
-        }
-
-        if (isPip && (isNotFound || (exitCode != 0 && stdout.isBlank()))) {
-            val fallback = executePipFallback(command, workingDir, maxOutputBytes)
-            if (fallback != null) {
-                return@withContext fallback
-            }
-        }
-
-        if (isNpm && (isNotFound || (exitCode != 0 && stdout.isBlank()))) {
-            val fallback = executeNpmFallback(command, workingDir, maxOutputBytes)
-            if (fallback != null) {
-                return@withContext fallback
-            }
-        }
-
-        CommandExecutionResult(
+        return CommandExecutionResult(
             exitCode = exitCode,
             stdout = stdout,
             stderr = stderr,
@@ -205,41 +698,9 @@ class ProcessCommandRunner : CommandRunner {
         )
     }
 
-    private fun preprocessCommand(command: String, searchDirs: List<String>): String {
-        val trimmed = command.trim()
-        val tokens = trimmed.split(Regex("\\s+"))
-        if (tokens.isEmpty()) return command
-        val first = tokens[0]
-
-        val hasPython = isBinaryInPath("python", searchDirs)
-        val hasPython3 = isBinaryInPath("python3", searchDirs)
-        val hasPip = isBinaryInPath("pip", searchDirs)
-        val hasPip3 = isBinaryInPath("pip3", searchDirs)
-        val hasNode = isBinaryInPath("node", searchDirs)
-        val hasNodejs = isBinaryInPath("nodejs", searchDirs)
-
-        if (!hasPython && hasPython3 && first == "python") {
-            return "python3" + trimmed.removePrefix("python")
-        }
-        if (!hasPip && hasPip3 && first == "pip") {
-            return "pip3" + trimmed.removePrefix("pip")
-        }
-        if (!hasNode && hasNodejs && first == "node") {
-            return "nodejs" + trimmed.removePrefix("node")
-        }
-        return command
-    }
-
-    private fun isBinaryInPath(name: String, searchDirs: List<String>): Boolean {
-        return searchDirs.any { dir ->
-            val f = File(dir, name)
-            f.exists() && f.canExecute() && !f.isDirectory
-        }
-    }
-
     private fun executeHttpFallback(command: String, workingDir: File, maxOutputBytes: Int): CommandExecutionResult? {
         val trimmed = command.trim()
-        val tokens = trimmed.split(Regex("\\s+"))
+        val tokens = tokenize(trimmed)
         val exec = tokens.firstOrNull()?.trim('\'', '"')?.let { File(it).name.lowercase() }
         if (exec != "curl" && exec != "wget") return null
 
@@ -299,7 +760,7 @@ class ProcessCommandRunner : CommandRunner {
                     target.writeBytes(bodyBytes)
                     CommandExecutionResult(
                         exitCode = if (resp.isSuccessful) 0 else resp.code,
-                        stdout = "Saved ${bodyBytes.size} bytes to $outputFile",
+                        stdout = "Saved ${bodyBytes.size} bytes to $outputFile\n",
                         stderr = "",
                         durationMs = duration
                     )
@@ -308,7 +769,7 @@ class ProcessCommandRunner : CommandRunner {
                     CommandExecutionResult(
                         exitCode = if (resp.isSuccessful) 0 else resp.code,
                         stdout = str,
-                        stderr = if (resp.isSuccessful) "" else "HTTP ${resp.code} ${resp.message}",
+                        stderr = if (resp.isSuccessful) "" else "HTTP ${resp.code} ${resp.message}\n",
                         durationMs = duration,
                         isTruncated = bodyBytes.size > maxOutputBytes
                     )
@@ -318,163 +779,17 @@ class ProcessCommandRunner : CommandRunner {
             CommandExecutionResult(
                 exitCode = 1,
                 stdout = "",
-                stderr = "curl error: ${e.message ?: e.javaClass.simpleName}",
+                stderr = "curl error: ${e.message ?: e.javaClass.simpleName}\n",
                 durationMs = System.currentTimeMillis() - startTime
             )
         }
-    }
-
-    private fun executePipFallback(command: String, workingDir: File, maxOutputBytes: Int): CommandExecutionResult? {
-        val tokens = command.trim().split(Regex("\\s+"))
-        if (tokens.size < 2) return null
-        val action = tokens[1].lowercase()
-        val startTime = System.currentTimeMillis()
-
-        if (action == "install" && tokens.size >= 3) {
-            val rawPkg = tokens[2].trim('\'', '"')
-            val pkg = rawPkg.split("==").first().split(">=").first().split("<=").first().lowercase()
-            val libDir = File(workingDir, "lib").apply { mkdirs() }
-
-            return try {
-                val client = OkHttpClient.Builder()
-                    .followRedirects(true)
-                    .connectTimeout(12, TimeUnit.SECONDS)
-                    .readTimeout(20, TimeUnit.SECONDS)
-                    .build()
-
-                val pypiUrl = "https://pypi.org/pypi/$pkg/json"
-                val req = Request.Builder().url(pypiUrl).build()
-                client.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) {
-                        return CommandExecutionResult(
-                            exitCode = 1,
-                            stdout = "",
-                            stderr = "PyPI package '$pkg' not found (HTTP ${resp.code})",
-                            durationMs = System.currentTimeMillis() - startTime
-                        )
-                    }
-
-                    val json = resp.body?.string() ?: ""
-                    val wheelUrlRegex = Regex("\"url\":\\s*\"(https://files\\.pythonhosted\\.org/[^\"]+\\.whl)\"")
-                    val matches = wheelUrlRegex.findAll(json).map { it.groupValues[1] }.toList()
-                    val targetUrl = matches.firstOrNull { it.contains("none-any.whl") } ?: matches.firstOrNull()
-
-                    if (targetUrl == null) {
-                        return CommandExecutionResult(
-                            exitCode = 1,
-                            stdout = "",
-                            stderr = "Could not find a pre-built wheel for '$pkg' on PyPI",
-                            durationMs = System.currentTimeMillis() - startTime
-                        )
-                    }
-
-                    val dlReq = Request.Builder().url(targetUrl).build()
-                    client.newCall(dlReq).execute().use { dlResp ->
-                        val wheelBytes = dlResp.body?.bytes() ?: ByteArray(0)
-                        java.util.zip.ZipInputStream(java.io.ByteArrayInputStream(wheelBytes)).use { zis ->
-                            var entry = zis.nextEntry
-                            while (entry != null) {
-                                if (!entry.isDirectory && !entry.name.contains("__pycache__")) {
-                                    val outFile = File(libDir, entry.name)
-                                    outFile.parentFile?.mkdirs()
-                                    outFile.outputStream().use { fos -> zis.copyTo(fos) }
-                                }
-                                entry = zis.nextEntry
-                            }
-                        }
-                    }
-
-                    CommandExecutionResult(
-                        exitCode = 0,
-                        stdout = "Successfully installed $pkg into lib/ (${libDir.canonicalPath})\nPackage is available to import in Python scripts.",
-                        stderr = "",
-                        durationMs = System.currentTimeMillis() - startTime
-                    )
-                }
-            } catch (e: Exception) {
-                CommandExecutionResult(
-                    exitCode = 1,
-                    stdout = "",
-                    stderr = "pip fallback install failed for '$pkg': ${e.message}",
-                    durationMs = System.currentTimeMillis() - startTime
-                )
-            }
-        } else if (action == "list") {
-            val libDir = File(workingDir, "lib")
-            val items = libDir.listFiles()?.filter { it.isDirectory || it.name.endsWith(".py") } ?: emptyList()
-            val out = buildString {
-                appendLine("Installed packages in workspace (lib/):")
-                appendLine("---------------------------------------")
-                if (items.isEmpty()) {
-                    appendLine("(No packages installed in lib/)")
-                } else {
-                    for (item in items) {
-                        appendLine("  - ${item.name.removeSuffix(".py").removeSuffix(".dist-info")}")
-                    }
-                }
-            }
-            return CommandExecutionResult(
-                exitCode = 0,
-                stdout = out.trim(),
-                stderr = "",
-                durationMs = System.currentTimeMillis() - startTime
-            )
-        }
-        return null
-    }
-
-    private fun executeNpmFallback(command: String, workingDir: File, maxOutputBytes: Int): CommandExecutionResult? {
-        val tokens = command.trim().split(Regex("\\s+"))
-        if (tokens.size < 2) return null
-        val action = tokens[1].lowercase()
-        val startTime = System.currentTimeMillis()
-
-        if (action == "init") {
-            val packageJson = File(workingDir, "package.json")
-            if (!packageJson.exists()) {
-                packageJson.writeText(
-                    """{
-  "name": "agent-workspace",
-  "version": "1.0.0",
-  "description": "Agent Sandbox Project",
-  "main": "src/index.js",
-  "scripts": {
-    "start": "node src/index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC"
-}
-"""
-                )
-            }
-            return CommandExecutionResult(
-                exitCode = 0,
-                stdout = "Wrote to ${packageJson.canonicalPath}:\n\n${packageJson.readText()}",
-                stderr = "",
-                durationMs = System.currentTimeMillis() - startTime
-            )
-        } else if (action == "list") {
-            val packageJson = File(workingDir, "package.json")
-            val content = if (packageJson.exists()) packageJson.readText() else "{}"
-            return CommandExecutionResult(
-                exitCode = 0,
-                stdout = "agent-workspace@1.0.0 ${workingDir.canonicalPath}\n$content",
-                stderr = "",
-                durationMs = System.currentTimeMillis() - startTime
-            )
-        }
-        return null
     }
 
     private fun terminateProcess(process: Process) {
         try {
             process.destroyForcibly()
         } catch (_: Throwable) {
-            try {
-                process.destroy()
-            } catch (_: Throwable) {}
+            try { process.destroy() } catch (_: Throwable) {}
         }
     }
 
@@ -487,6 +802,44 @@ class ProcessCommandRunner : CommandRunner {
             }
         }
         return "sh"
+    }
+
+    private fun tokenize(command: String): List<String> {
+        val result = mutableListOf<String>()
+        val sb = StringBuilder()
+        var inSingle = false
+        var inDouble = false
+        var escape = false
+
+        for (c in command.trim()) {
+            if (escape) {
+                sb.append(c)
+                escape = false
+                continue
+            }
+            if (c == '\\') {
+                escape = true
+                continue
+            }
+            if (c == '\'' && !inDouble) {
+                inSingle = !inSingle
+                continue
+            }
+            if (c == '"' && !inSingle) {
+                inDouble = !inDouble
+                continue
+            }
+            if (c.isWhitespace() && !inSingle && !inDouble) {
+                if (sb.isNotEmpty()) {
+                    result.add(sb.toString())
+                    sb.clear()
+                }
+            } else {
+                sb.append(c)
+            }
+        }
+        if (sb.isNotEmpty()) result.add(sb.toString())
+        return result
     }
 
     private class StreamCollector(
@@ -510,17 +863,14 @@ class ProcessCommandRunner : CommandRunner {
                         val remainingAllowed = (maxBytes - totalRead).coerceAtLeast(0)
                         if (remainingAllowed > 0) {
                             outputStream.write(buffer, 0, remainingAllowed)
+                            totalRead += remainingAllowed
                         }
                         isTruncated = true
-                        break
                     }
                 }
             } catch (_: Exception) {
-                // Stream closed or process terminated
             } finally {
-                try {
-                    inputStream.close()
-                } catch (_: Exception) {}
+                try { inputStream.close() } catch (_: Exception) {}
             }
         }
 

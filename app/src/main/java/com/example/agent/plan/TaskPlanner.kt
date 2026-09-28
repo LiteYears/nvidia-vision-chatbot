@@ -9,7 +9,7 @@ import java.util.UUID
 class TaskPlanner {
 
     companion object {
-        const val DEFAULT_MAX_STEPS = 15
+        const val DEFAULT_MAX_STEPS = 30
 
         private val PLAN_CODE_BLOCK_REGEX = Regex(
             """```(?:plan|task_plan|checklist)?\s*([\s\S]*?)\s*```""",
@@ -416,7 +416,9 @@ class TaskPlanner {
             }
         }
 
-        val allDone = updatedSubtasks.all { it.status == SubtaskStatus.COMPLETED }
+        val allDone = updatedSubtasks.isNotEmpty() &&
+            updatedSubtasks.any { it.status == SubtaskStatus.COMPLETED } &&
+            updatedSubtasks.none { it.status == SubtaskStatus.PENDING || it.status == SubtaskStatus.RUNNING }
         val nextPending = updatedSubtasks.firstOrNull { it.status == SubtaskStatus.PENDING }
 
         return plan.copy(

@@ -14,6 +14,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import com.example.data.model.AgentFeedItem
 import com.example.data.model.AgentSession
 import com.example.data.model.AgentTaskStatus
 import com.example.data.model.AppMode
@@ -74,6 +75,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.example.ui.components.AboutDeveloperDialog
 import com.example.ui.components.AgentGoalWelcomeView
+import com.example.ui.components.AgentReflectionCard
 import com.example.ui.components.AgentTaskStateCard
 import com.example.ui.components.AiChatbotLogo
 import com.example.ui.components.ApiKeyDialog
@@ -113,11 +115,17 @@ fun ChatScreen(
         }
     }
 
-    // Auto-scroll to latest message in Agent Mode
-    LaunchedEffect(uiState.currentAgentSession?.messages?.size, uiState.isAgentLoading) {
-        val agentMsgs = uiState.currentAgentSession?.messages
-        if (!agentMsgs.isNullOrEmpty()) {
-            agentListState.animateScrollToItem(agentMsgs.size - 1)
+    // Auto-scroll to latest message or tool action in Agent Mode
+    LaunchedEffect(
+        uiState.currentAgentSession?.messages?.size,
+        uiState.currentAgentSession?.toolExecutions?.size,
+        uiState.isAgentLoading
+    ) {
+        val session = uiState.currentAgentSession
+        val totalCount = (session?.messages?.count { it.content.isNotBlank() || it.isStreaming } ?: 0) +
+            (session?.toolExecutions?.size ?: 0)
+        if (totalCount > 0) {
+            agentListState.animateScrollToItem(totalCount - 1)
         }
     }
 
@@ -666,38 +674,49 @@ fun ChatScreen(
                                 onVerifySubtask = viewModel::verifySubtask
                             )
 
-                            // Agent Conversation Stream
+                            val feedItems = remember(currentSession.messages, currentSession.toolExecutions, currentSession.reflections) {
+                                val items = mutableListOf<AgentFeedItem>()
+                                val visibleMessages = currentSession.messages.filter { it.content.isNotBlank() || it.isStreaming }
+                                items.addAll(visibleMessages.map { AgentFeedItem.Message(it) })
+                                items.addAll(currentSession.reflections.map { AgentFeedItem.Reflection(it) })
+                                items.addAll(currentSession.toolExecutions.map { AgentFeedItem.Tool(it) })
+                                items.sortBy { it.timestamp }
+                                items
+                            }
+
+                            // Agent Conversation Stream: Chronological reflections, thoughts & minimal tool cards
                             LazyColumn(
                                 state = agentListState,
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .weight(1f),
-                                contentPadding = PaddingValues(top = 6.dp, bottom = 16.dp)
+                                contentPadding = PaddingValues(top = 4.dp, bottom = 16.dp)
                             ) {
-                                items(currentSession.messages, key = { it.id }) { msg ->
-                                    if (msg.role == MessageRole.ASSISTANT) {
-                                        val associatedTools = currentSession.toolExecutions.filter {
-                                            it.messageId == msg.id || (it.messageId == null && currentSession.messages.firstOrNull { m -> m.role == MessageRole.ASSISTANT }?.id == msg.id)
+                                items(feedItems, key = { it.id }) { item ->
+                                    when (item) {
+                                        is AgentFeedItem.Message -> {
+                                            ChatBubble(
+                                                message = item.message,
+                                                isCurrentlySpeaking = uiState.currentlySpeakingMessageId == item.message.id,
+                                                onSpeakClick = { text ->
+                                                    if (uiState.currentlySpeakingMessageId == item.message.id) {
+                                                        viewModel.stopSpeaking()
+                                                    } else {
+                                                        viewModel.speakText(text, item.message.id)
+                                                    }
+                                                },
+                                                onRetryClick = {
+                                                    viewModel.sendAgentFollowUp()
+                                                }
+                                            )
                                         }
-                                        for (record in associatedTools) {
-                                            ToolExecutionCard(record = record)
+                                        is AgentFeedItem.Reflection -> {
+                                            AgentReflectionCard(reflection = item.reflection)
+                                        }
+                                        is AgentFeedItem.Tool -> {
+                                            ToolExecutionCard(record = item.record)
                                         }
                                     }
-
-                                    ChatBubble(
-                                        message = msg,
-                                        isCurrentlySpeaking = uiState.currentlySpeakingMessageId == msg.id,
-                                        onSpeakClick = { text ->
-                                            if (uiState.currentlySpeakingMessageId == msg.id) {
-                                                viewModel.stopSpeaking()
-                                            } else {
-                                                viewModel.speakText(text, msg.id)
-                                            }
-                                        },
-                                        onRetryClick = {
-                                            viewModel.sendAgentFollowUp()
-                                        }
-                                    )
                                 }
                             }
                         }

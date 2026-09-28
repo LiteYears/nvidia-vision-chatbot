@@ -312,8 +312,14 @@ class AgentWorkspaceContext(
     fun findRelevantFiles(keywords: List<String>): List<String> {
         if (keywords.isEmpty()) return knownFiles.keys.take(10).toList()
         val lowerKeywords = keywords.map { it.lowercase() }
+        val standardConfigs = setOf("settings.gradle", "settings.gradle.kts", "build.gradle", "build.gradle.kts", "pom.xml", "package.json")
+        val isExplicitBuildSearch = lowerKeywords.any { it == "gradle" || it == "build" || it == "pom" || it == "package.json" }
         return knownFiles.keys
             .filter { path ->
+                val fileName = path.substringAfterLast('/')
+                if (!isExplicitBuildSearch && standardConfigs.contains(fileName)) {
+                    return@filter false
+                }
                 val lower = path.lowercase()
                 lowerKeywords.any { kw -> lower.contains(kw) }
             }
