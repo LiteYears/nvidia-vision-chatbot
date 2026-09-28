@@ -11,7 +11,12 @@ import java.util.UUID
 object ToolCallParser {
 
     private val TOOL_CALL_BLOCK_REGEX = Regex(
-        """```(?:tool_call|json)?\s*([\s\S]*?)\s*```""",
+        """```(?:tool_call|json)\s*([\s\S]*?)\s*```""",
+        RegexOption.IGNORE_CASE
+    )
+
+    private val BASH_BLOCK_REGEX = Regex(
+        """```(?:bash|sh|shell|terminal|ubuntu|cmd)\s*([\s\S]*?)\s*```""",
         RegexOption.IGNORE_CASE
     )
 
@@ -25,9 +30,26 @@ object ToolCallParser {
     fun parse(text: String): ToolCall? {
         if (text.isBlank()) return null
 
-        val jsonString = extractJsonCandidate(text) ?: return null
+        val jsonString = extractJsonCandidate(text)
+        if (jsonString != null) {
+            val parsed = parseJsonToToolCall(jsonString)
+            if (parsed != null) return parsed
+        }
 
-        return parseJsonToToolCall(jsonString)
+        // Support direct ```bash or ```sh execution blocks emitted by coding models
+        val bashMatch = BASH_BLOCK_REGEX.find(text)
+        if (bashMatch != null) {
+            val code = bashMatch.groupValues[1].trim()
+            if (code.isNotBlank() && !code.contains("\"tool\"", ignoreCase = true)) {
+                return ToolCall(
+                    callId = UUID.randomUUID().toString(),
+                    toolName = "bash",
+                    arguments = mapOf("command" to code)
+                )
+            }
+        }
+
+        return null
     }
 
     private fun extractJsonCandidate(text: String): String? {
@@ -167,16 +189,18 @@ object ToolCallParser {
     fun hasToolCall(text: String): Boolean = parse(text) != null
 
     /**
-     * Removes tool call blocks from text for clean narrative rendering.
+     * Removes tool call blocks and executed terminal blocks from text for clean narrative rendering.
      */
     fun stripToolCalls(text: String): String {
-        return text.replace(TOOL_CALL_BLOCK_REGEX) { matchResult ->
+        var clean = text.replace(TOOL_CALL_BLOCK_REGEX) { matchResult ->
             val content = matchResult.groupValues[1]
             if (content.contains("\"tool\"", ignoreCase = true) || content.contains("\"name\"", ignoreCase = true)) {
                 ""
             } else {
                 matchResult.value
             }
-        }.trim()
+        }
+        clean = clean.replace(BASH_BLOCK_REGEX) { "" }
+        return clean.trim()
     }
 }

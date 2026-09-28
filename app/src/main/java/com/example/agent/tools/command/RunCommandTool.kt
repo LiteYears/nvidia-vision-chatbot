@@ -21,10 +21,12 @@ class RunCommandTool(
 
     override val definition: ToolDefinition = ToolDefinition(
         name = "run_command",
-        description = "Executes commands inside the Ubuntu-like workspace bash shell and Python 3 environment. " +
-            "Supports running scripts ('python3 script.py', 'python3 -c \"...\"'), package management ('pip install <package>', 'pip uninstall -y <package>', 'pip list', 'pip show <package>'), " +
-            "compound commands ('cmd1 && cmd2', 'cmd1 ; cmd2'), and Linux terminal utilities (bash, ls, cat, grep, find, wc, echo, curl, wget, uname, whoami, which, date, env, apt). " +
-            "Packages install into workspace lib/ and are immediately discoverable and importable. Returns stdout, stderr, exit code, and execution duration.",
+        description = "Executes commands inside the Ubuntu 22.04 LTS PRoot workspace container and Python 3 environment. " +
+            "Supports running scripts ('python3 script.py', 'python3 -c \"...\"'), PRoot container tools ('proot', 'proot-distro list/login/status'), " +
+            "package management ('apt update', 'apt install -y <pkg>', 'pip install <package>', 'pip uninstall -y <package>', 'pip list'), " +
+            "compound chaining ('cmd1 && cmd2', 'cd <dir> && pwd'), pipes ('cmd1 | cmd2'), redirection ('> file', '>> file', '> /dev/null', '2>&1'), " +
+            "and Linux terminal utilities (bash, sudo, su, ls, cat, grep, find, sed, awk, cut, sort, uniq, tr, tee, xargs, touch, cp, mv, rm, mkdir, tree, curl, wget, uname, whoami, id, date, env, free, df, ps, tar, zip, unzip, md5sum). " +
+            "Packages install into workspace lib/ and are immediately discoverable and importable. Returns stdout, stderr, exit code, and duration.",
         parameters = listOf(
             ToolParameter(
                 name = "command",

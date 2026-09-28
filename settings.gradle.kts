@@ -21,6 +21,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "Nvidia Vision Chatbot"
+rootProject.name = "CyberTermux AI"
 
 include(":app")

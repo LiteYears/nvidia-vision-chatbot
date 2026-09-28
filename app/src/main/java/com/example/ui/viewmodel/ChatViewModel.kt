@@ -21,6 +21,11 @@ import com.example.agent.tools.workspace.AgentWorkspaceManager
 import com.example.agent.tools.workspace.FileChangeType
 import com.example.agent.tools.workspace.VerificationStatus
 import java.io.File
+import com.example.agent.termux.TermuxCommandRunner
+import com.example.agent.termux.TermuxEnvironmentManager
+import com.example.data.model.TerminalLine
+import com.example.data.model.TerminalLineType
+import com.example.data.model.TerminalSessionState
 import com.example.data.local.ChatDatabase
 import com.example.data.model.AgentReflection
 import com.example.data.model.AgentSession
@@ -112,6 +117,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val workspaceManager = AgentWorkspaceManager(File(application.filesDir, "agent_workspaces"))
     private val toolRegistry = ToolRegistry.defaultRegistry(workspaceManager)
 
+    private val termuxEnvManager = TermuxEnvironmentManager.getInstance()
+    private val termuxRunner = TermuxCommandRunner(
+        envManager = termuxEnvManager,
+        workspaceManager = workspaceManager
+    )
+
+    private val _terminalState = MutableStateFlow(
+        TerminalSessionState(
+            isEnvInitialized = termuxEnvManager.isInitialized,
+            workingDirectory = "~/workspace"
+        )
+    )
+    val terminalState: StateFlow<TerminalSessionState> = _terminalState.asStateFlow()
+
     fun getToolRegistry(): ToolRegistry = toolRegistry
     fun getWorkspaceManager(): AgentWorkspaceManager = workspaceManager
     fun getAgentPlanRepository(): AgentPlanRepository = agentPlanRepository
@@ -158,6 +177,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
         // Initialize TTS
         initTts(application)
+
+        // Ground-up initialization of Termux and Ubuntu environment on first run
+        viewModelScope.launch {
+            if (!termuxEnvManager.isInitialized) {
+                initializeTermuxEnvironment(force = false)
+            }
+        }
     }
 
     private fun initTts(context: Context) {
@@ -730,10 +756,144 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // Agent Mode Management
+    // Mode Management
     fun setAppMode(mode: AppMode) {
         stopSpeaking()
         _uiState.update { it.copy(currentMode = mode) }
+    }
+
+    // Terminal Mode Management
+    fun onTerminalInputChanged(text: String) {
+        _terminalState.update { it.copy(currentInput = text) }
+    }
+
+    fun clearTerminal() {
+        _terminalState.update { it.copy(lines = emptyList(), historyIndex = -1) }
+    }
+
+    fun initializeTermuxEnvironment(force: Boolean = false) {
+        if (_terminalState.value.isInitializingEnv) return
+        viewModelScope.launch {
+            _terminalState.update {
+                it.copy(
+                    isInitializingEnv = true,
+                    lines = it.lines + TerminalLine(
+                        type = TerminalLineType.SYSTEM_INFO,
+                        text = ">>> [Termux Bootstrap] Initializing real Ubuntu 22.04 LTS environment..."
+                    )
+                )
+            }
+
+            val success = termuxEnvManager.ensureInitialized(force = force) { logLine ->
+                _terminalState.update { current ->
+                    current.copy(
+                        lines = current.lines + TerminalLine(
+                            type = TerminalLineType.STDOUT,
+                            text = logLine
+                        )
+                    )
+                }
+            }
+
+            _terminalState.update {
+                it.copy(
+                    isInitializingEnv = false,
+                    isEnvInitialized = success,
+                    lines = it.lines + TerminalLine(
+                        type = if (success) TerminalLineType.SYSTEM_INFO else TerminalLineType.STDERR,
+                        text = if (success) ">>> [Termux Bootstrap] Ubuntu PRoot environment ready on Android kernel (/system/bin/sh)."
+                               else ">>> [Termux Bootstrap] Initialization finished with fallback mode."
+                    )
+                )
+            }
+        }
+    }
+
+    fun executeTerminalCommand(rawCommand: String) {
+        val command = rawCommand.trim()
+        if (command.isBlank() || _terminalState.value.isRunning) return
+
+        viewModelScope.launch {
+            val inputLine = TerminalLine(type = TerminalLineType.INPUT, text = command)
+            val updatedHistory = (_terminalState.value.history + command).takeLast(100)
+
+            _terminalState.update {
+                it.copy(
+                    lines = it.lines + inputLine,
+                    currentInput = "",
+                    isRunning = true,
+                    history = updatedHistory,
+                    historyIndex = -1
+                )
+            }
+
+            // Handle built-in clear
+            if (command == "clear" || command == "cls") {
+                _terminalState.update { it.copy(lines = emptyList(), isRunning = false) }
+                return@launch
+            }
+
+            // Run command via real Linux process runner
+            val currentDir = File(workspaceManager.getWorkspaceDir(), "")
+            val result = termuxRunner.run(
+                command = command,
+                workingDir = currentDir,
+                timeoutMs = 30000L,
+                maxOutputBytes = 65536
+            )
+
+            val newLines = mutableListOf<TerminalLine>()
+            if (result.stdout.isNotBlank()) {
+                val stdoutLines = result.stdout.trimEnd().lines()
+                stdoutLines.forEach { line ->
+                    newLines.add(TerminalLine(type = TerminalLineType.STDOUT, text = line))
+                }
+            }
+            if (result.stderr.isNotBlank()) {
+                val stderrLines = result.stderr.trimEnd().lines()
+                stderrLines.forEach { line ->
+                    newLines.add(TerminalLine(type = TerminalLineType.STDERR, text = line, exitCode = result.exitCode))
+                }
+            }
+            if (result.stdout.isBlank() && result.stderr.isBlank() && result.exitCode != 0) {
+                newLines.add(
+                    TerminalLine(
+                        type = TerminalLineType.STDERR,
+                        text = "Process exited with code ${result.exitCode}",
+                        exitCode = result.exitCode
+                    )
+                )
+            }
+
+            _terminalState.update {
+                it.copy(
+                    lines = it.lines + newLines,
+                    isRunning = false
+                )
+            }
+        }
+    }
+
+    fun navigateTerminalHistory(direction: Int) {
+        val history = _terminalState.value.history
+        if (history.isEmpty()) return
+
+        val currentIndex = _terminalState.value.historyIndex
+        val nextIndex = if (direction < 0) {
+            // UP (older)
+            if (currentIndex == -1) history.size - 1 else (currentIndex - 1).coerceAtLeast(0)
+        } else {
+            // DOWN (newer)
+            if (currentIndex == -1) -1 else (currentIndex + 1).coerceAtMost(history.size - 1)
+        }
+
+        val nextText = if (nextIndex in history.indices) history[nextIndex] else ""
+        _terminalState.update {
+            it.copy(
+                currentInput = nextText,
+                historyIndex = nextIndex
+            )
+        }
     }
 
     fun onAgentInputTextChanged(text: String) {
@@ -949,28 +1109,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun buildAgentSystemPrompt(goal: String): String {
         val toolsPrompt = toolRegistry.formatToolsForPrompt()
-        return "You are an autonomous engineering agent with top-tier coding workflows (Claude Code, OpenCode, Codex style).\n\n" +
+        return "You are an autonomous engineering agent with direct and exclusive access to a live rootless Ubuntu 22.04 LTS bash terminal running on the device.\n\n" +
             "USER OBJECTIVE: \"$goal\"\n\n" +
             "$toolsPrompt\n\n" +
-            "WORKFLOW MANDATE (CLAUDE CODE / OPENCODE / CODEX STYLE):\n" +
-            "- CONTINUOUS REFLECTION & EXECUTION LOOP:\n" +
-            "  * Never restrict yourself to rigid artificial limits. Continuously reflect, discover, edit, write, test, and improve until the user's objective is completely achieved and verified.\n" +
-            "  * Before invoking each tool (or when analyzing findings), concisely explain your reasoning and next intent in a short, focused reflection (1-2 sentences). For example:\n" +
-            "    \"the file contains python code that needed to be updated the user said add some imports to it so i need to look for the correct imports required...\"\n" +
-            "  * Follow your reflection immediately with the appropriate ```tool_call``` block.\n" +
-            "- CODE INSPECTION & DISCOVERY BEFORE EDITING:\n" +
-            "  * Never modify code blindly. First inspect project structure ('file_list' / 'file_tree'), locate candidate files ('file_search'), and read existing files ('file_read') to understand architecture and requirements.\n" +
-            "- SURGICAL & MULTI-FILE EDITING:\n" +
-            "  * Prefer surgical diffs with 'file_patch' for modifying existing files without truncating or rewriting.\n" +
-            "  * Use 'file_write' when creating new files or when a full rewrite is cleaner.\n" +
-            "  * For multi-file changes, edit each affected file cleanly.\n" +
-            "- TESTING & CONTINUOUS IMPROVEMENT:\n" +
-            "  * Always test and verify after editing ('run_command' or 'python_execute').\n" +
-            "  * Observe diagnostics/stdout/stderr. If errors occur, reflect on the traceback, formulate fixes, apply them with 'file_patch', and re-test until clean.\n" +
-            "- DYNAMIC PLAN ADAPTATION:\n" +
-            "  * Adapt your approach if an initial attempt fails. You may output updated ```plan blocks with revised milestones.\n" +
-            "- FINAL COMPLETE DELIVERABLE:\n" +
-            "  * Only provide your complete, final text answer (without any ```tool_call``` block) when all steps are completed and verified."
+            "CORE ARCHITECTURE MANDATE - THE TERMINAL IS BUILT FOR YOU:\n" +
+            "- You do NOT call abstract tools on the chat interface. You execute commands directly on your Ubuntu terminal.\n" +
+            "- The chat interface will display your textual thoughts and the commands executed on your Ubuntu terminal.\n" +
+            "- To run commands on your terminal, write your commands in a ```bash ... ``` block or ```tool_call with tool 'bash'.\n" +
+            "- Always use standard Linux commands:\n" +
+            "  * Writing files: cat << 'EOF' > filename ... EOF\n" +
+            "  * Reading files: cat filename, head -n 40 filename\n" +
+            "  * Running Python: python3 filename.py\n" +
+            "  * Installing: apt update && apt install -y <pkg> or pip install <pkg>\n" +
+            "  * Testing & verifying: check stdout, stderr, and exit codes.\n" +
+            "- Prior to each command, provide a brief 1-2 sentence thought, execute the terminal command, inspect the result, and finish with your verified solution."
     }
 
     fun sendAgentFollowUp(overrideText: String? = null) {
@@ -1273,76 +1425,34 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
                 // Build structured observation feedback for the model
                 val nextActiveSubtask = currentPlan.activeSubtask
+                val cmdExecuted = (record.arguments["command"] ?: record.arguments["cmd"] ?: record.arguments["code"] ?: record.arguments["script_path"])?.toString() ?: record.toolName
                 val toolFeedbackContent = buildString {
-                    appendLine("[TOOL_RESULT: ${record.toolName}]")
-                    appendLine("Status: ${if (record.isSuccess) "SUCCESS" else "FAILURE"}")
+                    appendLine("```terminal-output")
+                    appendLine("ubuntu@termux:~/workspace$ $cmdExecuted")
                     if (record.isSuccess) {
-                        appendLine("Result: ${record.result}")
+                        appendLine(record.result?.trim() ?: "(Command finished with no output)")
+                        appendLine("[Process exited 0]")
+                    } else {
+                        appendLine(record.error?.trim() ?: "Command execution error")
+                        appendLine("[Process exited with non-zero status]")
+                    }
+                    appendLine("```")
+                    if (record.isSuccess) {
                         if (nextActiveSubtask != null && nextActiveSubtask.id != activeSubtask?.id) {
                             appendLine("\n[SUBTASK PROGRESSION: Subtask \"${activeSubtask?.description}\" is COMPLETED. Active subtask is now: \"${nextActiveSubtask.description}\".]")
                         } else {
-                            appendLine("\n[SUBTASK STATUS: Objective for \"${activeSubtask?.description}\" is currently RUNNING with output above.]")
-                        }
-                        if (record.toolName == "file_list" && record.result?.contains("empty") == true) {
-                            appendLine("\n[WORKSPACE NOTE: The workspace is empty. Create any needed script files with 'file_write'.]")
-                        } else if (record.toolName == "web_search") {
-                            appendLine("\n[RESEARCH AGENT GUIDANCE:")
-                            appendLine("- Review search results, domain credibility, and snippets above.")
-                            appendLine("- Select authoritative, diverse sources and call 'web_open' with the target URL to retrieve full, accurate page content.")
-                            appendLine("- Distinguish snippets from verified page content: snippets may be incomplete or truncated; use 'web_open' for source inspection.")
-                            appendLine("- If the search results are insufficient, irrelevant, or missing key aspects of the user query, perform a follow-up 'web_search' with refined, more specific keywords.")
-                            appendLine("- If the search provides direct authoritative answers (such as official IP/RDAP/WHOIS registry records or verified data) and no further lookups are needed, proceed to synthesize your answer citing the sources.]")
-                        } else if (record.toolName == "web_open") {
-                            appendLine("\n[RESEARCH & FACT-EXTRACTION GUIDANCE:")
-                            appendLine("- The web page content above has been cleaned, sanitized against prompt injection, and enclosed in untrusted data fences.")
-                            appendLine("- Review the DOCUMENT OUTLINE and content to extract verified facts, technical specifications, and news.")
-                            appendLine("- Identify missing information: If this source leaves unanswered questions, perform a follow-up 'web_search' with targeted keywords or open another candidate source URL.")
-                            appendLine("- Cross-reference: For critical facts or comparisons, check across multiple independent sources.")
-                            appendLine("- If more content is available and you need further details, call 'web_open' with the indicated 'offset' or jump to any section with section='<Heading>'.")
-                            appendLine("- When presenting your findings to the user, ALWAYS cite your source using markdown links [Source Title](URL).")
-                            appendLine("- If you have enough verified facts to answer the user's objective, proceed to deliver your response.]")
-                        } else if (record.toolName == "file_read") {
-                            appendLine("\n[CODE INSPECTION GUIDANCE:")
-                            appendLine("- The file content has been retrieved above.")
-                            appendLine("- Locate the exact line(s) that need modification or cause the error.")
-                            appendLine("- You MUST now apply the modification using 'file_patch' (specifying path, target_content, and replacement_content) or 'file_write' (to update the file).")
-                            appendLine("- Do NOT merely explain what needs to be changed in text: invoke 'file_patch' or 'file_write' immediately.]")
-                        } else if (record.toolName == "file_write" || record.toolName == "file_patch") {
-                            appendLine("\n[MODIFICATION SAVED & TEST MANDATE:")
-                            appendLine("- The file has been successfully written/patched on disk in the workspace.")
-                            appendLine("- MANDATORY NEXT STEP: You MUST execute and test the modified code now using 'python_execute' (for Python scripts) or 'run_command' (for shell/build commands).")
-                            appendLine("- Do NOT claim the file is fixed until you run it and verify the execution output has no errors.]")
-                        } else if (record.toolName == "python_execute") {
-                            appendLine("\n[EXECUTION VERIFICATION GUIDANCE:")
-                            appendLine("- Script executed. Inspect the stdout/stderr output above.")
-                            appendLine("- If the script executed cleanly (Exit Code 0) and output verifies the fix, conclude and deliver your final answer.")
-                            appendLine("- If an error occurred or fixes are needed, modify the code with 'file_patch' or 'file_write' and re-run with 'python_execute' to verify the fix.]")
-                        }
-                        val notice = workspaceContext.formatPostActionNotice(record.toolName, record.isSuccess)
-                        if (notice != null) {
-                            appendLine("\n$notice")
+                            appendLine("\n[UBUNTU TERMINAL: Command executed cleanly. Continue with your next terminal command in ```bash or deliver your final solution.]")
                         }
                     } else {
-                        appendLine("Error: ${record.error}")
-                        val notice = workspaceContext.formatPostActionNotice(record.toolName, record.isSuccess)
-                        if (notice != null) {
-                            appendLine("\n$notice")
-                        }
-                        appendLine("\n[SUBTASK STATUS: Subtask \"${activeSubtask?.description}\" failed with tool ${record.toolName}. You may retry, use a different tool, or choose another approach.]")
-                        if (record.error?.contains("CAPABILITY_UNAVAILABLE") == true) {
-                            appendLine("\n[RECOVERY INSTRUCTION: The requested executable is not available in the Android shell. Switch to 'python_execute' for Python execution. Do NOT attempt shell package managers (apt, pkg, curl).]")
-                        } else if (record.error?.contains("SyntaxError") == true || record.error?.contains("Traceback") == true || record.error?.contains("Error Classification") == true) {
-                            appendLine("\n[DIAGNOSTIC GUIDANCE: A Python error occurred. Inspect the traceback and exception message above, modify the code with 'file_patch' or 'file_write', and re-run with 'python_execute' to verify the fix.]")
-                        }
+                        appendLine("\n[UBUNTU TERMINAL: Command failed with the error shown in the terminal output above. Analyze the terminal output, inspect errors, and run your corrective terminal command in ```bash.]")
                     }
                     appendLine("Autonomous plan step ${currentPlan.stepCount} of ${currentPlan.maxSteps} executed.")
                     if (currentPlan.isStepLimitExceeded) {
-                        appendLine("Maximum plan step limit reached. Deliver your final complete answer to the user now without any further tool calls.")
+                        appendLine("Maximum plan step limit reached. Deliver your final complete answer to the user now without any further terminal commands.")
                     } else {
                         appendLine("\nNEXT ACTION MANDATE:")
-                        appendLine("- If the overall objective is NOT fully verified and achieved, you MUST immediately invoke the next tool call inside a ```tool_call``` block.")
-                        appendLine("- Do NOT respond with conversational text, intermediate progress reports, or descriptions of what you plan to do next without including the required ```tool_call``` block.")
-                        appendLine("- ONLY provide a pure final text answer without a ```tool_call``` block when ALL required steps (e.g. creating, running, verifying, or fixing) are completed and verified.")
+                        appendLine("- If the overall objective is NOT fully verified and achieved, you MUST immediately invoke the next command in your Ubuntu terminal using ```bash.")
+                        appendLine("- Only provide a final text response when all terminal steps and objectives are completed and verified.")
                     }
                 }
 

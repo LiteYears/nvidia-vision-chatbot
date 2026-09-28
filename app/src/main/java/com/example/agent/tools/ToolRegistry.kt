@@ -49,10 +49,15 @@ class ToolRegistry {
     }
 
     /**
-     * Finds a registered tool by name.
+     * Finds a registered tool by name, supporting aliases like 'bash', 'terminal', 'sh'.
      */
     fun getTool(name: String): AgentTool? {
-        return tools[name.lowercase()]
+        val key = name.lowercase().trim()
+        return tools[key] ?: when (key) {
+            "bash", "terminal", "sh", "shell", "exec", "cmd" -> tools["run_command"]
+            "python", "py" -> tools["python_execute"] ?: tools["run_command"]
+            else -> null
+        }
     }
 
     /**
@@ -71,97 +76,112 @@ class ToolRegistry {
 
     /**
      * Formats available tools into a structured prompt instruction block for the agent.
+     * The agent operates directly inside its live Ubuntu 22.04 LTS Terminal.
      */
     fun formatToolsForPrompt(): String {
-        if (tools.isEmpty()) return ""
-
         val sb = StringBuilder()
-        sb.append("### AVAILABLE TOOLS\n")
-        sb.append("You have access to the following tools to assist in achieving the goal:\n\n")
-
-        for (tool in tools.values) {
-            val def = tool.definition
-            sb.append("- **${def.name}**:\n")
-            sb.append("  Description: ${def.description}\n")
-            if (def.parameters.isNotEmpty()) {
-                sb.append("  Parameters:\n")
-                for (param in def.parameters) {
-                    val req = if (param.required) "required" else "optional"
-                    sb.append("    * `${param.name}` (${param.type}, $req): ${param.description}\n")
-                }
-            }
-            sb.append("\n")
-        }
-
-        sb.append("### TOOL CALL PROTOCOL\n")
-        sb.append("If you need to call a tool, output a single JSON block inside ```tool_call``` markdown tags in this exact format:\n")
-        sb.append("```tool_call\n")
-        sb.append("{\n")
-        sb.append("  \"tool\": \"<tool_name>\",\n")
-        sb.append("  \"arguments\": {\n")
-        sb.append("    \"<param_name>\": \"<param_value>\"\n")
-        sb.append("  }\n")
-        sb.append("}\n")
-        sb.append("```\n")
-        sb.append("When you output a tool call, the tool will be executed and the structured result returned back to you.\n")
-        sb.append("If no tool is required, respond directly with your analysis and roadmap without tool_call tags.\n\n")
-
-        sb.append(RuntimeCapabilityDetector().formatCapabilitiesForPrompt())
-        sb.append("\n### AUTONOMOUS CODING & DEBUGGING FLOW\n")
-        sb.append("When asked to write, run, debug, or fix scripts:\n")
-        sb.append("1. Inspect directory structure using `file_tree` or search codebase with `file_search`.\n")
-        sb.append("2. Write or modify modular scripts using `file_write` (e.g. `main.py` and `utils.py`).\n")
-        sb.append("3. Execute scripts using `python_execute` (with `script_path`: \"main.py\").\n")
-        sb.append("4. If an error occurs, inspect line numbers and diagnostics, refine code with `file_write`, and re-run.\n")
-        sb.append("5. Conclude only when verified and complete.\n")
-
-        sb.append("\n### AUTONOMOUS WEB BROWSING & NEWS EXTRACTION FLOW\n")
-        sb.append("When asked to enter a website, fetch news, read articles, or query documentation:\n")
-        sb.append("1. ENTER WEBSITE / READ URL:\n")
-        sb.append("   - If a URL or domain is provided (e.g. \"bbc.com\", \"news.ycombinator.com\", \"https://...\"):\n")
-        sb.append("     Immediately invoke `web_open` with parameter `url: \"<url>\"`.\n")
-        sb.append("     `web_open` loads the website, strips clutter/ads, neutralizes prompt injections, formats Markdown tables, and returns the full readable content, headlines, document outline, and metadata.\n")
-        sb.append("2. PAGINATION & SECTION TARGETING:\n")
-        sb.append("   - For long articles, inspect the `DOCUMENT OUTLINE`. You can paginate with `offset: <nextOffset>` or jump directly to a topic with `section: \"<Heading>\"`.\n")
-        sb.append("3. DISCOVERY & SEARCH:\n")
-        sb.append("   - If a specific website is not specified or you need to find relevant sources:\n")
-        sb.append("     Query the web with `web_search` using precise keywords.\n")
-        sb.append("     Review result snippets and URLs, then invoke `web_open` to read full articles.\n")
-        sb.append("4. DEEP LINK EXPLORATION:\n")
-        sb.append("   - Follow links found in the text or `KEY REFERENCES & CITATION LINKS` using subsequent `web_open` calls.\n")
-        sb.append("5. SYNTHESIZE & CITE:\n")
-        sb.append("   - Provide a comprehensive, factual answer citing the source URLs with markdown links [Title](URL).\n")
-        sb.append("\n### CLAUDE CODE-LEVEL WORKSPACE & EXECUTION ARCHITECTURE\n")
-        sb.append("- Standard folders are pre-created: `src/` (code), `scripts/` (runners), `data/` (inputs), `output/` (artifacts), `docs/` (documentation), `lib/` (packages), `tests/` (testing), `bin/` (executables).\n")
-        sb.append("- All file types are supported: text, source code, JSON/CSV/YAML data, and binary files/images/archives (using `encoding: 'base64'` in `file_read` / `file_write`).\n")
-        sb.append("- Targeted code edits & diffs: ALWAYS use `file_patch` to modify, fix, or improve specific functions and code sections without rewriting entire files.\n")
-        sb.append("- Project ZIP Archives: unpack project codebases using `archive_extract` (e.g. `path: 'project.zip'`). Once extracted, inspect with `file_tree` and patch with `file_patch`.\n")
-        sb.append("- Ubuntu-like Bash Shell & Python 3 Environment:\n")
-        sb.append("  * Terminal shell: run Linux/bash commands ('python3 script.py', 'pip install <pkg>', 'pip uninstall -y <pkg>', 'ls -la', 'uname -a', 'which <cmd>') via `run_command`.\n")
-        sb.append("  * Python package management: run `pip install <package>`, `pip uninstall -y <package>`, `pip list`, `pip show <pkg>` via `run_command`. Packages install to `lib/` and are immediately importable in Python.\n")
-        sb.append("  * Compound commands: use `cmd1 && cmd2` or `cmd1 ; cmd2` to chain installation and script execution.\n")
-        sb.append("  * Script execution: execute Python with `run_command` (e.g. `python3 script.py` or `python3 -c \"...\"`) or `python_execute`.\n")
-
+        sb.append("### DEDICATED AGENT ENVIRONMENT: UBUNTU 22.04 LTS LINUX TERMINAL\n")
+        sb.append("You are an autonomous engineering agent with direct access to a live rootless Ubuntu 22.04 LTS (Termux-PRoot) bash terminal running on the device.\n")
+        sb.append("The terminal was built specifically for you as your execution environment. You do not call abstract tools on the chat interface; you execute commands directly in your Ubuntu terminal.\n\n")
+        sb.append("HOW TO EXECUTE COMMANDS IN YOUR UBUNTU TERMINAL:\n")
+        sb.append("Output your bash commands in a standard ```bash code block, or a ```tool_call block with tool 'bash':\n")
+        sb.append("```bash\n")
+        sb.append("# Create script with bash heredoc\n")
+        sb.append("cat << 'EOF' > solution.py\n")
+        sb.append("print('Executed in Ubuntu Terminal')\n")
+        sb.append("EOF\n")
+        sb.append("python3 solution.py\n")
+        sb.append("```\n\n")
+        sb.append("STANDARD LINUX WORKFLOW IN YOUR TERMINAL:\n")
+        sb.append("1. Discover & Inspect: Run `ls -la`, `cat <file>`, `head -n 50 <file>`, `grep -rn 'pattern' .`, `find .`\n")
+        sb.append("2. Create & Edit Files: Use bash heredocs (`cat << 'EOF' > filename ... EOF`) or python scripts to write code.\n")
+        sb.append("3. Package Management: Run `apt update`, `apt install -y <pkg>`, `pip install <pkg>` to install packages.\n")
+        sb.append("4. Execution & Testing: Run `python3 script.py`, `pytest`, `node`, `bash script.sh` and inspect real stdout/stderr.\n")
+        sb.append("5. System Tools: `neofetch`, `uname -a`, `whoami`, `df -h`, `free -m`, `ps aux`\n\n")
+        sb.append("### SUPPLEMENTARY TOOLS\n")
+        sb.append("- **web_search**: Search the web for up-to-date documentation, APIs, and news (`query`: string).\n")
+        sb.append("- **web_open**: Open and read documentation or web page content (`url`: string).\n\n")
+        sb.append("### WORKFLOW MANDATE:\n")
+        sb.append("State your intent briefly (1-2 sentences), execute your terminal command, examine the terminal stdout/stderr, and conclude with your final solution when verified.")
         return sb.toString()
     }
 
     /**
      * Executes a tool request and returns a structured ToolResult.
+     * Legacy file operations are automatically translated into real Ubuntu terminal bash commands.
      */
     suspend fun execute(toolCall: ToolCall): ToolResult = withContext(Dispatchers.Default) {
-        val tool = getTool(toolCall.toolName)
+        val toolNameLower = toolCall.toolName.lowercase().trim()
+
+        // Transparently convert legacy tool calls into genuine Ubuntu terminal bash commands
+        val effectiveToolCall = when (toolNameLower) {
+            "file_write" -> {
+                val path = toolCall.arguments["path"]?.toString() ?: "file.txt"
+                val content = toolCall.arguments["content"]?.toString() ?: ""
+                val bashCmd = "mkdir -p \$(dirname '$path') && cat << 'EOF' > '$path'\n$content\nEOF"
+                ToolCall(
+                    callId = toolCall.callId,
+                    toolName = "bash",
+                    arguments = mapOf("command" to bashCmd)
+                )
+            }
+            "file_read" -> {
+                val path = toolCall.arguments["path"]?.toString() ?: ""
+                val bashCmd = if (path.isNotBlank()) "cat '$path'" else "ls -la"
+                ToolCall(
+                    callId = toolCall.callId,
+                    toolName = "bash",
+                    arguments = mapOf("command" to bashCmd)
+                )
+            }
+            "file_list", "file_tree" -> {
+                val path = toolCall.arguments["path"]?.toString() ?: "."
+                ToolCall(
+                    callId = toolCall.callId,
+                    toolName = "bash",
+                    arguments = mapOf("command" to "ls -la '$path'")
+                )
+            }
+            "file_delete" -> {
+                val path = toolCall.arguments["path"]?.toString() ?: ""
+                ToolCall(
+                    callId = toolCall.callId,
+                    toolName = "bash",
+                    arguments = mapOf("command" to "rm -rf '$path'")
+                )
+            }
+            "directory_create" -> {
+                val path = toolCall.arguments["path"]?.toString() ?: ""
+                ToolCall(
+                    callId = toolCall.callId,
+                    toolName = "bash",
+                    arguments = mapOf("command" to "mkdir -p '$path'")
+                )
+            }
+            "python_execute" -> {
+                val scriptPath = toolCall.arguments["script_path"]?.toString() ?: "main.py"
+                ToolCall(
+                    callId = toolCall.callId,
+                    toolName = "bash",
+                    arguments = mapOf("command" to "python3 '$scriptPath'")
+                )
+            }
+            else -> toolCall
+        }
+
+        val tool = getTool(effectiveToolCall.toolName)
             ?: return@withContext ToolResult.failure(
-                callId = toolCall.callId,
-                toolName = toolCall.toolName,
-                error = "Tool '${toolCall.toolName}' is not registered in the tool registry. Available tools: ${tools.keys.joinToString(", ")}"
+                callId = effectiveToolCall.callId,
+                toolName = effectiveToolCall.toolName,
+                error = "Tool '${effectiveToolCall.toolName}' is not registered in the tool registry. Available tools: ${tools.keys.joinToString(", ")}"
             )
 
         try {
-            tool.execute(toolCall.arguments)
+            tool.execute(effectiveToolCall.arguments)
         } catch (e: Exception) {
             ToolResult.failure(
-                callId = toolCall.callId,
-                toolName = toolCall.toolName,
+                callId = effectiveToolCall.callId,
+                toolName = effectiveToolCall.toolName,
                 error = "Unexpected exception during tool execution: ${e.message ?: e.javaClass.simpleName}"
             )
         }

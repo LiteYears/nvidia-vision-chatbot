@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
+import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -44,6 +45,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -53,11 +55,186 @@ import com.example.data.model.AgentReflection
 import com.example.data.model.ToolExecutionRecord
 
 /**
- * Minimal, clean tool execution indicator card inspired by top-tier coding agent workflows (Claude Code, OpenCode).
- * Compact single-line summary with the signature ●○● indicator by default, expandable on tap to inspect raw arguments/output.
+ * Renders tool execution records.
+ * For bash, terminal, and command execution, renders an authentic Ubuntu 22.04 LTS Terminal Window Card.
+ * For supplementary tools, renders a compact, clean expandable tool card.
  */
 @Composable
 fun ToolExecutionCard(
+    record: ToolExecutionRecord,
+    modifier: Modifier = Modifier
+) {
+    val isWebTool = when (record.toolName.lowercase().trim()) {
+        "web_search", "web_open" -> true
+        else -> false
+    }
+
+    if (!isWebTool) {
+        AgentTerminalCard(record = record, modifier = modifier)
+    } else {
+        StandardToolExecutionCard(record = record, modifier = modifier)
+    }
+}
+
+/**
+ * Authentic Ubuntu 22.04 LTS Terminal Window Card for commands executed by the agent on the Ubuntu system.
+ */
+@Composable
+fun AgentTerminalCard(
+    record: ToolExecutionRecord,
+    modifier: Modifier = Modifier
+) {
+    val clipboardManager = LocalClipboardManager.current
+    var hasCopied by remember { mutableStateOf(false) }
+    var isExpanded by remember { mutableStateOf(true) }
+
+    val rawCommand = (record.arguments["command"] ?: record.arguments["cmd"] ?: record.arguments["code"] ?: record.arguments["script_path"])?.toString()
+        ?: if (record.arguments["path"] != null) "${record.toolName} ${record.arguments["path"]}" else record.toolName
+    val output = (if (record.isSuccess) record.result else record.error) ?: ""
+    val isSuccess = record.isSuccess
+    val statusColor = if (isSuccess) Color(0xFF3FB950) else Color(0xFFF85149)
+
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 4.dp)
+            .testTag("agent_terminal_card"),
+        shape = RoundedCornerShape(10.dp),
+        color = Color(0xFF0D1117), // Termux dark console
+        border = BorderStroke(1.dp, Color(0xFF30363D))
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            // 1. Linux Window Title Bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF161B22))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                // Window control dots (Red, Yellow, Green) + Prompt Location
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    Box(modifier = Modifier.size(9.dp).background(Color(0xFFFF5F56), CircleShape))
+                    Box(modifier = Modifier.size(9.dp).background(Color(0xFFFFBD2E), CircleShape))
+                    Box(modifier = Modifier.size(9.dp).background(Color(0xFF27C93F), CircleShape))
+
+                    Spacer(modifier = Modifier.width(6.dp))
+
+                    Icon(
+                        imageVector = Icons.Outlined.Terminal,
+                        contentDescription = null,
+                        tint = Color(0xFF3FB950),
+                        modifier = Modifier.size(13.dp)
+                    )
+
+                    Text(
+                        text = "ubuntu@termux: ~/workspace",
+                        style = TextStyle(
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 11.sp,
+                            color = Color(0xFFE6EDF3)
+                        )
+                    )
+                }
+
+                // Exit Code Status + Copy Button
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = statusColor.copy(alpha = 0.15f),
+                        border = BorderStroke(1.dp, statusColor.copy(alpha = 0.4f))
+                    ) {
+                        Text(
+                            text = if (isSuccess) "exit 0" else "exit 1",
+                            style = TextStyle(
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 9.sp,
+                                color = statusColor
+                            ),
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                        )
+                    }
+
+                    IconButton(
+                        onClick = {
+                            val copyContent = "ubuntu@termux:~$ $rawCommand\n$output"
+                            clipboardManager.setText(AnnotatedString(copyContent))
+                            hasCopied = true
+                        },
+                        modifier = Modifier.size(22.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (hasCopied) Icons.Default.Check else Icons.Outlined.ContentCopy,
+                            contentDescription = "Copy terminal output",
+                            tint = if (hasCopied) Color(0xFF3FB950) else Color.LightGray,
+                            modifier = Modifier.size(12.dp)
+                        )
+                    }
+                }
+            }
+
+            // 2. Terminal Console Body
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+            ) {
+                // Command input line: ubuntu@termux:~$ <cmd>
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Text(
+                        text = "ubuntu@termux:~$ ",
+                        style = TextStyle(
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.5.sp,
+                            color = Color(0xFF3FB950)
+                        )
+                    )
+                    Text(
+                        text = rawCommand,
+                        style = TextStyle(
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 11.5.sp,
+                            color = Color(0xFF58A6FF)
+                        )
+                    )
+                }
+
+                // Output text
+                if (output.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = output.trimEnd(),
+                        style = TextStyle(
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.5.sp,
+                            lineHeight = 14.5.sp,
+                            color = if (isSuccess) Color(0xFFE6EDF3) else Color(0xFFF85149)
+                        ),
+                        maxLines = if (isExpanded) 30 else 6,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StandardToolExecutionCard(
     record: ToolExecutionRecord,
     modifier: Modifier = Modifier
 ) {

@@ -5,7 +5,8 @@ import java.util.UUID
 
 enum class AppMode {
     CHAT,
-    AGENT
+    AGENT,
+    TERMINAL
 }
 
 enum class AgentTaskStatus(val displayName: String) {

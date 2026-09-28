@@ -226,7 +226,7 @@ fun ChatDrawerContent(
                         }
                     }
 
-                    val isAgentMode = currentMode == AppMode.AGENT
+                    val isAgentMode = currentMode == AppMode.AGENT || currentMode == AppMode.TERMINAL
                     Surface(
                         shape = RoundedCornerShape(9.dp),
                         color = if (isAgentMode) MaterialTheme.colorScheme.surface else Color.Transparent,
@@ -241,14 +241,14 @@ fun ChatDrawerContent(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(
-                                imageVector = Icons.Outlined.SmartToy,
+                                imageVector = Icons.Outlined.Terminal,
                                 contentDescription = null,
                                 tint = if (isAgentMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
                                 modifier = Modifier.size(14.dp)
                             )
                             Spacer(modifier = Modifier.width(4.dp))
                             Text(
-                                text = "Agent",
+                                text = "Agent (Terminal)",
                                 style = MaterialTheme.typography.labelSmall.copy(
                                     fontWeight = if (isAgentMode) FontWeight.SemiBold else FontWeight.Normal,
                                     fontSize = 12.sp,

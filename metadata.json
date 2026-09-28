@@ -1,6 +1,6 @@
 {
-  "name": "Nvidia Vision Chatbot",
-  "description": "A native Android multimodal vision chatbot leveraging NVIDIA NIM APIs and DeepSeek models to analyze images, process documents with on-device RAG, and support real-time voice interactions.",
+  "name": "CyberTermux AI",
+  "description": "An autonomous AI engineering agent with a live rootless Ubuntu 22.04 LTS terminal on Android, executing code, managing packages, and running real Linux workflows.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

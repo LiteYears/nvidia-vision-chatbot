@@ -57,10 +57,10 @@ fun AgentGoalWelcomeView(
     modifier: Modifier = Modifier
 ) {
     val exampleGoals = listOf(
-        "Inspect and improve uploaded codebase",
-        "Optimize inference latency on NVIDIA Jetson",
-        "Plan multi-modal vision pipeline architecture",
-        "Fix bugs and patch code sections"
+        "Set up an Ubuntu development environment and run Python",
+        "Install packages with apt & pip and test scripts",
+        "Inspect and improve uploaded codebase in workspace",
+        "Build a Python REST API service with automated tests"
     )
 
     Column(
@@ -89,7 +89,7 @@ fun AgentGoalWelcomeView(
 
         // Title & Description
         Text(
-            text = "Agent Mode",
+            text = "Autonomous Ubuntu Terminal Agent",
             style = MaterialTheme.typography.headlineSmall.copy(
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onBackground,
@@ -101,9 +101,9 @@ fun AgentGoalWelcomeView(
         Spacer(modifier = Modifier.height(8.dp))
 
         Text(
-            text = "Define a goal to initialize an isolated task session. The agent tracks state, plans milestones, and formulates strategies.",
+            text = "Give the agent a goal. It will autonomously plan, inspect files, write code, install packages via apt/pip, and run commands directly in its Ubuntu 22.04 LTS terminal.",
             style = MaterialTheme.typography.bodyMedium.copy(
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
                 fontSize = 13.5.sp,
                 lineHeight = 19.sp
             ),
@@ -111,7 +111,32 @@ fun AgentGoalWelcomeView(
             modifier = Modifier.padding(horizontal = 12.dp)
         )
 
-        Spacer(modifier = Modifier.height(24.dp))
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // System Environment Badge
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = Color(0xFF0D1117),
+            border = BorderStroke(1.dp, Color(0xFF30363D))
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Box(modifier = Modifier.size(6.dp).background(Color(0xFF3FB950), CircleShape))
+                Text(
+                    text = "Ubuntu 22.04 LTS (Termux-PRoot) • Engine Ready",
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        fontSize = 10.5.sp,
+                        color = Color(0xFFE6EDF3)
+                    )
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(20.dp))
 
         // Goal Intake Input Card
         Surface(

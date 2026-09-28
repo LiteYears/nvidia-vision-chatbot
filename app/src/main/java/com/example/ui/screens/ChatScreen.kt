@@ -101,12 +101,17 @@ fun ChatScreen(
     modifier: Modifier = Modifier
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val terminalState by viewModel.terminalState.collectAsState()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val listState = rememberLazyListState()
     val agentListState = rememberLazyListState()
     val snackbarHostState = remember { SnackbarHostState() }
+
+    BackHandler(enabled = uiState.currentMode != AppMode.CHAT) {
+        viewModel.setAppMode(AppMode.CHAT)
+    }
 
     // Auto-scroll to latest message in Chat Mode
     LaunchedEffect(uiState.messages.size, uiState.isLoading) {

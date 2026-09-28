@@ -13,6 +13,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.outlined.SmartToy
+import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -55,7 +56,7 @@ fun ModeSelectorTabs(
             verticalAlignment = Alignment.CenterVertically
         ) {
             ModeTabItem(
-                title = "Chat Mode",
+                title = "Chat",
                 icon = Icons.AutoMirrored.Outlined.Chat,
                 isSelected = currentMode == AppMode.CHAT,
                 onClick = { onModeChange(AppMode.CHAT) },
@@ -63,8 +64,8 @@ fun ModeSelectorTabs(
             )
 
             ModeTabItem(
-                title = "Agent Mode",
-                icon = Icons.Outlined.SmartToy,
+                title = "Agent (Ubuntu Terminal)",
+                icon = Icons.Outlined.Terminal,
                 isSelected = currentMode == AppMode.AGENT,
                 onClick = { onModeChange(AppMode.AGENT) },
                 modifier = Modifier.weight(1f)
