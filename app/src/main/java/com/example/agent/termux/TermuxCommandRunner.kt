@@ -42,8 +42,7 @@ class TermuxCommandRunner(
         maxOutputBytes: Int,
         environment: String
     ): CommandExecutionResult = withContext(Dispatchers.IO) {
-        val promptRegex = Regex("""(?m)^[ \t]*(?:[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+:[^$#\r\n]*[\$#]|[\$#>])[ \t]*""")
-        val trimmed = command.replace(promptRegex, "").trim()
+        val trimmed = stripPromptsSafely(command)
         if (trimmed.isBlank()) {
             return@withContext CommandExecutionResult(0, "", "", 0)
         }
@@ -356,5 +355,40 @@ class TermuxCommandRunner(
         }
 
         return StreamReadResult(baos.toString(Charsets.UTF_8.name()), truncated)
+    }
+
+    private fun stripPromptsSafely(command: String): String {
+        val lines = command.lines()
+        val processed = mutableListOf<String>()
+        var activeHeredocDelim: String? = null
+
+        val promptRegex = Regex("""^[ \t]*(?:[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+:[^$#\r\n]*[\$#]|\$|>)[ \t]+""")
+
+        for (line in lines) {
+            if (activeHeredocDelim != null) {
+                processed.add(line)
+                val trimmedLine = line.trim().trim('\'', '"')
+                if (trimmedLine == activeHeredocDelim) {
+                    activeHeredocDelim = null
+                }
+                continue
+            }
+
+            val heredocMatch = Regex("""<<-?\s*['"]?([A-Za-z0-9_.-]+)['"]?""").find(line)
+            if (heredocMatch != null) {
+                activeHeredocDelim = heredocMatch.groupValues[1]
+            }
+
+            var cleanLine = line
+            if (promptRegex.containsMatchIn(cleanLine)) {
+                cleanLine = cleanLine.replace(promptRegex, "")
+            } else if (cleanLine.trimStart().startsWith("$ ")) {
+                cleanLine = cleanLine.trimStart().removePrefix("$ ")
+            }
+
+            processed.add(cleanLine)
+        }
+
+        return processed.joinToString("\n").trim()
     }
 }

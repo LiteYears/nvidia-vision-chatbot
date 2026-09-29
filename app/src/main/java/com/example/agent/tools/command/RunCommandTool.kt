@@ -166,17 +166,27 @@ class RunCommandTool(
             return scriptValidationError
         }
 
-        val nonCommentLine = sanitizedCommand.lines()
+        val nonCommentLines = sanitizedCommand.lines()
             .map { it.trim() }
-            .firstOrNull { it.isNotBlank() && !it.startsWith("#") } ?: sanitizedCommand
-        val tokens = nonCommentLine.split(Regex("\\s+")).map { it.trim('\'', '"') }.filter { it.isNotBlank() }
-        val effectiveExecutable = if (tokens.firstOrNull() == "sudo" && tokens.size > 1) {
-            tokens[1]
+            .filter { it.isNotBlank() && !it.startsWith("#") }
+        val isMultiCommand = nonCommentLines.size > 1 ||
+            sanitizedCommand.contains("&&") ||
+            sanitizedCommand.contains("||") ||
+            (sanitizedCommand.contains(";") && !sanitizedCommand.contains("<<"))
+
+        val cleanExec = if (isMultiCommand) {
+            "bash"
         } else {
-            tokens.firstOrNull() ?: ""
+            val singleLine = nonCommentLines.firstOrNull() ?: sanitizedCommand.trim()
+            val tokens = singleLine.split(Regex("\\s+")).map { it.trim('\'', '"') }.filter { it.isNotBlank() }
+            val effectiveExecutable = if (tokens.firstOrNull() == "sudo" && tokens.size > 1) {
+                tokens[1]
+            } else {
+                tokens.firstOrNull() ?: ""
+            }
+            val rawExec = if (effectiveExecutable.contains('/')) File(effectiveExecutable).name else effectiveExecutable
+            if (rawExec.isBlank() || rawExec == "#" || rawExec.contains('@') || rawExec.endsWith('$')) "bash" else rawExec
         }
-        val rawExec = if (effectiveExecutable.contains('/')) File(effectiveExecutable).name else effectiveExecutable
-        val cleanExec = if (rawExec.isBlank() || rawExec == "#" || rawExec.contains('@') || rawExec.endsWith('$')) "bash" else rawExec
 
         // 5. Execute via modular CommandRunner
         val execResult = commandRunner.run(
@@ -212,7 +222,8 @@ class RunCommandTool(
             ToolResult.failure(callId = callId, toolName = definition.name, error = errorMsg.trim())
         } else if (execResult.exitCode != 0 && !(execResult.isTruncated && execResult.exitCode == 141)) {
             val isKnownShellOrBuiltin = cleanExec in setOf("bash", "sh", "zsh", "cat", "echo", "mkdir", "cd", "python", "python3")
-            val isUnavailable = !isKnownShellOrBuiltin && !capabilityDetector.isExecutableAvailable(cleanExec) && (
+            val isPlausibleBinary = cleanExec.isNotBlank() && cleanExec.all { it.isLowerCase() || it.isDigit() || it == '-' || it == '_' || it == '.' }
+            val isUnavailable = isPlausibleBinary && !isKnownShellOrBuiltin && !capabilityDetector.isExecutableAvailable(cleanExec) && (
                 execResult.exitCode == 127 ||
                 execResult.stderr.contains("inaccessible or not found", ignoreCase = true) ||
                 execResult.stderr.contains("not found", ignoreCase = true) ||
@@ -318,25 +329,48 @@ class RunCommandTool(
             s = s.replace("\\n", "\n").replace("\\r", "\r")
         }
 
-        // Strip leading prompt prefixes from lines: ubuntu@termux:~$, user@host:~/dir$, $, #, >
-        val promptRegex = Regex("""(?m)^[ \t]*(?:[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+:[^$#\r\n]*[\$#]|[\$#>])[ \t]*""")
-        s = s.replace(promptRegex, "").trim()
+        return stripPromptsSafely(s)
+    }
 
-        val commandKeywords = listOf("cat <<", "python3 ", "python ", "pip ", "pip3 ", "echo ", "mkdir ", "cd ", "pytest ", "npm ", "node ", "git ", "curl ", "bash ", "sh ")
-        val lines = s.lines().toMutableList()
-        for (i in lines.indices) {
-            val line = lines[i].trim()
-            if (line.startsWith("#")) {
-                for (kw in commandKeywords) {
-                    val kwIdx = line.indexOf(kw)
-                    if (kwIdx > 0) {
-                        lines[i] = line.substring(kwIdx)
-                        break
-                    }
+    private fun stripPromptsSafely(command: String): String {
+        val lines = command.lines()
+        val processed = mutableListOf<String>()
+        var activeHeredocDelim: String? = null
+
+        // Matches terminal prompt prefixes strictly:
+        // 1. user@host:path$ or user@host:path# followed by space
+        // 2. Standalone $ followed by space
+        // 3. Standalone > followed by space
+        // NEVER match # at start of line because # is a valid shell/python comment
+        val promptRegex = Regex("""^[ \t]*(?:[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+:[^$#\r\n]*[\$#]|\$|>)[ \t]+""")
+
+        for (line in lines) {
+            if (activeHeredocDelim != null) {
+                // Inside heredoc body: keep 100% VERBATIM without any prompt stripping
+                processed.add(line)
+                val trimmedLine = line.trim().trim('\'', '"')
+                if (trimmedLine == activeHeredocDelim) {
+                    activeHeredocDelim = null
                 }
+                continue
             }
+
+            val heredocMatch = Regex("""<<-?\s*['"]?([A-Za-z0-9_.-]+)['"]?""").find(line)
+            if (heredocMatch != null) {
+                activeHeredocDelim = heredocMatch.groupValues[1]
+            }
+
+            var cleanLine = line
+            if (promptRegex.containsMatchIn(cleanLine)) {
+                cleanLine = cleanLine.replace(promptRegex, "")
+            } else if (cleanLine.trimStart().startsWith("$ ")) {
+                cleanLine = cleanLine.trimStart().removePrefix("$ ")
+            }
+
+            processed.add(cleanLine)
         }
-        return lines.joinToString("\n").trim()
+
+        return processed.joinToString("\n").trim()
     }
 
     private fun isNaturalLanguageOrRawCode(cmd: String): Boolean {

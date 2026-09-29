@@ -215,6 +215,9 @@ class ProotCommandExecutor(
             val remainingTimeout = (timeoutMs - (System.currentTimeMillis() - startTime)).coerceAtLeast(500L)
 
             val stepCmd = step.command.trim()
+            if (stepCmd.isBlank() || isPurelyComment(stepCmd)) {
+                continue
+            }
             if (stepCmd == "cd" || stepCmd.startsWith("cd ")) {
                 val targetArg = stepCmd.removePrefix("cd").trim().trim('\'', '"')
                 val targetDir = when {
@@ -282,6 +285,9 @@ class ProotCommandExecutor(
         val startTime = System.currentTimeMillis()
 
         var pCmd = pipelineCmd.trim()
+        if (pCmd.isBlank() || isPurelyComment(pCmd)) {
+            return CommandExecutionResult(0, "", "", 0)
+        }
         var redirectStderrToStdout = false
         if (pCmd.contains("2>&1")) {
             redirectStderrToStdout = true
@@ -503,6 +509,9 @@ class ProotCommandExecutor(
     ): CommandExecutionResult {
         val startTime = System.currentTimeMillis()
         var cmd = command.trim()
+        if (cmd.isBlank() || isPurelyComment(cmd)) {
+            return CommandExecutionResult(0, "", "", 0)
+        }
         var isRoot = false
 
         // Sudo handling: simulate fake-id0
@@ -1349,16 +1358,62 @@ class ProotCommandExecutor(
         }
 
         if (second == "-m") {
-            val module = tokens.getOrNull(2)?.lowercase() ?: ""
-            if (module == "pip" || module == "pip3") {
+            val module = tokens.getOrNull(2) ?: ""
+            val moduleLower = module.lowercase()
+            if (moduleLower == "pip" || moduleLower == "pip3") {
                 val pipCmd = "pip " + tokens.drop(3).joinToString(" ")
                 return pipManager.execute(pipCmd, workspaceRoot)
             }
-            if (module == "unittest") {
+            if (moduleLower == "unittest") {
                 return handleUnittest(tokens.drop(3), workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
             }
-            if (module == "pytest") {
+            if (moduleLower == "pytest") {
                 return handlePytest(tokens.drop(3), workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
+            }
+            if (moduleLower == "http.server" || moduleLower == "simplehttpserver") {
+                val portArg = tokens.getOrNull(3)?.toIntOrNull() ?: 8000
+                val bindArg = if (tokens.contains("--bind")) {
+                    val idx = tokens.indexOf("--bind")
+                    tokens.getOrNull(idx + 1) ?: "0.0.0.0"
+                } else "0.0.0.0"
+                val out = buildString {
+                    appendLine("Serving HTTP on $bindArg port $portArg (http://$bindArg:$portArg/) ...")
+                    appendLine("Root directory: ${workingDir.canonicalPath}")
+                    val files = workingDir.listFiles()?.filter { !it.name.startsWith(".") }?.take(10)?.map { it.name } ?: emptyList()
+                    if (files.isNotEmpty()) {
+                        appendLine("Available files: ${files.joinToString(", ")}")
+                    }
+                }
+                return CommandExecutionResult(0, out, "", System.currentTimeMillis() - startTime)
+            }
+
+            if (module.isNotBlank()) {
+                val modArgs = tokens.drop(3)
+                val code = """
+                    import sys
+                    import runpy
+                    sys.argv = ['$module'] + [${modArgs.joinToString(", ") { "'${it.replace("'", "\\'")}'" }}]
+                    try:
+                        runpy.run_module('$module', run_name='__main__')
+                    except Exception as e:
+                        import traceback
+                        traceback.print_exc()
+                """.trimIndent()
+                val pyRes = pythonRuntime.execute(
+                    code = code,
+                    filename = "<module $module>",
+                    args = modArgs,
+                    timeoutMs = timeoutMs,
+                    maxOutputBytes = maxOutputBytes
+                )
+                return CommandExecutionResult(
+                    exitCode = pyRes.exitCode,
+                    stdout = pyRes.stdout,
+                    stderr = pyRes.stderr,
+                    durationMs = System.currentTimeMillis() - startTime,
+                    isTimedOut = pyRes.isTimedOut,
+                    isTruncated = pyRes.isTruncated
+                )
             }
         }
 
@@ -2935,5 +2990,12 @@ class ProotCommandExecutor(
                 )
             }
         }
+    }
+
+    private fun isPurelyComment(cmd: String): Boolean {
+        val nonComment = cmd.lines()
+            .map { it.trim() }
+            .filter { it.isNotBlank() && !it.startsWith("#") }
+        return nonComment.isEmpty()
     }
 }
