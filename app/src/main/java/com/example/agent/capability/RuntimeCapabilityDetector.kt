@@ -124,7 +124,8 @@ class RuntimeCapabilityDetector(
                 "grep", "egrep", "fgrep", "wc", "head", "tail", "find", "git", "tar", "zip", "unzip", "tree",
                 "proot", "proot-distro", "sed", "awk", "cut", "tr", "sort", "uniq", "tee", "xargs", "chmod",
                 "chown", "su", "sudo", "md5sum", "sha256sum", "basename", "dirname", "node", "nodejs", "npm", "npx",
-                "sleep", "seq", "base64", "stat", "file", "diff", "cmp", "service", "systemctl", "cal", "neofetch"
+                "sleep", "seq", "base64", "stat", "file", "diff", "cmp", "service", "systemctl", "cal", "neofetch",
+                "virtualenv", "venv", "uvicorn", "gunicorn", "pytest", "fastapi", "flask", "source", ".", "make", "gcc", "g++", "clang", "cargo", "rustc", "unittest"
             )
         ) {
             return true
@@ -282,10 +283,19 @@ class RuntimeCapabilityDetector(
                 File(rootfsDir, "sbin"),
                 File("/data/data/com.termux/files/usr/bin")
             )
+            val wsRoot = try { com.example.agent.tools.workspace.AgentWorkspaceManager.getInstance().getWorkspaceRoot() } catch (_: Exception) { null }
+            val wsDirs = if (wsRoot != null) {
+                listOf(
+                    File(wsRoot, "bin"),
+                    File(wsRoot, "venv/bin"),
+                    File(wsRoot, ".venv/bin"),
+                    File(wsRoot, "lib/bin")
+                )
+            } else emptyList()
             val pathEnv = System.getenv("PATH") ?: "/system/bin:/system/xbin:/bin:/usr/bin:/usr/local/bin"
             val envDirs = pathEnv.split(':')
                 .map { File(it.trim()) }
-            return (rootfsDirs + envDirs).distinct().filter { it.isDirectory }
+            return (wsDirs + rootfsDirs + envDirs).distinct().filter { it.isDirectory }
         }
     }
 }

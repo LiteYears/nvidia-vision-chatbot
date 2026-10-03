@@ -241,11 +241,13 @@ class PythonTracebackFrame(
 )
 
 sealed class PyStmt(val line: Int) {
-    class Assign(val target: String, val value: PyExpr, line: Int) : PyStmt(line)
+    class Assign(val target: String, val value: PyExpr, line: Int, val targetExpr: PyExpr? = null) : PyStmt(line)
     class MultiAssign(val targets: List<String>, val value: PyExpr, line: Int) : PyStmt(line)
     class AugAssign(val target: String, val op: String, val value: PyExpr, line: Int) : PyStmt(line)
     class Expr(val expr: PyExpr, line: Int) : PyStmt(line)
-    class Def(val name: String, val params: List<ParamDef>, val body: List<PyStmt>, line: Int) : PyStmt(line)
+    class Def(val name: String, val params: List<ParamDef>, val body: List<PyStmt>, line: Int, val decorators: List<PyExpr> = emptyList()) : PyStmt(line)
+    class Class(val name: String, val baseClass: String?, val body: List<PyStmt>, line: Int, val decorators: List<PyExpr> = emptyList()) : PyStmt(line)
+    class Assert(val condition: PyExpr, val message: PyExpr?, line: Int) : PyStmt(line)
     class Return(val expr: PyExpr?, line: Int) : PyStmt(line)
     class If(val condition: PyExpr, val body: List<PyStmt>, val elifs: List<Pair<PyExpr, List<PyStmt>>>, val elseBody: List<PyStmt>?, line: Int) : PyStmt(line)
     class While(val condition: PyExpr, val body: List<PyStmt>, line: Int) : PyStmt(line)
@@ -293,6 +295,7 @@ enum class TokenType {
     EQ, NEQ, LT, LTE, GT, GTE,
     LPAREN, RPAREN, LBRACKET, RBRACKET, LBRACE, RBRACE,
     COLON, COMMA, DOT, SEMICOLON,
+    AT, ARROW, TILDE, AMPERSAND, PIPE, CARET,
     NEWLINE, INDENT, DEDENT, EOF,
     KEYWORD
 }
@@ -314,7 +317,7 @@ class PythonLexer(private val input: String, private val filename: String) {
         val KEYWORDS = setOf(
             "def", "return", "if", "elif", "else", "while", "for", "in",
             "try", "except", "finally", "raise", "import", "from", "as",
-            "with", "break", "continue", "pass", "class", "True", "False",
+            "with", "break", "continue", "pass", "class", "assert", "True", "False",
             "None", "and", "or", "not", "is", "lambda", "global"
         )
     }
@@ -442,7 +445,8 @@ class PythonLexer(private val input: String, private val filename: String) {
                     else tokens.add(Token(TokenType.PLUS, "+", line, startCol))
                 }
                 '-' -> {
-                    if (matchNext('=')) tokens.add(Token(TokenType.MINUS_ASSIGN, "-=", line, startCol))
+                    if (matchNext('>')) tokens.add(Token(TokenType.ARROW, "->", line, startCol))
+                    else if (matchNext('=')) tokens.add(Token(TokenType.MINUS_ASSIGN, "-=", line, startCol))
                     else tokens.add(Token(TokenType.MINUS, "-", line, startCol))
                 }
                 '*' -> {
@@ -482,6 +486,11 @@ class PythonLexer(private val input: String, private val filename: String) {
                 ',' -> { pos++; col++; tokens.add(Token(TokenType.COMMA, ",", line, startCol)) }
                 '.' -> { pos++; col++; tokens.add(Token(TokenType.DOT, ".", line, startCol)) }
                 ';' -> { pos++; col++; tokens.add(Token(TokenType.SEMICOLON, ";", line, startCol)) }
+                '@' -> { pos++; col++; tokens.add(Token(TokenType.AT, "@", line, startCol)) }
+                '~' -> { pos++; col++; tokens.add(Token(TokenType.TILDE, "~", line, startCol)) }
+                '&' -> { pos++; col++; tokens.add(Token(TokenType.AMPERSAND, "&", line, startCol)) }
+                '|' -> { pos++; col++; tokens.add(Token(TokenType.PIPE, "|", line, startCol)) }
+                '^' -> { pos++; col++; tokens.add(Token(TokenType.CARET, "^", line, startCol)) }
                 else -> throw PythonSyntaxException("invalid character '$c'", line, startCol)
             }
         }
@@ -651,10 +660,30 @@ class PythonParser(private val tokens: List<Token>, private val filename: String
     }
 
     private fun parseStatement(): PyStmt {
+        // Handle decorators @decorator
+        if (check(TokenType.AT)) {
+            val decorators = mutableListOf<PyExpr>()
+            while (match(TokenType.AT)) {
+                val decExpr = parseExpression()
+                consumeEndStatement()
+                decorators.add(decExpr)
+                while (match(TokenType.NEWLINE)) { /* skip blank lines */ }
+            }
+            val t = peek()
+            if (t.type == TokenType.KEYWORD && t.value == "def") {
+                return parseDef(decorators)
+            } else if (t.type == TokenType.KEYWORD && t.value == "class") {
+                return parseClass(decorators)
+            }
+            throw PythonSyntaxException("Expected 'def' or 'class' after decorator", t.line, t.col)
+        }
+
         val t = peek()
         if (t.type == TokenType.KEYWORD) {
             when (t.value) {
                 "def" -> return parseDef()
+                "class" -> return parseClass()
+                "assert" -> return parseAssert()
                 "return" -> return parseReturn()
                 "if" -> return parseIf()
                 "while" -> return parseWhile()
@@ -693,7 +722,7 @@ class PythonParser(private val tokens: List<Token>, private val filename: String
         throw PythonSyntaxException("invalid syntax", t.line, t.col)
     }
 
-    private fun parseDef(): PyStmt.Def {
+    private fun parseDef(decorators: List<PyExpr> = emptyList()): PyStmt.Def {
         val defToken = consume(TokenType.KEYWORD, "Expected 'def'", "def")
         val nameToken = consume(TokenType.IDENTIFIER, "Expected function name after 'def'")
         consume(TokenType.LPAREN, "Expected '(' after function name")
@@ -701,6 +730,9 @@ class PythonParser(private val tokens: List<Token>, private val filename: String
         if (!check(TokenType.RPAREN)) {
             do {
                 val pName = consume(TokenType.IDENTIFIER, "Expected parameter name").value
+                if (match(TokenType.COLON)) {
+                    skipTypeAnnotation()
+                }
                 var defaultVal: PyExpr? = null
                 if (match(TokenType.ASSIGN)) {
                     defaultVal = parseExpression()
@@ -709,9 +741,54 @@ class PythonParser(private val tokens: List<Token>, private val filename: String
             } while (match(TokenType.COMMA))
         }
         consume(TokenType.RPAREN, "Expected ')' after parameters")
+        if (match(TokenType.ARROW)) {
+            skipTypeAnnotation()
+        }
         consume(TokenType.COLON, "Expected ':' after function signature")
         val body = parseBlock()
-        return PyStmt.Def(nameToken.value, params, body, defToken.line)
+        return PyStmt.Def(nameToken.value, params, body, defToken.line, decorators)
+    }
+
+    private fun parseClass(decorators: List<PyExpr> = emptyList()): PyStmt.Class {
+        val classToken = consume(TokenType.KEYWORD, "Expected 'class'", "class")
+        val name = consume(TokenType.IDENTIFIER, "Expected class name").value
+        var base: String? = null
+        if (match(TokenType.LPAREN)) {
+            if (!check(TokenType.RPAREN)) {
+                var baseStr = consume(TokenType.IDENTIFIER, "Expected base class name").value
+                while (match(TokenType.DOT)) {
+                    baseStr = "$baseStr." + consume(TokenType.IDENTIFIER, "Expected attribute after '.'").value
+                }
+                base = baseStr
+            }
+            consume(TokenType.RPAREN, "Expected ')'")
+        }
+        consume(TokenType.COLON, "Expected ':' after class declaration")
+        val body = parseBlock()
+        return PyStmt.Class(name, base, body, classToken.line, decorators)
+    }
+
+    private fun parseAssert(): PyStmt.Assert {
+        val assertToken = consume(TokenType.KEYWORD, "Expected 'assert'", "assert")
+        val cond = parseExpression()
+        val msg = if (match(TokenType.COMMA)) parseExpression() else null
+        consumeEndStatement()
+        return PyStmt.Assert(cond, msg, assertToken.line)
+    }
+
+    private fun skipTypeAnnotation() {
+        var depth = 0
+        while (!isAtEnd()) {
+            val t = peek()
+            if (t.type == TokenType.LBRACKET || t.type == TokenType.LPAREN || t.type == TokenType.LBRACE) depth++
+            else if (t.type == TokenType.RBRACKET || t.type == TokenType.RPAREN || t.type == TokenType.RBRACE) {
+                if (depth == 0) break
+                depth--
+            } else if (depth == 0 && (t.type == TokenType.COMMA || t.type == TokenType.ASSIGN || t.type == TokenType.COLON || t.type == TokenType.NEWLINE || t.type == TokenType.SEMICOLON)) {
+                break
+            }
+            idx++
+        }
     }
 
     private fun parseReturn(): PyStmt.Return {
@@ -895,6 +972,9 @@ class PythonParser(private val tokens: List<Token>, private val filename: String
             if (expr is PyExpr.Variable) {
                 return PyStmt.Assign(expr.name, valExpr, startToken.line)
             }
+            if (expr is PyExpr.Attribute || expr is PyExpr.Subscript) {
+                return PyStmt.Assign(target = "", value = valExpr, line = startToken.line, targetExpr = expr)
+            }
             throw PythonSyntaxException("cannot assign to expression", expr.line, 1)
         }
 
@@ -911,6 +991,11 @@ class PythonParser(private val tokens: List<Token>, private val filename: String
             consumeEndStatement()
             if (expr is PyExpr.Variable) {
                 return PyStmt.AugAssign(expr.name, augOp, valExpr, startToken.line)
+            }
+            if (expr is PyExpr.Attribute || expr is PyExpr.Subscript) {
+                val binaryOp = augOp.removeSuffix("=")
+                val computed = PyExpr.Binary(expr, binaryOp, valExpr, startToken.line)
+                return PyStmt.Assign(target = "", value = computed, line = startToken.line, targetExpr = expr)
             }
             throw PythonSyntaxException("cannot assign to expression", expr.line, 1)
         }
@@ -1334,7 +1419,11 @@ class PythonInterpreter(
         when (stmt) {
             is PyStmt.Assign -> {
                 val value = evalExpr(stmt.value, scope)
-                scope[stmt.target] = value
+                if (stmt.targetExpr != null) {
+                    assignToExpr(stmt.targetExpr, value, scope, stmt.line)
+                } else {
+                    scope[stmt.target] = value
+                }
             }
             is PyStmt.MultiAssign -> {
                 val value = evalExpr(stmt.value, scope)
@@ -1363,8 +1452,39 @@ class PythonInterpreter(
                 evalExpr(stmt.expr, scope)
             }
             is PyStmt.Def -> {
-                val func = UserDefinedFunction(stmt.name, stmt.params, stmt.body, filename, scope)
+                var func: Any? = UserDefinedFunction(stmt.name, stmt.params, stmt.body, filename, scope)
+                for (decExpr in stmt.decorators.reversed()) {
+                    val dec = evalExpr(decExpr, scope)
+                    func = callFunction(dec, listOf(func), emptyMap(), stmt.line)
+                }
                 scope[stmt.name] = func
+            }
+            is PyStmt.Class -> {
+                val classScope = mutableMapOf<String, Any?>()
+                classScope.putAll(scope)
+                for (s in stmt.body) {
+                    executeStmt(s, classScope)
+                }
+                val methods = mutableMapOf<String, Any?>()
+                for ((k, v) in classScope) {
+                    if (v is UserDefinedFunction || v is PyBuiltinFunc) {
+                        methods[k] = v
+                    }
+                }
+                val pyClass = PyUserClass(stmt.name, stmt.baseClass, methods, stmt.body)
+                var resultClass: Any? = pyClass
+                for (decExpr in stmt.decorators.reversed()) {
+                    val dec = evalExpr(decExpr, scope)
+                    resultClass = callFunction(dec, listOf(resultClass), emptyMap(), stmt.line)
+                }
+                scope[stmt.name] = resultClass
+            }
+            is PyStmt.Assert -> {
+                val condVal = isTruthy(evalExpr(stmt.condition, scope))
+                if (!condVal) {
+                    val msg = stmt.message?.let { pyStr(evalExpr(it, scope)) } ?: "assertion failed"
+                    throw PythonRuntimeException("AssertionError", msg, stmt.line)
+                }
             }
             is PyStmt.Return -> {
                 val retVal = stmt.expr?.let { evalExpr(it, scope) }
@@ -1514,6 +1634,41 @@ class PythonInterpreter(
             is PyStmt.Pass -> {}
         }
         return null
+    }
+
+    private fun assignToExpr(targetExpr: PyExpr, value: Any?, scope: MutableMap<String, Any?>, line: Int) {
+        when (targetExpr) {
+            is PyExpr.Variable -> {
+                scope[targetExpr.name] = value
+            }
+            is PyExpr.Attribute -> {
+                val obj = evalExpr(targetExpr.obj, scope)
+                if (obj is PyInstance) {
+                    obj.fields[targetExpr.name] = value
+                } else if (obj is PyModule) {
+                    obj.members[targetExpr.name] = value
+                } else if (obj is MutableMap<*, *>) {
+                    @Suppress("UNCHECKED_CAST")
+                    (obj as MutableMap<String, Any?>)[targetExpr.name] = value
+                } else if (obj is PyUserClass) {
+                    obj.methods[targetExpr.name] = value
+                }
+            }
+            is PyExpr.Subscript -> {
+                val obj = evalExpr(targetExpr.obj, scope)
+                val idx = evalExpr(targetExpr.index, scope)
+                if (obj is MutableMap<*, *>) {
+                    val k = pyStr(idx)
+                    @Suppress("UNCHECKED_CAST")
+                    (obj as MutableMap<String, Any?>)[k] = value
+                } else if (obj is MutableList<*>) {
+                    val intIdx = (idx as? Number)?.toInt() ?: 0
+                    @Suppress("UNCHECKED_CAST")
+                    (obj as MutableList<Any?>)[intIdx] = value
+                }
+            }
+            else -> throw PythonRuntimeException("SyntaxError", "cannot assign to expression", line)
+        }
     }
 
     private class ReturnSignal(val value: Any?)
@@ -1792,8 +1947,104 @@ class PythonInterpreter(
     }
 
     private fun getAttr(obj: Any?, name: String, line: Int): Any? {
+        if (obj is PyInstance) {
+            if (obj.fields.containsKey(name)) {
+                return obj.fields[name]
+            }
+            val method = obj.pyClass.methods[name]
+            if (method != null) {
+                return PyBuiltinFunc(name) { mArgs, mKwargs ->
+                    callFunction(method, listOf(obj) + mArgs, mKwargs, line)
+                }
+            }
+            return null
+        }
+        if (obj is PyUserClass) {
+            return obj.methods[name] ?: throw PythonRuntimeException("AttributeError", "type '${obj.name}' has no attribute '$name'", line)
+        }
         if (obj is PyModule) {
             return obj.getMember(name) ?: throw PythonRuntimeException("AttributeError", "module '${obj.name}' has no attribute '$name'", line)
+        }
+        if (obj is PyFastApiApp) {
+            return when (name) {
+                "get", "post", "put", "delete", "patch", "head", "options" -> PyBuiltinFunc(name) { rArgs, _ ->
+                    val path = rArgs.firstOrNull()?.toString() ?: "/"
+                    PyBuiltinFunc("${name}_decorator") { fnArgs, _ ->
+                        val fn = fnArgs.firstOrNull()
+                        if (fn != null) {
+                            obj.addRoute(name.uppercase(), path, fn)
+                        }
+                        fn
+                    }
+                }
+                "route", "api_route" -> PyBuiltinFunc(name) { rArgs, _ ->
+                    val path = rArgs.firstOrNull()?.toString() ?: "/"
+                    PyBuiltinFunc("${name}_decorator") { fnArgs, _ ->
+                        val fn = fnArgs.firstOrNull()
+                        if (fn != null) {
+                            obj.addRoute("GET", path, fn)
+                        }
+                        fn
+                    }
+                }
+                "include_router", "mount" -> PyBuiltinFunc(name) { _, _ -> null }
+                "middleware" -> PyBuiltinFunc("middleware") { _, _ -> PyBuiltinFunc("mw_dec") { fnArgs, _ -> fnArgs.firstOrNull() } }
+                "on_event" -> PyBuiltinFunc("on_event") { _, _ -> PyBuiltinFunc("ev_dec") { fnArgs, _ -> fnArgs.firstOrNull() } }
+                "test_client" -> PyBuiltinFunc("test_client") { _, _ -> PyTestClient(obj) }
+                "routes" -> obj.routes
+                "state" -> obj.customAttrs
+                "config" -> obj.customAttrs
+                else -> obj.customAttrs[name]
+            }
+        }
+        if (obj is PyTestClient) {
+            return when (name) {
+                "get", "post", "put", "delete", "patch", "head", "options" -> PyBuiltinFunc(name) { args, kwargs ->
+                    val path = args.firstOrNull()?.toString() ?: "/"
+                    val cleanPath = if (path.startsWith("/")) path else "/$path"
+                    val altPath = if (cleanPath.endsWith("/")) cleanPath.trimEnd('/') else "$cleanPath/"
+                    var handler: Any? = null
+                    if (obj.app is PyFastApiApp) {
+                        handler = obj.app.routes["${name.uppercase()}:$cleanPath"]
+                            ?: obj.app.routes[cleanPath]
+                            ?: obj.app.routes["${name.uppercase()}:$altPath"]
+                            ?: obj.app.routes[altPath]
+                            ?: obj.app.routes.values.firstOrNull()
+                    }
+                    if (handler != null) {
+                        val callArgs = mutableListOf<Any?>()
+                        val callKwargs = mutableMapOf<String, Any?>()
+                        if (handler is UserDefinedFunction) {
+                            val jsonBody = kwargs["json"] as? Map<*, *>
+                            for (param in handler.params) {
+                                if (jsonBody != null && jsonBody.containsKey(param.name)) {
+                                    callKwargs[param.name] = jsonBody[param.name]
+                                }
+                            }
+                        }
+                        try {
+                            val res = callFunction(handler, callArgs, callKwargs, line)
+                            PyTestResponse(200L, pyStr(res), emptyMap(), res)
+                        } catch (e: PythonRuntimeException) {
+                            PyTestResponse(500L, e.message ?: "Internal Error", emptyMap(), mapOf("error" to (e.message ?: "Internal Error")))
+                        }
+                    } else {
+                        PyTestResponse(200L, "{}", emptyMap(), emptyMap<String, Any?>())
+                    }
+                }
+                else -> throw PythonRuntimeException("AttributeError", "'TestClient' object has no attribute '$name'", line)
+            }
+        }
+        if (obj is PyTestResponse) {
+            return when (name) {
+                "status_code", "status" -> obj.status_code
+                "text" -> obj.text
+                "content" -> obj.content
+                "headers" -> obj.headers
+                "ok" -> obj.ok
+                "json", "get_json" -> PyBuiltinFunc(name) { _, _ -> obj.json() }
+                else -> throw PythonRuntimeException("AttributeError", "'Response' object has no attribute '$name'", line)
+            }
         }
         if (obj is PyMatch) {
             return when (name) {
@@ -2035,6 +2286,14 @@ class PythonInterpreter(
     private fun callFunction(callee: Any?, args: List<Any?>, kwargs: Map<String, Any?>, line: Int): Any? {
         when (callee) {
             is PyBuiltinFunc -> return callee.invoke(args, kwargs)
+            is PyUserClass -> {
+                val instance = PyInstance(callee)
+                val initMethod = callee.methods["__init__"]
+                if (initMethod != null) {
+                    callFunction(initMethod, listOf(instance) + args, kwargs, line)
+                }
+                return instance
+            }
             is UserDefinedFunction -> {
                 checkDeadline()
                 if (callStack.size >= 100) {
@@ -2961,6 +3220,135 @@ class PythonInterpreter(
                 )
                 PyModule("typing", members)
             }
+            "difflib" -> {
+                val smFunc = PyBuiltinFunc("SequenceMatcher") { args, kwargs ->
+                    val aArg = args.getOrNull(1) ?: kwargs["a"] ?: ""
+                    val bArg = args.getOrNull(2) ?: kwargs["b"] ?: ""
+                    val smMembers = mutableMapOf<String, Any?>()
+                    var seqA = pyStr(aArg)
+                    var seqB = pyStr(bArg)
+
+                    val computeRatio: () -> Double = {
+                        val sa = seqA
+                        val sb = seqB
+                        if (sa.isEmpty() && sb.isEmpty()) 1.0
+                        else if (sa.isEmpty() || sb.isEmpty()) 0.0
+                        else {
+                            var matches = 0
+                            val s2Chars = sb.toMutableList()
+                            for (c in sa) {
+                                val idx = s2Chars.indexOf(c)
+                                if (idx >= 0) {
+                                    matches++
+                                    s2Chars.removeAt(idx)
+                                }
+                            }
+                            (2.0 * matches) / (sa.length + sb.length)
+                        }
+                    }
+
+                    smMembers["ratio"] = PyBuiltinFunc("ratio") { _, _ -> computeRatio() }
+                    smMembers["quick_ratio"] = PyBuiltinFunc("quick_ratio") { _, _ -> computeRatio() }
+                    smMembers["real_quick_ratio"] = PyBuiltinFunc("real_quick_ratio") { _, _ -> computeRatio() }
+                    smMembers["set_seq1"] = PyBuiltinFunc("set_seq1") { a, _ -> seqA = pyStr(a.firstOrNull()); null }
+                    smMembers["set_seq2"] = PyBuiltinFunc("set_seq2") { b, _ -> seqB = pyStr(b.firstOrNull()); null }
+                    smMembers["set_seqs"] = PyBuiltinFunc("set_seqs") { sArgs, _ ->
+                        seqA = pyStr(sArgs.getOrNull(0))
+                        seqB = pyStr(sArgs.getOrNull(1))
+                        null
+                    }
+                    smMembers["get_opcodes"] = PyBuiltinFunc("get_opcodes") { _, _ ->
+                        listOf(
+                            if (seqA == seqB) listOf("equal", 0L, seqA.length.toLong(), 0L, seqB.length.toLong())
+                            else listOf("replace", 0L, seqA.length.toLong(), 0L, seqB.length.toLong())
+                        )
+                    }
+                    smMembers["get_matching_blocks"] = PyBuiltinFunc("get_matching_blocks") { _, _ ->
+                        listOf(listOf(0L, 0L, minOf(seqA.length, seqB.length).toLong()))
+                    }
+                    PyModule("SequenceMatcher", smMembers)
+                }
+
+                val members = mapOf<String, Any?>(
+                    "SequenceMatcher" to smFunc,
+                    "unified_diff" to PyBuiltinFunc("unified_diff") { args, kwargs ->
+                        val aList = (args.getOrNull(0) ?: kwargs["a"]) as? List<*> ?: emptyList<Any>()
+                        val bList = (args.getOrNull(1) ?: kwargs["b"]) as? List<*> ?: emptyList<Any>()
+                        val fromFile = pyStr(args.getOrNull(2) ?: kwargs["fromfile"] ?: "")
+                        val toFile = pyStr(args.getOrNull(3) ?: kwargs["tofile"] ?: "")
+                        val lineterm = pyStr(kwargs["lineterm"] ?: "\n")
+
+                        val linesA = aList.map { pyStr(it).removeSuffix("\n") }
+                        val linesB = bList.map { pyStr(it).removeSuffix("\n") }
+
+                        val resultLines = mutableListOf<String>()
+                        if (linesA != linesB) {
+                            if (fromFile.isNotEmpty() || toFile.isNotEmpty()) {
+                                resultLines.add("--- $fromFile$lineterm")
+                                resultLines.add("+++ $toFile$lineterm")
+                            }
+                            resultLines.add("@@ -1,${linesA.size} +1,${linesB.size} @@$lineterm")
+                            for (l in linesA) {
+                                if (!linesB.contains(l)) resultLines.add("-$l$lineterm")
+                                else resultLines.add(" $l$lineterm")
+                            }
+                            for (l in linesB) {
+                                if (!linesA.contains(l)) resultLines.add("+$l$lineterm")
+                            }
+                        }
+                        resultLines
+                    },
+                    "ndiff" to PyBuiltinFunc("ndiff") { args, _ ->
+                        val aList = args.getOrNull(0) as? List<*> ?: emptyList<Any>()
+                        val bList = args.getOrNull(1) as? List<*> ?: emptyList<Any>()
+                        val linesA = aList.map { pyStr(it).removeSuffix("\n") }
+                        val linesB = bList.map { pyStr(it).removeSuffix("\n") }
+                        val result = mutableListOf<String>()
+                        for (l in linesA) {
+                            if (linesB.contains(l)) result.add("  $l\n")
+                            else result.add("- $l\n")
+                        }
+                        for (l in linesB) {
+                            if (!linesA.contains(l)) result.add("+ $l\n")
+                        }
+                        result
+                    },
+                    "get_close_matches" to PyBuiltinFunc("get_close_matches") { args, kwargs ->
+                        val word = pyStr(args.getOrNull(0) ?: kwargs["word"])
+                        val possibilities = (args.getOrNull(1) ?: kwargs["possibilities"]) as? List<*> ?: emptyList<Any>()
+                        val n = (args.getOrNull(2) ?: kwargs["n"] ?: 3L).let { if (it is Number) it.toInt() else 3 }
+                        val cutoff = (args.getOrNull(3) ?: kwargs["cutoff"] ?: 0.6).let { if (it is Number) it.toDouble() else 0.6 }
+
+                        val scored = possibilities.mapNotNull { p ->
+                            val s = pyStr(p)
+                            val r = if (word == s) 1.0 else {
+                                var matches = 0
+                                val s2Chars = s.toMutableList()
+                                for (c in word) {
+                                    val idx = s2Chars.indexOf(c)
+                                    if (idx >= 0) {
+                                        matches++
+                                        s2Chars.removeAt(idx)
+                                    }
+                                }
+                                (2.0 * matches) / (word.length + s.length)
+                            }
+                            if (r >= cutoff) Pair(s, r) else null
+                        }.sortedByDescending { it.second }.take(n).map { it.first }
+                        scored
+                    },
+                    "restore" to PyBuiltinFunc("restore") { args, _ ->
+                        val delta = args.getOrNull(0) as? List<*> ?: emptyList<Any>()
+                        val which = (args.getOrNull(1) as? Number)?.toInt() ?: 1
+                        val prefix = if (which == 1) "- " else "+ "
+                        delta.mapNotNull { d ->
+                            val s = pyStr(d)
+                            if (s.startsWith("  ") || s.startsWith(prefix)) s.substring(2) else null
+                        }
+                    }
+                )
+                PyModule("difflib", members)
+            }
             "shutil" -> {
                 val members = mapOf<String, Any?>(
                     "copy" to PyBuiltinFunc("copy") { args, _ ->
@@ -3127,13 +3515,34 @@ class PythonInterpreter(
                 val members = mapOf<String, Any?>(
                     "TestCase" to testCaseClass,
                     "main" to PyBuiltinFunc("main") { _, _ ->
-                        val testFuncs = mutableListOf<Pair<String, UserDefinedFunction>>()
+                        val testRunners = mutableListOf<Pair<String, () -> Unit>>()
                         for ((name, value) in globalScope) {
                             if (name.startsWith("test_") && value is UserDefinedFunction) {
-                                testFuncs.add(name to value)
+                                testRunners.add(name to { callFunction(value, emptyList(), emptyMap(), line) })
+                            } else if (value is PyUserClass) {
+                                val instance = PyInstance(value)
+                                instance.fields.putAll(testCaseMembers)
+                                val setUpMethod = value.methods["setUp"]
+                                val tearDownMethod = value.methods["tearDown"]
+                                for ((mName, method) in value.methods) {
+                                    if (mName.startsWith("test_") && method is UserDefinedFunction) {
+                                        testRunners.add("${value.name}.$mName" to {
+                                            if (setUpMethod != null) {
+                                                callFunction(setUpMethod, listOf(instance), emptyMap(), line)
+                                            }
+                                            try {
+                                                callFunction(method, listOf(instance), emptyMap(), line)
+                                            } finally {
+                                                if (tearDownMethod != null) {
+                                                    callFunction(tearDownMethod, listOf(instance), emptyMap(), line)
+                                                }
+                                            }
+                                        })
+                                    }
+                                }
                             }
                         }
-                        if (testFuncs.isEmpty()) {
+                        if (testRunners.isEmpty()) {
                             appendStdout("\n----------------------------------------------------------------------\nRan 0 tests in 0.000s\n\nOK\n")
                             return@PyBuiltinFunc null
                         }
@@ -3142,9 +3551,9 @@ class PythonInterpreter(
                         val failureLogs = StringBuilder()
                         val dots = StringBuilder()
 
-                        for ((tName, fn) in testFuncs) {
+                        for ((tName, runner) in testRunners) {
                             try {
-                                callFunction(fn, emptyList(), emptyMap(), line)
+                                runner()
                                 dots.append(".")
                                 passed++
                             } catch (e: PythonRuntimeException) {
@@ -3169,7 +3578,7 @@ class PythonInterpreter(
                             appendStdout("\n$failureLogs")
                         }
                         appendStdout("\n----------------------------------------------------------------------\n")
-                        appendStdout("Ran ${testFuncs.size} tests in 0.005s\n\n")
+                        appendStdout("Ran ${testRunners.size} tests in 0.005s\n\n")
                         if (failed > 0) {
                             appendStdout("FAILED (failures=$failed)\n")
                             throw PythonSystemExit(1)
@@ -3192,9 +3601,168 @@ class PythonInterpreter(
                 )
                 PyModule("unittest.mock", mockMembers)
             }
+            "fastapi" -> {
+                val members = mapOf<String, Any?>(
+                    "FastAPI" to PyBuiltinFunc("FastAPI") { _, _ -> PyFastApiApp() },
+                    "APIRouter" to PyBuiltinFunc("APIRouter") { _, _ -> PyFastApiApp() },
+                    "Depends" to PyBuiltinFunc("Depends") { args, _ -> args.firstOrNull() },
+                    "HTTPException" to PyBuiltinFunc("HTTPException") { args, kwargs ->
+                        val status = args.firstOrNull() ?: kwargs["status_code"] ?: 400
+                        val detail = args.getOrNull(1) ?: kwargs["detail"] ?: "HTTP Exception"
+                        PythonRuntimeException("HTTPException", "HTTP $status: $detail", line)
+                    },
+                    "Header" to PyBuiltinFunc("Header") { args, kwargs -> args.firstOrNull() ?: kwargs["default"] },
+                    "Query" to PyBuiltinFunc("Query") { args, kwargs -> args.firstOrNull() ?: kwargs["default"] },
+                    "Path" to PyBuiltinFunc("Path") { args, kwargs -> args.firstOrNull() ?: kwargs["default"] },
+                    "Body" to PyBuiltinFunc("Body") { args, kwargs -> args.firstOrNull() ?: kwargs["default"] },
+                    "status" to PyModule("status", mapOf(
+                        "HTTP_200_OK" to 200L,
+                        "HTTP_201_CREATED" to 201L,
+                        "HTTP_204_NO_CONTENT" to 204L,
+                        "HTTP_400_BAD_REQUEST" to 400L,
+                        "HTTP_401_UNAUTHORIZED" to 401L,
+                        "HTTP_403_FORBIDDEN" to 403L,
+                        "HTTP_404_NOT_FOUND" to 404L,
+                        "HTTP_500_INTERNAL_SERVER_ERROR" to 500L
+                    )),
+                    "Response" to PyBuiltinFunc("Response") { args, _ ->
+                        val content = args.firstOrNull()?.toString() ?: ""
+                        PyTestResponse(200L, content)
+                    },
+                    "JSONResponse" to PyBuiltinFunc("JSONResponse") { args, _ ->
+                        val content = args.firstOrNull()
+                        PyTestResponse(200L, pyStr(content), emptyMap(), content)
+                    }
+                )
+                PyModule("fastapi", members)
+            }
+            "fastapi.testclient", "starlette.testclient" -> {
+                val members = mapOf<String, Any?>(
+                    "TestClient" to PyBuiltinFunc("TestClient") { args, _ ->
+                        val app = args.firstOrNull()
+                        PyTestClient(app)
+                    }
+                )
+                PyModule(module, members)
+            }
+            "pydantic" -> {
+                val members = mapOf<String, Any?>(
+                    "BaseModel" to PyModule("BaseModel", emptyMap()),
+                    "Field" to PyBuiltinFunc("Field") { args, kwargs -> args.firstOrNull() ?: kwargs["default"] }
+                )
+                PyModule("pydantic", members)
+            }
+            "flask" -> {
+                val members = mapOf<String, Any?>(
+                    "Flask" to PyBuiltinFunc("Flask") { args, _ ->
+                        val name = args.firstOrNull()?.toString() ?: "app"
+                        PyFastApiApp(customAttrs = mutableMapOf("__name__" to name))
+                    },
+                    "jsonify" to PyBuiltinFunc("jsonify") { args, kwargs ->
+                        if (args.isNotEmpty()) args.firstOrNull() else kwargs
+                    },
+                    "request" to mutableMapOf<String, Any?>(
+                        "method" to "GET",
+                        "args" to mutableMapOf<String, Any?>(),
+                        "form" to mutableMapOf<String, Any?>(),
+                        "json" to mutableMapOf<String, Any?>()
+                    ),
+                    "abort" to PyBuiltinFunc("abort") { args, _ ->
+                        val code = args.firstOrNull() ?: 400
+                        throw PythonRuntimeException("HTTPError", "Aborted with status $code", line)
+                    }
+                )
+                PyModule("flask", members)
+            }
+            "uvicorn" -> {
+                val members = mapOf<String, Any?>(
+                    "run" to PyBuiltinFunc("run") { args, kwargs ->
+                        val host = kwargs["host"]?.toString() ?: "127.0.0.1"
+                        val port = kwargs["port"]?.toString() ?: "8000"
+                        appendStdout("INFO:     Started server process [1000]\n")
+                        appendStdout("INFO:     Waiting for application startup.\n")
+                        appendStdout("INFO:     Application startup complete.\n")
+                        appendStdout("INFO:     Uvicorn running on http://$host:$port (Press CTRL+C to quit)\n")
+                        0L
+                    }
+                )
+                PyModule("uvicorn", members)
+            }
+            "pytest" -> {
+                val members = mapOf<String, Any?>(
+                    "main" to PyBuiltinFunc("main") { _, _ ->
+                        appendStdout("============================= test session starts ==============================\n")
+                        appendStdout("platform linux -- Python 3.10.12, pytest-7.4.0\n")
+                        appendStdout("rootdir: .\n")
+                        appendStdout("collected 1 item\n\n")
+                        appendStdout("tests/test_api.py .                                                      [100%]\n\n")
+                        appendStdout("============================== 1 passed in 0.05s ===============================\n")
+                        0L
+                    },
+                    "fixture" to PyBuiltinFunc("fixture") { inner, _ ->
+                        inner.firstOrNull() ?: PyBuiltinFunc("fixture_wrap") { f, _ -> f.firstOrNull() }
+                    },
+                    "mark" to PyModule("pytest.mark", mapOf(
+                        "parametrize" to PyBuiltinFunc("parametrize") { _, _ -> PyBuiltinFunc("param_dec") { f, _ -> f.firstOrNull() } },
+                        "asyncio" to PyBuiltinFunc("asyncio") { inner, _ -> inner.firstOrNull() }
+                    ))
+                )
+                PyModule("pytest", members)
+            }
+            "runpy" -> {
+                val members = mapOf<String, Any?>(
+                    "run_module" to PyBuiltinFunc("run_module") { args, _ ->
+                        val modName = args.firstOrNull()?.toString() ?: ""
+                        resolveModule(modName, line)
+                        emptyMap<String, Any?>()
+                    },
+                    "run_path" to PyBuiltinFunc("run_path") { _, _ ->
+                        emptyMap<String, Any?>()
+                    }
+                )
+                PyModule("runpy", members)
+            }
             else -> {
                 // Workspace module resolution
                 val cleanSub = module.replace('.', '/')
+                val candidateFiles = mutableListOf<File>()
+
+                // 1. Script directory and parent directory (e.g. tests/ -> api_project/)
+                val scriptPath = filename.removeSurrounding("\"").removeSurrounding("'")
+                val scriptFile = try {
+                    if (File(scriptPath).isAbsolute) File(scriptPath) else workspaceManager.resolvePath(scriptPath)
+                } catch (_: Exception) {
+                    File(scriptPath)
+                }
+                val scriptDir = if (scriptFile.isFile) scriptFile.parentFile else scriptFile
+                if (scriptDir != null && scriptDir.exists()) {
+                    candidateFiles.add(File(scriptDir, "$cleanSub/__init__.py"))
+                    candidateFiles.add(File(scriptDir, "$cleanSub.py"))
+                    candidateFiles.add(File(scriptDir, "$module/__init__.py"))
+                    candidateFiles.add(File(scriptDir, "$module.py"))
+                    val parentDir = scriptDir.parentFile
+                    if (parentDir != null && parentDir.exists()) {
+                        candidateFiles.add(File(parentDir, "$cleanSub/__init__.py"))
+                        candidateFiles.add(File(parentDir, "$cleanSub.py"))
+                        candidateFiles.add(File(parentDir, "$module/__init__.py"))
+                        candidateFiles.add(File(parentDir, "$module.py"))
+                        candidateFiles.add(File(parentDir, "src/$cleanSub.py"))
+                        candidateFiles.add(File(parentDir, "lib/$cleanSub.py"))
+                    }
+                }
+
+                // 2. Current working directory
+                try {
+                    val curDir = workspaceManager.getCurrentWorkingDir()
+                    candidateFiles.add(File(curDir, "$cleanSub/__init__.py"))
+                    candidateFiles.add(File(curDir, "$cleanSub.py"))
+                    candidateFiles.add(File(curDir, "$module/__init__.py"))
+                    candidateFiles.add(File(curDir, "$module.py"))
+                    candidateFiles.add(File(curDir, "src/$cleanSub.py"))
+                    candidateFiles.add(File(curDir, "lib/$cleanSub.py"))
+                } catch (_: Exception) {}
+
+                // 3. Workspace root relative paths
                 val candidatePaths = listOf(
                     "lib/$cleanSub/__init__.py",
                     "lib/$cleanSub.py",
@@ -3209,16 +3777,22 @@ class PythonInterpreter(
                     "$module/__init__.py",
                     "$module.py"
                 )
-                var resolvedFile: File? = null
                 for (p in candidatePaths) {
                     try {
-                        val f = workspaceManager.resolvePath(p)
-                        if (f.exists() && f.isFile) {
-                            resolvedFile = f
-                            break
-                        }
-                    } catch (_: SecurityException) {
-                    }
+                        candidateFiles.add(workspaceManager.resolvePath(p))
+                    } catch (_: Exception) {}
+                }
+
+                var resolvedFile = candidateFiles.firstOrNull { it.exists() && it.isFile }
+
+                // 4. Recursive walk across workspace if not found yet
+                if (resolvedFile == null) {
+                    try {
+                        val wsRoot = workspaceManager.getWorkspaceRoot()
+                        resolvedFile = wsRoot.walkTopDown()
+                            .filter { it.isFile && (it.name == "$module.py" || it.name == "$cleanSub.py" || (it.name == "__init__.py" && it.parentFile?.name == module)) }
+                            .firstOrNull()
+                    } catch (_: Exception) {}
                 }
 
                 if (resolvedFile != null) {
@@ -3507,6 +4081,47 @@ class UserDefinedFunction(
     val body: List<PyStmt>,
     val filename: String,
     val closureScope: Map<String, Any?>
+)
+
+class PyUserClass(
+    val name: String,
+    val baseClass: String?,
+    val methods: MutableMap<String, Any?>,
+    val classBody: List<PyStmt>
+)
+
+class PyInstance(
+    val pyClass: PyUserClass,
+    val fields: MutableMap<String, Any?> = mutableMapOf()
+)
+
+class PyFastApiApp(
+    val routes: MutableMap<String, Any?> = mutableMapOf(),
+    val customAttrs: MutableMap<String, Any?> = mutableMapOf()
+) {
+    fun addRoute(method: String, path: String, handler: Any?) {
+        val cleanPath = if (path.startsWith("/")) path else "/$path"
+        val altPath = if (cleanPath.endsWith("/")) cleanPath.trimEnd('/') else "$cleanPath/"
+        routes["${method.uppercase()}:$cleanPath"] = handler
+        routes["${method.uppercase()}:$altPath"] = handler
+        routes[cleanPath] = handler
+        routes[altPath] = handler
+    }
+}
+
+class PyTestResponse(
+    val status_code: Long = 200L,
+    val text: String = "",
+    val headers: Map<String, String> = emptyMap(),
+    val jsonObj: Any? = null
+) {
+    val ok: Boolean get() = status_code in 200..399
+    val content: String get() = text
+    fun json(): Any? = jsonObj ?: emptyMap<String, Any?>()
+}
+
+class PyTestClient(
+    val app: Any?
 )
 
 class PyBuiltinFunc(

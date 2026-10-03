@@ -57,6 +57,30 @@ class AgentWorkspaceManager(
     /**
      * Ensures all standard development directories and initial project files exist.
      */
+    private val sessionWorkingDirs = java.util.concurrent.ConcurrentHashMap<String, File>()
+
+    fun getCurrentWorkingDir(sessionId: String = activeSessionId): File {
+        val root = getWorkspaceDir(sessionId)
+        val dir = sessionWorkingDirs[sessionId]
+        return if (dir != null && dir.exists() && dir.isDirectory && dir.canonicalPath.startsWith(root.canonicalPath)) {
+            dir
+        } else {
+            root
+        }
+    }
+
+    fun setCurrentWorkingDir(dir: File, sessionId: String = activeSessionId) {
+        val root = getWorkspaceDir(sessionId)
+        if (dir.exists() && dir.isDirectory && dir.canonicalPath.startsWith(root.canonicalPath)) {
+            sessionWorkingDirs[sessionId] = dir.canonicalFile
+        } else if (dir.canonicalPath == root.canonicalPath) {
+            sessionWorkingDirs.remove(sessionId)
+        }
+    }
+
+    /**
+     * Ensures all standard development directories and initial project files exist.
+     */
     fun ensureStandardDirectories(workspaceRoot: File) {
         for (folder in STANDARD_DIRECTORIES) {
             val subDir = File(workspaceRoot, folder)
@@ -95,6 +119,19 @@ node_modules/
 .cache/
 """.trimIndent()
             )
+        }
+
+        val gitDir = File(workspaceRoot, ".git")
+        if (!gitDir.exists()) {
+            try {
+                gitDir.mkdirs()
+                File(gitDir, "objects").mkdirs()
+                File(gitDir, "refs/heads").mkdirs()
+                File(gitDir, "HEAD").writeText("ref: refs/heads/main\n")
+                File(gitDir, "config").writeText(
+                    "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n"
+                )
+            } catch (_: Exception) {}
         }
     }
 

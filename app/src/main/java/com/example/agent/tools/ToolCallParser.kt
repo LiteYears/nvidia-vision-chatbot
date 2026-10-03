@@ -40,13 +40,13 @@ object ToolCallParser {
         "calculator",
         "web_search",
         "web_open",
-        "file_list",
+        "file_list", "list_files", "dir_list",
         "file_tree",
         "file_search",
-        "file_read",
-        "file_write",
-        "file_patch",
-        "file_delete",
+        "file_read", "read_file", "view_file",
+        "file_write", "write_file", "create_file",
+        "file_patch", "replace_file_content", "edit_file", "edit", "patch", "patch_file", "apply_diff", "code_edit", "diff", "modify_file", "str_replace",
+        "file_delete", "delete_file", "remove_file",
         "directory_create",
         "archive_extract"
     )
@@ -82,6 +82,19 @@ object ToolCallParser {
         // 3. Third priority: Support direct ```bash or ```sh execution blocks emitted by coding models
         val bashMatches = BASH_BLOCK_REGEX.findAll(text).toList()
         if (bashMatches.isNotEmpty()) {
+            for (match in bashMatches) {
+                val content = match.groupValues[1].trim()
+                // Check if the bash block actually contains a structured JSON tool call
+                val jsonInBash = extractBalancedJsonObject(content)
+                if (jsonInBash != null) {
+                    val toolCall = parseJsonToToolCall(jsonInBash, isExplicitToolCallBlock = true)
+                    if (toolCall != null) return toolCall
+                }
+                // Check if the bash block contains command-style tool calls (e.g. file_list path='.')
+                val cmdTool = parseCommandStyleToolCall(content)
+                if (cmdTool != null) return cmdTool
+            }
+
             val nonJsonCodes = bashMatches.map { it.groupValues[1].trim() }
                 .filter { it.isNotBlank() && !it.contains("\"tool\"", ignoreCase = true) }
             val executableBlocks = nonJsonCodes.mapNotNull { extractExecutableCommandsFromBlock(it) }
@@ -116,6 +129,10 @@ object ToolCallParser {
             val toolCall = parseJsonToToolCall(rawJson, isExplicitToolCallBlock = false)
             if (toolCall != null) return toolCall
         }
+
+        // 6. Sixth priority: Command-style tool call in raw text (e.g. file_list path='.' recursive=true)
+        val cmdStyleCall = parseCommandStyleToolCall(text)
+        if (cmdStyleCall != null) return cmdStyleCall
 
         return null
     }
@@ -190,15 +207,12 @@ object ToolCallParser {
                         }
                     }
 
-                    // Preserve escaped newlines inside command parameter
-                    val cmd = (arguments["command"] ?: arguments["cmd"]) as? String
-                    if (cmd != null && !cmd.contains('\n') && cmd.contains("\\n")) {
-                        arguments["command"] = cmd.replace("\\n", "\n").replace("\\r", "\r")
-                    }
+                    normalizeToolArguments(candidateName!!, arguments)
+                    val canonicalName = normalizeToolCallName(candidateName)
 
                     return ToolCall(
                         callId = UUID.randomUUID().toString(),
-                        toolName = candidateName!!,
+                        toolName = canonicalName,
                         arguments = arguments
                     )
                 }
@@ -247,18 +261,90 @@ object ToolCallParser {
                 }
             }
 
-            val cmd = (arguments["command"] ?: arguments["cmd"]) as? String
-            if (cmd != null && !cmd.contains('\n') && cmd.contains("\\n")) {
-                arguments["command"] = cmd.replace("\\n", "\n").replace("\\r", "\r")
-            }
+            normalizeToolArguments(candidateName, arguments)
+            val canonicalName = normalizeToolCallName(candidateName)
 
             ToolCall(
                 callId = UUID.randomUUID().toString(),
-                toolName = candidateName,
+                toolName = canonicalName,
                 arguments = arguments
             )
         } catch (_: Exception) {
             null
+        }
+    }
+
+    fun normalizeToolCallName(raw: String): String {
+        return when (raw.trim().lowercase()) {
+            "bash", "terminal", "sh", "shell", "exec", "cmd" -> "run_command"
+            "python", "py" -> "python_execute"
+            "replace_file_content", "edit_file", "edit", "patch", "patch_file", "apply_diff", "code_edit", "diff", "modify_file", "str_replace" -> "file_patch"
+            "read_file", "view_file" -> "file_read"
+            "write_file", "create_file" -> "file_write"
+            "list_files", "dir_list" -> "file_list"
+            "delete_file", "remove_file" -> "file_delete"
+            else -> raw.trim()
+        }
+    }
+
+    fun normalizeToolArguments(toolName: String, args: MutableMap<String, Any?>) {
+        val normTool = normalizeToolCallName(toolName)
+        // Command line normalization
+        val cmd = (args["command"] ?: args["cmd"]) as? String
+        if (cmd != null && !cmd.contains('\n') && cmd.contains("\\n")) {
+            args["command"] = cmd.replace("\\n", "\n").replace("\\r", "\r")
+        }
+
+        // File path normalization across all file tools
+        if (!args.containsKey("path")) {
+            val pathVal = args["TargetFile"] ?: args["target_file"] ?: args["targetFile"] ?: args["filePath"] ?: args["file"] ?: args["AbsolutePath"] ?: args["absolute_path"]
+            if (pathVal != null) {
+                args["path"] = pathVal
+            }
+        }
+
+        // Code content normalization for file_write
+        if (normTool == "file_write") {
+            if (!args.containsKey("content")) {
+                val contentVal = args["CodeContent"] ?: args["codeContent"] ?: args["file_content"] ?: args["body"] ?: args["text"]
+                if (contentVal != null) {
+                    args["content"] = contentVal
+                }
+            }
+        }
+
+        // Patch / Diff / Replacement normalization for file_patch
+        if (normTool == "file_patch") {
+            if (!args.containsKey("target_content")) {
+                val targetVal = args["TargetContent"] ?: args["targetContent"] ?: args["old_str"] ?: args["search"] ?: args["original_content"] ?: args["target"]
+                if (targetVal != null) {
+                    args["target_content"] = targetVal
+                }
+            }
+            if (!args.containsKey("replacement_content")) {
+                val replaceVal = args["ReplacementContent"] ?: args["replacementContent"] ?: args["new_str"] ?: args["replace"] ?: args["new_content"]
+                if (replaceVal != null) {
+                    args["replacement_content"] = replaceVal
+                }
+            }
+            if (!args.containsKey("diff_content")) {
+                val diffVal = args["diff"] ?: args["patch"] ?: args["diff_content"] ?: args["patch_content"]
+                if (diffVal != null) {
+                    args["diff_content"] = diffVal
+                }
+            }
+            if (!args.containsKey("start_line")) {
+                val sl = args["StartLine"] ?: args["startLine"]
+                if (sl != null) {
+                    args["start_line"] = sl
+                }
+            }
+            if (!args.containsKey("end_line")) {
+                val el = args["EndLine"] ?: args["endLine"]
+                if (el != null) {
+                    args["end_line"] = el
+                }
+            }
         }
     }
 
@@ -280,7 +366,8 @@ object ToolCallParser {
 
         // If only "name" was present, it MUST have arguments/parameters AND match a known tool name
         val hasArgs = map.containsKey("arguments") || map.containsKey("parameters") || map.containsKey("params")
-        return hasArgs && name.lowercase() in KNOWN_TOOL_NAMES
+        val lower = name.lowercase()
+        return hasArgs && (lower in KNOWN_TOOL_NAMES || normalizeToolCallName(lower) in KNOWN_TOOL_NAMES)
     }
 
     /**
@@ -303,7 +390,8 @@ object ToolCallParser {
             "grep", "find", "touch", "rm", "cp", "mv", "sed", "awk", "head", "tail", "wc", "sort",
             "uniq", "cut", "tr", "tar", "zip", "unzip", "apt", "apt-get", "dpkg", "pkg", "proot",
             "proot-distro", "node", "npm", "npx", "sh", "bash", "curl", "wget", "git", "pytest",
-            "unittest", "which", "whoami", "uname", "chmod", "export", "source", "test", "sleep", "printf"
+            "unittest", "which", "whoami", "uname", "chmod", "export", "source", "test", "sleep", "printf",
+            "patch", "diff"
         )
 
         val proseLeadingWords = setOf(
@@ -328,7 +416,7 @@ object ToolCallParser {
 
             if (lineTrim.isBlank()) continue
 
-            // Check start of heredoc: cat << EOF, cat <<- 'EOF'
+            // Check start of heredoc: cat << EOF, cat <<- 'EOF', patch << EOF
             if (lineTrim.contains("<<")) {
                 val isHeredocCommand = lineTrim.startsWith("cat ") || lineTrim.startsWith("tee ") ||
                     lineTrim.contains("<<-") || lineTrim.contains("<< '") || lineTrim.contains("<< \"") ||
@@ -352,6 +440,45 @@ object ToolCallParser {
             }
 
             val firstToken = lineTrim.split(Regex("\\s+")).firstOrNull()?.lowercase()?.trim('\'', '"', '`') ?: ""
+
+            // Handle abstract tool invocations mistakenly emitted into bash blocks
+            val abstractTools = setOf(
+                "file_list", "list_files", "dir_list",
+                "file_tree", "file_search", "file_read", "read_file", "view_file",
+                "file_write", "write_file", "create_file",
+                "file_patch", "replace_file_content", "edit_file", "edit", "patch_file", "apply_diff", "code_edit", "str_replace", "modify_file",
+                "file_delete", "delete_file", "remove_file",
+                "directory_create", "archive_extract",
+                "web_open", "web_search", "calculator", "run_command"
+            )
+            if (firstToken in abstractTools && lineTrim.contains("=")) {
+                if (firstToken == "run_command") {
+                    val cmdMatch = Regex("""command=['"](.*?)['"](?:\s|$)""").find(lineTrim)
+                    if (cmdMatch != null) {
+                        cleanedLines.add(cmdMatch.groupValues[1])
+                        continue
+                    }
+                } else if (firstToken == "directory_create") {
+                    val pathMatch = Regex("""path=['"](.*?)['"]""").find(lineTrim)
+                    if (pathMatch != null) {
+                        cleanedLines.add("mkdir -p ${pathMatch.groupValues[1]}")
+                        continue
+                    }
+                } else if (firstToken == "file_list" || firstToken == "file_tree" || firstToken == "list_files") {
+                    val pathMatch = Regex("""path=['"](.*?)['"]""").find(lineTrim)
+                    val p = pathMatch?.groupValues?.get(1) ?: "."
+                    cleanedLines.add("ls -la $p")
+                    continue
+                } else if (firstToken == "file_read" || firstToken == "read_file" || firstToken == "view_file") {
+                    val pathMatch = Regex("""path=['"](.*?)['"]""").find(lineTrim)
+                    if (pathMatch != null) {
+                        cleanedLines.add("cat ${pathMatch.groupValues[1]}")
+                        continue
+                    }
+                }
+                // Skip other abstract tools from raw shell execution
+                continue
+            }
 
             // Check if line looks like raw programming code (e.g. def foo(): or return bar)
             if (firstToken in rawCodeKeywords && !lineTrim.startsWith("echo ") && !lineTrim.startsWith("cat ")) {
@@ -379,6 +506,48 @@ object ToolCallParser {
         } else {
             null
         }
+    }
+
+    /**
+     * Parses command-style pseudo-tool calls (e.g. file_list path='.' recursive=true).
+     */
+    fun parseCommandStyleToolCall(text: String): ToolCall? {
+        val lines = text.lines().map { it.trim() }.filter { it.isNotBlank() && !it.startsWith("#") }
+        for (line in lines) {
+            val cleanLine = line.removePrefix("tool_call:").trim()
+            val tokens = cleanLine.split(Regex("\\s+"), limit = 2)
+            if (tokens.isEmpty()) continue
+            val rawName = tokens[0].trim().lowercase()
+            val canonicalName = normalizeToolCallName(rawName)
+            if ((canonicalName in KNOWN_TOOL_NAMES || rawName in KNOWN_TOOL_NAMES) && tokens.size > 1 && tokens[1].contains("=")) {
+                val argsMap = mutableMapOf<String, Any?>()
+                val paramRegex = Regex("""([a-zA-Z_][a-zA-Z0-9_]*)=(?:'([^']*)'|"([^"]*)"|(\S+))""")
+                val matches = paramRegex.findAll(tokens[1])
+                for (m in matches) {
+                    val k = m.groupValues[1]
+                    val rawV = when {
+                        m.groupValues[2].isNotEmpty() -> m.groupValues[2]
+                        m.groupValues[3].isNotEmpty() -> m.groupValues[3]
+                        else -> m.groupValues[4]
+                    }
+                    val v: Any = when (rawV.lowercase()) {
+                        "true" -> true
+                        "false" -> false
+                        else -> rawV.toLongOrNull() ?: rawV
+                    }
+                    argsMap[k] = v
+                }
+                if (argsMap.isNotEmpty()) {
+                    normalizeToolArguments(canonicalName, argsMap)
+                    return ToolCall(
+                        callId = UUID.randomUUID().toString(),
+                        toolName = canonicalName,
+                        arguments = argsMap
+                    )
+                }
+            }
+        }
+        return null
     }
 
     /**

@@ -71,7 +71,7 @@ class FileReadTool(
 
     override suspend fun execute(arguments: Map<String, Any?>): ToolResult {
         val callId = UUID.randomUUID().toString()
-        val requestedPath = (arguments["path"] ?: arguments["file"] ?: arguments["file_path"] ?: arguments["filePath"] ?: arguments["filename"])?.toString()?.trim()
+        val requestedPath = (arguments["path"] ?: arguments["file"] ?: arguments["file_path"] ?: arguments["filePath"] ?: arguments["filename"] ?: arguments["TargetFile"] ?: arguments["target_file"] ?: arguments["targetFile"] ?: arguments["AbsolutePath"])?.toString()?.trim()
 
         if (requestedPath.isNullOrBlank()) {
             return ToolResult.failure(
@@ -149,12 +149,12 @@ class FileReadTool(
 
         val encoding = arguments["encoding"]?.toString()?.trim()?.lowercase() ?: "auto"
 
-        val startLineArg = when (val sl = arguments["start_line"] ?: arguments["from_line"]) {
+        val startLineArg = when (val sl = arguments["start_line"] ?: arguments["StartLine"] ?: arguments["startLine"] ?: arguments["from_line"]) {
             is Number -> sl.toInt()
             is String -> sl.toIntOrNull()
             else -> null
         }
-        val endLineArg = when (val el = arguments["end_line"] ?: arguments["to_line"]) {
+        val endLineArg = when (val el = arguments["end_line"] ?: arguments["EndLine"] ?: arguments["endLine"] ?: arguments["to_line"]) {
             is Number -> el.toInt()
             is String -> el.toIntOrNull()
             else -> null

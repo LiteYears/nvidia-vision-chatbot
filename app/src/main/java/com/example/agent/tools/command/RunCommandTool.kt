@@ -93,9 +93,12 @@ class RunCommandTool(
         }
 
         val workspaceRoot = workspaceManager.getWorkspaceDir()
+        val activeWorkingDir = workspaceManager.getCurrentWorkingDir()
 
-        // 1. Resolve and validate working directory (supporting virtual /workspace, ~/workspace, and relative paths)
-        val resolvedWorkingDir: File = if (workingDirArg.isBlank() || workingDirArg == "." || workingDirArg == "./" || workingDirArg == "/workspace" || workingDirArg == "~/workspace" || workingDirArg == "~") {
+        // 1. Resolve and validate working directory (supporting active working dir, /workspace, ~/workspace, and relative paths)
+        val resolvedWorkingDir: File = if (workingDirArg.isBlank() || workingDirArg == "." || workingDirArg == "./") {
+            activeWorkingDir
+        } else if (workingDirArg == "/workspace" || workingDirArg == "~/workspace" || workingDirArg == "~") {
             workspaceRoot
         } else if (workingDirArg.startsWith("/workspace/")) {
             val sub = workingDirArg.removePrefix("/workspace/").trimStart('/')
@@ -108,7 +111,7 @@ class RunCommandTool(
             if (candidate.isAbsolute && candidate.exists()) {
                 candidate.canonicalFile
             } else {
-                File(workspaceRoot, workingDirArg.trimStart('/')).canonicalFile
+                File(activeWorkingDir, workingDirArg.trimStart('/')).canonicalFile
             }
         }
 
@@ -225,9 +228,7 @@ class RunCommandTool(
             }
             ToolResult.failure(callId = callId, toolName = definition.name, error = errorMsg.trim())
         } else if (execResult.exitCode != 0 && !(execResult.isTruncated && execResult.exitCode == 141)) {
-            val isKnownShellOrBuiltin = cleanExec in setOf("bash", "sh", "zsh", "cat", "echo", "mkdir", "cd", "python", "python3")
-            val isPlausibleBinary = cleanExec.isNotBlank() && cleanExec.all { it.isLowerCase() || it.isDigit() || it == '-' || it == '_' || it == '.' }
-            val isUnavailable = isPlausibleBinary && !isKnownShellOrBuiltin && !capabilityDetector.isExecutableAvailable(cleanExec) && (
+            val isUnavailable = (
                 execResult.exitCode == 127 ||
                 execResult.stderr.contains("inaccessible or not found", ignoreCase = true) ||
                 execResult.stderr.contains("not found", ignoreCase = true) ||
@@ -238,22 +239,23 @@ class RunCommandTool(
                 val aptPkg = com.example.agent.proot.ProotAptManager.findPackageProviding(cleanExec)
                 if (aptPkg != null) {
                     val errorMsg = buildString {
-                        appendLine("Command '$cleanExec' not found in Ubuntu userspace, but can be installed with:")
-                        appendLine()
+                        appendLine("bash: $cleanExec: command not found")
+                        appendLine("Command '$cleanExec' can be installed in Ubuntu userspace with:")
                         appendLine("  apt update && apt install -y ${aptPkg.name}")
-                        appendLine()
-                        appendLine("Package details:")
-                        appendLine("  Package: ${aptPkg.name} (${aptPkg.version})")
-                        appendLine("  Description: ${aptPkg.description}")
-                        appendLine()
-                        appendLine("To install and execute, run:")
-                        appendLine("  run_command with command: 'apt install -y ${aptPkg.name} && $rawCommand'")
                     }
                     return ToolResult.failure(callId = callId, toolName = definition.name, error = errorMsg.trim())
                 }
 
-                val capError = capabilityDetector.buildCapabilityUnavailableError(cleanExec, rawCommand, execResult.stderr)
-                return ToolResult.failure(callId = callId, toolName = definition.name, error = capError)
+                val errorMsg = buildString {
+                    appendLine("bash: $cleanExec: command not found")
+                    appendLine("Command: $rawCommand")
+                    appendLine("Working Directory: $relativeDir")
+                    if (execResult.stderr.isNotBlank() && !execResult.stderr.contains("inaccessible or not found", ignoreCase = true)) {
+                        appendLine("\n[stderr]")
+                        append(execResult.stderr)
+                    }
+                }
+                return ToolResult.failure(callId = callId, toolName = definition.name, error = errorMsg.trim())
             }
 
             val errorMsg = buildString {
@@ -274,6 +276,20 @@ class RunCommandTool(
             }
             ToolResult.failure(callId = callId, toolName = definition.name, error = errorMsg.trim())
         } else {
+            // Track working directory changes on successful cd
+            val trimmedCmd = sanitizedCommand.trim()
+            if (trimmedCmd == "cd" || trimmedCmd.startsWith("cd ")) {
+                val targetArg = trimmedCmd.removePrefix("cd").trim().trim('\'', '"')
+                val candidateDir = when {
+                    targetArg.isEmpty() || targetArg == "~" -> workspaceRoot
+                    targetArg.startsWith("/") -> File(workspaceRoot, targetArg.trimStart('/')).canonicalFile
+                    else -> File(resolvedWorkingDir, targetArg).canonicalFile
+                }
+                if (candidateDir.exists() && candidateDir.isDirectory) {
+                    workspaceManager.setCurrentWorkingDir(candidateDir)
+                }
+            }
+
             val resultMsg = buildString {
                 appendLine("Exit Code: 0 (Duration: ${execResult.durationMs}ms)")
                 appendLine("Command: $rawCommand")

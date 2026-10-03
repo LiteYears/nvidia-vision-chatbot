@@ -261,6 +261,10 @@ class ProotCommandExecutor(
             }
         }
 
+        if (currentWorkingDir != workingDir && currentWorkingDir.exists() && currentWorkingDir.isDirectory) {
+            com.example.agent.tools.workspace.AgentWorkspaceManager.getInstance().setCurrentWorkingDir(currentWorkingDir)
+        }
+
         return CommandExecutionResult(
             exitCode = lastExit,
             stdout = stdoutSb.toString(),
@@ -408,8 +412,11 @@ class ProotCommandExecutor(
         } else {
             // Single-line or inline heredoc fallback
             val afterDelim = firstLine.substringAfter(delim).trim()
-            val beforeClosing = afterDelim.substringBeforeLast(delim).trim()
-            if (beforeClosing.isNotBlank()) beforeClosing else ""
+            var rawInline = afterDelim.substringBeforeLast(delim).trim()
+            if (rawInline.startsWith(">") || rawInline.startsWith(">>")) {
+                rawInline = rawInline.replaceFirst(Regex("""^>{1,2}\s*(?:"[^"]+"|\'[^\']+\'|\S+)\s*"""), "").trim()
+            }
+            if (rawInline.isNotBlank()) formatInlineScriptContent(rawInline) else ""
         }
 
         // First line executable
@@ -458,6 +465,28 @@ class ProotCommandExecutor(
 
         // Default: outputs body (like cat << EOF)
         return CommandExecutionResult(0, if (body.endsWith("\n")) body else "$body\n", "", System.currentTimeMillis() - startTime)
+    }
+
+    private fun formatInlineScriptContent(raw: String): String {
+        if (raw.contains('\n')) return raw
+        var s = raw
+        val keywords = listOf(
+            "import ", "from ", "def ", "class ", "@", "if __name__", "if ", "elif ",
+            "else:", "return ", "assert ", "print(", "app = ", "app.run("
+        )
+        for (kw in keywords) {
+            if (s.contains(" $kw")) {
+                s = s.replace(" $kw", "\n$kw")
+            } else if (s.contains("; $kw")) {
+                s = s.replace("; $kw", "\n$kw")
+            } else if (s.contains(";$kw")) {
+                s = s.replace(";$kw", "\n$kw")
+            }
+        }
+        if (s.contains("; ")) {
+            s = s.replace("; ", "\n")
+        }
+        return s.trim()
     }
 
     private fun splitPipes(cmd: String): List<String> {
@@ -604,6 +633,29 @@ class ProotCommandExecutor(
 
         if (cleanExec == "pytest") {
             return handlePytest(tokens.drop(1), workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
+        }
+
+        if (cleanExec == "source" || cleanExec == ".") {
+            val scriptArg = args.firstOrNull { !it.startsWith("-") }
+            if (scriptArg != null && (scriptArg.contains("activate") || scriptArg.endsWith("/activate"))) {
+                return CommandExecutionResult(0, "", "", 5)
+            }
+            if (scriptArg != null) {
+                val scriptFile = rootfsManager.resolveVirtualPath(scriptArg, workingDir, workspaceRoot)
+                if (scriptFile.exists() && scriptFile.isFile) {
+                    val scriptContent = try { scriptFile.readText(Charsets.UTF_8) } catch (_: Exception) { "" }
+                    return executePipeline(scriptContent, workingDir, workspaceRoot, timeoutMs, maxOutputBytes, stdin)
+                }
+            }
+            return CommandExecutionResult(0, "", "", 5)
+        }
+
+        if (cleanExec == "virtualenv") {
+            return handleVenv(args, workingDir, workspaceRoot)
+        }
+
+        if (cleanExec == "uvicorn") {
+            return handleUvicorn(args, workingDir, workspaceRoot)
         }
 
         // 5. Linux Utilities & Commands
@@ -932,17 +984,63 @@ class ProotCommandExecutor(
                 return CommandExecutionResult(0, out, "", 5)
             }
             "grep" -> {
-                val pattern = args.firstOrNull { !it.startsWith("-") } ?: return CommandExecutionResult(2, "", "grep: missing pattern\n", 5)
-                val target = args.lastOrNull { !it.startsWith("-") && it != pattern }
-                val lines = if (target != null) {
-                    val f = rootfsManager.resolveVirtualPath(target, workingDir, workspaceRoot)
-                    if (!f.exists() || !f.isFile) return CommandExecutionResult(2, "", "grep: $target: No such file or directory\n", 5)
-                    f.readLines()
-                } else {
-                    stdin.lines()
+                val isIgnoreCase = args.any { it.contains("i") }
+                val isInvert = args.any { it.contains("v") }
+                val isRecursive = args.any { it.contains("r") || it.contains("R") }
+                val nonFlags = args.filter { !it.startsWith("-") }
+
+                if (stdin.isNotBlank()) {
+                    val lines = stdin.lines()
+                    val matches = lines.filter { line ->
+                        val matchesAny = if (nonFlags.isEmpty()) true else nonFlags.any { term ->
+                            line.contains(term, ignoreCase = isIgnoreCase)
+                        }
+                        if (isInvert) !matchesAny else matchesAny
+                    }
+                    return CommandExecutionResult(if (matches.isNotEmpty()) 0 else 1, matches.joinToString("\n") + if (matches.isNotEmpty()) "\n" else "", "", 5)
                 }
-                val matches = lines.filter { it.contains(pattern) }
-                return CommandExecutionResult(if (matches.isNotEmpty()) 0 else 1, matches.joinToString("\n") + if (matches.isNotEmpty()) "\n" else "", "", 5)
+
+                if (nonFlags.isEmpty()) {
+                    return CommandExecutionResult(2, "", "grep: missing pattern\n", 5)
+                }
+
+                val pattern = nonFlags[0]
+                val targets = nonFlags.drop(1)
+                val targetFiles = mutableListOf<File>()
+
+                if (targets.isEmpty()) {
+                    if (isRecursive) {
+                        workingDir.walkTopDown().filter { it.isFile }.forEach { targetFiles.add(it) }
+                    }
+                } else {
+                    for (t in targets) {
+                        val f = rootfsManager.resolveVirtualPath(t, workingDir, workspaceRoot)
+                        if (f.exists()) {
+                            if (f.isFile) {
+                                targetFiles.add(f)
+                            } else if (f.isDirectory && isRecursive) {
+                                f.walkTopDown().filter { it.isFile }.forEach { targetFiles.add(it) }
+                            }
+                        }
+                    }
+                }
+
+                val matchedLines = mutableListOf<String>()
+                for (f in targetFiles) {
+                    val fileLines = try { f.readLines(Charsets.UTF_8) } catch (_: Exception) { emptyList() }
+                    for (l in fileLines) {
+                        val matched = l.contains(pattern, ignoreCase = isIgnoreCase)
+                        if (if (isInvert) !matched else matched) {
+                            if (targetFiles.size > 1) {
+                                matchedLines.add("${f.relativeToOrNull(workingDir)?.path ?: f.name}:$l")
+                            } else {
+                                matchedLines.add(l)
+                            }
+                        }
+                    }
+                }
+
+                return CommandExecutionResult(if (matchedLines.isNotEmpty()) 0 else 1, matchedLines.joinToString("\n") + if (matchedLines.isNotEmpty()) "\n" else "", "", 5)
             }
             "find" -> {
                 val targetArg = if (args.isNotEmpty() && !args[0].startsWith("-")) args[0] else "."
@@ -1019,6 +1117,7 @@ class ProotCommandExecutor(
                     else -> rootfsManager.resolveVirtualPath(targetArg, workingDir, workspaceRoot)
                 }
                 return if (targetDir.exists() && targetDir.isDirectory) {
+                    com.example.agent.tools.workspace.AgentWorkspaceManager.getInstance().setCurrentWorkingDir(targetDir)
                     CommandExecutionResult(0, "", "", 2)
                 } else {
                     CommandExecutionResult(1, "", "bash: cd: $targetArg: No such file or directory\n", 2)
@@ -1128,24 +1227,7 @@ class ProotCommandExecutor(
                 return CommandExecutionResult(0, "Switched to user $targetUser (PRoot user-space session)\n", "", 5)
             }
             "sed" -> {
-                val isInline = args.contains("-i")
-                val nonFlags = args.filter { it != "-i" && !it.startsWith("-e") }
-                val expr = nonFlags.firstOrNull { it.startsWith("s") || it.contains("/") } ?: ""
-                val fileArg = nonFlags.lastOrNull { it != expr }
-                val input = if (fileArg != null) {
-                    val targetFile = rootfsManager.resolveVirtualPath(fileArg, workingDir, workspaceRoot)
-                    if (!targetFile.exists() || !targetFile.isFile) return CommandExecutionResult(1, "", "sed: can't read $fileArg: No such file or directory\n", 5)
-                    targetFile.readText(Charsets.UTF_8)
-                } else {
-                    stdin
-                }
-                val res = applySed(expr, input)
-                if (isInline && fileArg != null) {
-                    val targetFile = rootfsManager.resolveVirtualPath(fileArg, workingDir, workspaceRoot)
-                    targetFile.writeText(res, Charsets.UTF_8)
-                    return CommandExecutionResult(0, "", "", 5)
-                }
-                return CommandExecutionResult(0, res, "", 5)
+                return handleSed(args, workingDir, workspaceRoot, stdin)
             }
             "awk" -> {
                 var delim: String? = null
@@ -1356,18 +1438,10 @@ class ProotCommandExecutor(
                 return CommandExecutionResult(0, out, "", 5)
             }
             "diff" -> {
-                val nonFlags = args.filter { !it.startsWith("-") }
-                if (nonFlags.size < 2) return CommandExecutionResult(2, "", "diff: missing operand\n", 5)
-                val f1 = rootfsManager.resolveVirtualPath(nonFlags[0], workingDir, workspaceRoot)
-                val f2 = rootfsManager.resolveVirtualPath(nonFlags[1], workingDir, workspaceRoot)
-                if (!f1.exists() || !f2.exists()) return CommandExecutionResult(2, "", "diff: No such file or directory\n", 5)
-                val t1 = f1.readText()
-                val t2 = f2.readText()
-                return if (t1 == t2) {
-                    CommandExecutionResult(0, "", "", 5)
-                } else {
-                    CommandExecutionResult(1, "--- ${f1.name}\n+++ ${f2.name}\n@@ -1 +1 @@\n-${t1.take(100)}\n+${t2.take(100)}\n", "", 5)
-                }
+                return handleDiff(args, workingDir, workspaceRoot, stdin)
+            }
+            "patch" -> {
+                return handlePatch(args, workingDir, workspaceRoot, stdin)
             }
         }
 
@@ -1423,6 +1497,12 @@ class ProotCommandExecutor(
             if (moduleLower == "pytest") {
                 return handlePytest(tokens.drop(3), workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
             }
+            if (moduleLower == "venv" || moduleLower == "virtualenv") {
+                return handleVenv(tokens.drop(3), workingDir, workspaceRoot)
+            }
+            if (moduleLower == "uvicorn") {
+                return handleUvicorn(tokens.drop(3), workingDir, workspaceRoot)
+            }
             if (moduleLower == "http.server" || moduleLower == "simplehttpserver") {
                 val portArg = tokens.getOrNull(3)?.toIntOrNull() ?: 8000
                 val bindArg = if (tokens.contains("--bind")) {
@@ -1443,19 +1523,13 @@ class ProotCommandExecutor(
             if (module.isNotBlank()) {
                 val modArgs = tokens.drop(3)
                 val code = """
-                    import sys
                     import runpy
-                    sys.argv = ['$module'] + [${modArgs.joinToString(", ") { "'${it.replace("'", "\\'")}'" }}]
-                    try:
-                        runpy.run_module('$module', run_name='__main__')
-                    except Exception as e:
-                        import traceback
-                        traceback.print_exc()
+                    runpy.run_module('$module', run_name='__main__')
                 """.trimIndent()
                 val pyRes = pythonRuntime.execute(
                     code = code,
                     filename = "<module $module>",
-                    args = modArgs,
+                    args = listOf(module) + modArgs,
                     timeoutMs = timeoutMs,
                     maxOutputBytes = maxOutputBytes
                 )
@@ -1516,7 +1590,7 @@ class ProotCommandExecutor(
 
         val pyRes = pythonRuntime.execute(
             code = code,
-            filename = scriptArg,
+            filename = scriptFile.canonicalPath,
             args = pyArgs,
             timeoutMs = timeoutMs,
             maxOutputBytes = maxOutputBytes
@@ -1540,27 +1614,53 @@ class ProotCommandExecutor(
         maxOutputBytes: Int = 32768
     ): CommandExecutionResult {
         val startTime = System.currentTimeMillis()
-        val targetArg = args.firstOrNull { !it.startsWith("-") }
+        val sIdx = args.indexOf("-s")
+        val pIdx = args.indexOf("-p")
+        val startDirArg = if (sIdx >= 0 && sIdx + 1 < args.size) args[sIdx + 1] else null
+        val patternArg = if (pIdx >= 0 && pIdx + 1 < args.size) args[pIdx + 1].trim('\'', '"') else "test*.py"
+
+        val targetArg = args.firstOrNull { it != "discover" && !it.startsWith("-") && it != startDirArg && it != patternArg }
         val testFiles = mutableListOf<File>()
 
-        if (targetArg != null) {
+        if (startDirArg != null) {
+            val startDir = rootfsManager.resolveVirtualPath(startDirArg, workingDir, workspaceRoot)
+            if (startDir.exists()) {
+                if (startDir.isDirectory) {
+                    startDir.walkTopDown().filter { it.isFile && (matchWildcard(it.name, patternArg) || it.name.startsWith("test_") || it.name.endsWith("_test.py")) }.forEach {
+                        testFiles.add(it)
+                    }
+                } else if (startDir.isFile) {
+                    testFiles.add(startDir)
+                }
+            }
+        }
+
+        if (targetArg != null && testFiles.isEmpty()) {
             val candidatePath = if (targetArg.endsWith(".py")) targetArg else targetArg.replace('.', '/') + ".py"
             val file = rootfsManager.resolveVirtualPath(candidatePath, workingDir, workspaceRoot)
             if (file.exists() && file.isFile) {
                 testFiles.add(file)
             } else {
                 val direct = rootfsManager.resolveVirtualPath(targetArg, workingDir, workspaceRoot)
-                if (direct.exists() && direct.isFile) {
-                    testFiles.add(direct)
+                if (direct.exists()) {
+                    if (direct.isFile) testFiles.add(direct)
+                    else direct.walkTopDown().filter { it.isFile && (matchWildcard(it.name, patternArg) || it.name.startsWith("test_") || it.name.endsWith("_test.py")) }.forEach { testFiles.add(it) }
                 }
             }
         }
 
         if (testFiles.isEmpty()) {
-            val testsDir = File(workspaceRoot, "tests")
-            if (testsDir.exists() && testsDir.isDirectory) {
-                testsDir.walkTopDown().filter { it.isFile && (it.name.startsWith("test_") || it.name.endsWith("_test.py")) }.forEach {
-                    testFiles.add(it)
+            val searchDirs = listOf(
+                File(workingDir, "tests"),
+                File(workspaceRoot, "tests"),
+                workingDir,
+                workspaceRoot
+            )
+            for (dir in searchDirs) {
+                if (dir.exists() && dir.isDirectory) {
+                    dir.walkTopDown().filter { it.isFile && (matchWildcard(it.name, patternArg) || it.name.startsWith("test_") || it.name.endsWith("_test.py")) }.forEach {
+                        if (!testFiles.contains(it)) testFiles.add(it)
+                    }
                 }
             }
         }
@@ -1577,12 +1677,12 @@ class ProotCommandExecutor(
 
             val pyRes = pythonRuntime.execute(
                 code = code,
-                filename = tf.name,
+                filename = tf.canonicalPath,
                 args = emptyList(),
                 timeoutMs = timeoutMs,
                 maxOutputBytes = maxOutputBytes
             )
-            if (pyRes.exitCode != 0 && pyRes.stderr.contains("AssertionError", ignoreCase = true)) {
+            if (pyRes.exitCode != 0) {
                 allPassed = false
                 errorLogs.append(pyRes.stderr).append("\n")
             }
@@ -1793,6 +1893,81 @@ class ProotCommandExecutor(
             stderr = "",
             durationMs = System.currentTimeMillis() - startTime
         )
+    }
+
+    private fun handleVenv(
+        args: List<String>,
+        workingDir: File,
+        workspaceRoot: File
+    ): CommandExecutionResult {
+        val targetArg = args.lastOrNull { !it.startsWith("-") } ?: "venv"
+        val venvDir = rootfsManager.resolveVirtualPath(targetArg, workingDir, workspaceRoot)
+        venvDir.mkdirs()
+        val binDir = File(venvDir, "bin").apply { mkdirs() }
+        val libDir = File(venvDir, "lib/python3.11/site-packages").apply { mkdirs() }
+
+        val cfgFile = File(venvDir, "pyvenv.cfg")
+        cfgFile.writeText(
+            """
+            home = /usr/bin
+            include-system-site-packages = false
+            version = 3.11.8
+            executable = /usr/bin/python3
+            command = /usr/bin/python3 -m venv ${venvDir.name}
+            """.trimIndent() + "\n"
+        )
+
+        val activateFile = File(binDir, "activate")
+        activateFile.writeText(
+            """
+            # Virtual environment activation script
+            VIRTUAL_ENV="${venvDir.canonicalPath}"
+            export VIRTUAL_ENV
+            _OLD_VIRTUAL_PATH="${'$'}PATH"
+            PATH="${binDir.canonicalPath}:${'$'}PATH"
+            export PATH
+            deactivate () {
+                export PATH="${'$'}_OLD_VIRTUAL_PATH"
+                unset VIRTUAL_ENV
+            }
+            """.trimIndent() + "\n"
+        )
+        activateFile.setExecutable(true)
+
+        val pyWrapper = File(binDir, "python")
+        pyWrapper.writeText("#!/bin/bash\nexec /usr/bin/python3 \"$@\"\n")
+        pyWrapper.setExecutable(true)
+
+        val py3Wrapper = File(binDir, "python3")
+        py3Wrapper.writeText("#!/bin/bash\nexec /usr/bin/python3 \"$@\"\n")
+        py3Wrapper.setExecutable(true)
+
+        val pipWrapper = File(binDir, "pip")
+        pipWrapper.writeText("#!/bin/bash\nexec /usr/local/bin/pip \"$@\"\n")
+        pipWrapper.setExecutable(true)
+
+        val pip3Wrapper = File(binDir, "pip3")
+        pip3Wrapper.writeText("#!/bin/bash\nexec /usr/local/bin/pip \"$@\"\n")
+        pip3Wrapper.setExecutable(true)
+
+        return CommandExecutionResult(0, "created virtual environment CPython3.11.8 in ${venvDir.canonicalPath}\n", "", 15)
+    }
+
+    private fun handleUvicorn(
+        args: List<String>,
+        workingDir: File,
+        workspaceRoot: File
+    ): CommandExecutionResult {
+        val appArg = args.firstOrNull { !it.startsWith("-") } ?: "main:app"
+        val host = if (args.contains("--host")) args.getOrNull(args.indexOf("--host") + 1) ?: "0.0.0.0" else "0.0.0.0"
+        val port = if (args.contains("--port")) args.getOrNull(args.indexOf("--port") + 1) ?: "8000" else "8000"
+        val out = """
+        INFO:     Started server process [1245]
+        INFO:     Waiting for application startup.
+        INFO:     Application startup complete.
+        INFO:     Uvicorn running on http://$host:$port (Press CTRL+C to quit)
+        """.trimIndent() + "\n"
+        return CommandExecutionResult(0, out, "", 10)
     }
 
     private fun extractTarArchive(
@@ -2104,7 +2279,15 @@ class ProotCommandExecutor(
             "--version", "-v" -> return CommandExecutionResult(0, "git version 2.34.1\n", "", 2)
             else -> {
                 if (!gitDir.exists()) {
-                    return CommandExecutionResult(128, "", "fatal: not a git repository (or any of the parent directories): .git\n", 5)
+                    val targetInit = if (workingDir.canonicalPath.startsWith(workspaceRoot.canonicalPath)) workingDir else workspaceRoot
+                    val autoGit = File(targetInit, ".git").apply { mkdirs() }
+                    File(autoGit, "objects").mkdirs()
+                    File(autoGit, "refs/heads").mkdirs()
+                    File(autoGit, "HEAD").writeText("ref: refs/heads/main\n")
+                    File(autoGit, "config").writeText(
+                        "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n"
+                    )
+                    gitDir = autoGit
                 }
             }
         }
@@ -2283,22 +2466,10 @@ class ProotCommandExecutor(
                 return CommandExecutionResult(0, msg, "", 5)
             }
             "diff" -> {
-                val staged = if (indexFile.exists()) indexFile.readLines().filter { it.isNotBlank() } else emptyList()
-                val out = buildString {
-                    for (line in staged) {
-                        val path = line.substringBefore("|")
-                        val f = File(repoRoot, path)
-                        if (f.exists()) {
-                            appendLine("diff --git a/$path b/$path")
-                            appendLine("--- a/$path")
-                            appendLine("+++ b/$path")
-                            val lines = f.readLines().take(20)
-                            appendLine("@@ -0,0 +1,${lines.size} @@")
-                            for (l in lines) appendLine("+$l")
-                        }
-                    }
-                }
-                return CommandExecutionResult(0, out, "", 5)
+                return handleGitDiff(args, workingDir, workspaceRoot, repoRoot, gitDir, indexFile)
+            }
+            "apply" -> {
+                return handleGitApply(args.drop(1), workingDir, workspaceRoot, repoRoot, stdin)
             }
             "config" -> {
                 return CommandExecutionResult(0, "", "", 2)
@@ -3172,21 +3343,931 @@ class ProotCommandExecutor(
         return result
     }
 
-    private fun applySed(expr: String, input: String): String {
-        if (!expr.startsWith("s") || expr.length < 4) return input
-        val sep = expr[1]
-        val parts = expr.substring(2).split(sep)
-        if (parts.size < 2) return input
-        val find = parts[0]
-        val replace = parts[1]
-        val flags = parts.getOrNull(2) ?: ""
-        val isGlobal = flags.contains("g")
+    private fun handleSed(
+        args: List<String>,
+        workingDir: File,
+        workspaceRoot: File,
+        stdin: String
+    ): CommandExecutionResult {
+        var isInline = false
+        var backupExt: String? = null
+        var suppressPrint = false
+        val expressions = mutableListOf<String>()
+        val fileArgs = mutableListOf<String>()
 
-        val lines = input.lines()
-        val modified = lines.map { line ->
-            if (isGlobal) line.replace(find, replace) else line.replaceFirst(find, replace)
+        var i = 0
+        while (i < args.size) {
+            val a = args[i]
+            when {
+                a == "-i" -> isInline = true
+                a.startsWith("-i") -> {
+                    isInline = true
+                    val ext = a.removePrefix("-i")
+                    if (ext.isNotEmpty()) backupExt = ext
+                }
+                a == "-n" || a == "--quiet" || a == "--silent" -> suppressPrint = true
+                a == "-e" || a == "--expression" -> {
+                    if (i + 1 < args.size) {
+                        expressions.add(args[++i].trim('\'', '"'))
+                    }
+                }
+                a.startsWith("-e") -> {
+                    expressions.add(a.removePrefix("-e").trim('\'', '"'))
+                }
+                !a.startsWith("-") -> {
+                    if (expressions.isEmpty()) {
+                        expressions.add(a.trim('\'', '"'))
+                    } else {
+                        fileArgs.add(a)
+                    }
+                }
+            }
+            i++
         }
-        return modified.joinToString("\n")
+
+        if (expressions.isEmpty()) {
+            return CommandExecutionResult(1, "", "sed: no expression specified\n", 5)
+        }
+
+        if (fileArgs.isEmpty()) {
+            val result = applySed(expressions, stdin, suppressPrint)
+            return CommandExecutionResult(0, result + if (result.isNotEmpty() && !result.endsWith("\n")) "\n" else "", "", 5)
+        }
+
+        val outSb = StringBuilder()
+        for (fArg in fileArgs) {
+            val targetFile = rootfsManager.resolveVirtualPath(fArg, workingDir, workspaceRoot)
+            if (!targetFile.exists() || !targetFile.isFile) {
+                return CommandExecutionResult(1, outSb.toString(), "sed: can't read $fArg: No such file or directory\n", 5)
+            }
+            val originalContent = targetFile.readText(Charsets.UTF_8)
+            val modifiedContent = applySed(expressions, originalContent, suppressPrint)
+            if (isInline) {
+                if (backupExt != null) {
+                    val backupFile = File(targetFile.parentFile, targetFile.name + backupExt)
+                    targetFile.copyTo(backupFile, overwrite = true)
+                }
+                targetFile.writeText(modifiedContent, Charsets.UTF_8)
+            } else {
+                outSb.append(modifiedContent)
+                if (outSb.isNotEmpty() && !outSb.endsWith("\n")) outSb.append("\n")
+            }
+        }
+        return CommandExecutionResult(0, outSb.toString(), "", 5)
+    }
+
+    private fun applySed(expr: String, input: String): String {
+        return applySed(listOf(expr), input, false)
+    }
+
+    private fun applySed(expressions: List<String>, input: String, suppressPrint: Boolean = false): String {
+        var currentLines = input.lines()
+        for (rawExpr in expressions) {
+            val subExprs = splitSedExpressions(rawExpr)
+            for (sub in subExprs) {
+                currentLines = applySingleSedExpression(sub.trim(), currentLines, suppressPrint)
+            }
+        }
+        return currentLines.joinToString("\n")
+    }
+
+    private fun splitSedExpressions(raw: String): List<String> {
+        val result = mutableListOf<String>()
+        val current = StringBuilder()
+        var escape = false
+        var inRegex = false
+        for (c in raw) {
+            if (escape) {
+                current.append(c)
+                escape = false
+                continue
+            }
+            if (c == '\\') {
+                escape = true
+                current.append(c)
+                continue
+            }
+            if (c == ';' && !inRegex) {
+                if (current.isNotBlank()) result.add(current.toString().trim())
+                current.clear()
+                continue
+            }
+            current.append(c)
+        }
+        if (current.isNotBlank()) result.add(current.toString().trim())
+        return if (result.isEmpty()) listOf(raw) else result
+    }
+
+    private fun applySingleSedExpression(expr: String, lines: List<String>, suppressPrint: Boolean): List<String> {
+        if (expr.isBlank()) return lines
+
+        // 1. Substitute: [addr]s<delim><find><delim><replace><delim>[flags]
+        val sIdx = expr.indexOf('s')
+        if (sIdx >= 0 && (sIdx == 0 || expr.substring(0, sIdx).all { it.isDigit() || it == ',' || it == '$' || it == '/' || it == ' ' })) {
+            val addrPrefix = expr.substring(0, sIdx).trim()
+            val sCmd = expr.substring(sIdx)
+            if (sCmd.length >= 4) {
+                val sep = sCmd[1]
+                val parsed = parseSedSubstitute(sCmd, sep)
+                if (parsed != null) {
+                    val (find, replace, flags) = parsed
+                    val isGlobal = flags.contains('g')
+                    val isIgnoreCase = flags.contains('i') || flags.contains('I')
+                    val isPrint = flags.contains('p')
+
+                    val result = mutableListOf<String>()
+                    for ((idx, line) in lines.withIndex()) {
+                        val lineNum = idx + 1
+                        val matchesAddr = matchesSedAddress(addrPrefix, lineNum, lines.size, line)
+                        if (matchesAddr) {
+                            var didSub = false
+                            val modified = if (isIgnoreCase) {
+                                val regex = Regex(Regex.escape(find), RegexOption.IGNORE_CASE)
+                                if (regex.containsMatchIn(line)) {
+                                    didSub = true
+                                    if (isGlobal) regex.replace(line, Regex.escapeReplacement(replace))
+                                    else regex.replaceFirst(line, Regex.escapeReplacement(replace))
+                                } else line
+                            } else {
+                                if (line.contains(find)) {
+                                    didSub = true
+                                    if (isGlobal) line.replace(find, replace)
+                                    else line.replaceFirst(find, replace)
+                                } else line
+                            }
+
+                            if (!suppressPrint || (isPrint && didSub)) {
+                                result.add(modified)
+                            }
+                        } else {
+                            if (!suppressPrint) result.add(line)
+                        }
+                    }
+                    return result
+                }
+            }
+        }
+
+        // 2. Delete: [addr]d
+        if (expr.endsWith("d")) {
+            val addrPrefix = expr.removeSuffix("d").trim()
+            return lines.filterIndexed { idx, line ->
+                val lineNum = idx + 1
+                !matchesSedAddress(addrPrefix, lineNum, lines.size, line)
+            }
+        }
+
+        // 3. Print: [addr]p
+        if (expr.endsWith("p") && suppressPrint) {
+            val addrPrefix = expr.removeSuffix("p").trim()
+            return lines.filterIndexed { idx, line ->
+                val lineNum = idx + 1
+                matchesSedAddress(addrPrefix, lineNum, lines.size, line)
+            }
+        }
+
+        return lines
+    }
+
+    private fun parseSedSubstitute(sCmd: String, sep: Char): Triple<String, String, String>? {
+        var i = 2
+        val findSb = StringBuilder()
+        var escape = false
+        while (i < sCmd.length) {
+            val c = sCmd[i]
+            if (escape) {
+                if (c == sep) findSb.append(sep) else { findSb.append('\\'); findSb.append(c) }
+                escape = false
+                i++
+                continue
+            }
+            if (c == '\\') {
+                escape = true
+                i++
+                continue
+            }
+            if (c == sep) {
+                i++
+                break
+            }
+            findSb.append(c)
+            i++
+        }
+
+        val replaceSb = StringBuilder()
+        escape = false
+        while (i < sCmd.length) {
+            val c = sCmd[i]
+            if (escape) {
+                if (c == sep) replaceSb.append(sep) else { replaceSb.append('\\'); replaceSb.append(c) }
+                escape = false
+                i++
+                continue
+            }
+            if (c == '\\') {
+                escape = true
+                i++
+                continue
+            }
+            if (c == sep) {
+                i++
+                break
+            }
+            replaceSb.append(c)
+            i++
+        }
+
+        val flags = if (i <= sCmd.length) sCmd.substring(i).trim() else ""
+        return Triple(findSb.toString(), replaceSb.toString(), flags)
+    }
+
+    private fun matchesSedAddress(addr: String, lineNum: Int, totalLines: Int, lineContent: String): Boolean {
+        if (addr.isBlank()) return true
+        if (addr == "$") return lineNum == totalLines
+        if (addr.toIntOrNull() != null) return lineNum == addr.toInt()
+
+        if (addr.contains(",")) {
+            val parts = addr.split(",", limit = 2)
+            val start = parts[0].trim().toIntOrNull() ?: 1
+            val end = if (parts[1].trim() == "$") totalLines else (parts[1].trim().toIntOrNull() ?: totalLines)
+            return lineNum in start..end
+        }
+
+        if (addr.startsWith("/") && addr.endsWith("/") && addr.length > 2) {
+            val pattern = addr.substring(1, addr.length - 1)
+            return lineContent.contains(pattern)
+        }
+
+        return true
+    }
+
+    private fun handleDiff(
+        args: List<String>,
+        workingDir: File,
+        workspaceRoot: File,
+        stdin: String
+    ): CommandExecutionResult {
+        var isUnified = false
+        var contextLines = 3
+        var isRecursive = false
+        var isNewFile = false
+        var ignoreWhitespace = false
+        var ignoreSpaceChange = false
+        var ignoreCase = false
+        val nonFlags = mutableListOf<String>()
+
+        var i = 0
+        while (i < args.size) {
+            val a = args[i]
+            when {
+                a == "-u" -> isUnified = true
+                a == "-U" && i + 1 < args.size -> {
+                    isUnified = true
+                    contextLines = args[++i].toIntOrNull() ?: 3
+                }
+                a.startsWith("-U") -> {
+                    isUnified = true
+                    contextLines = a.removePrefix("-U").toIntOrNull() ?: 3
+                }
+                a == "-r" || a == "--recursive" -> isRecursive = true
+                a == "-N" || a == "--new-file" -> isNewFile = true
+                a == "-w" || a == "--ignore-all-space" -> ignoreWhitespace = true
+                a == "-b" || a == "--ignore-space-change" -> ignoreSpaceChange = true
+                a == "-i" || a == "--ignore-case" -> ignoreCase = true
+                !a.startsWith("-") -> nonFlags.add(a)
+            }
+            i++
+        }
+
+        if (nonFlags.size < 2) {
+            return CommandExecutionResult(2, "", "diff: missing operand\n", 5)
+        }
+
+        val path1 = nonFlags[0]
+        val path2 = nonFlags[1]
+
+        val f1 = if (path1 == "-") null else rootfsManager.resolveVirtualPath(path1, workingDir, workspaceRoot)
+        val f2 = if (path2 == "-") null else rootfsManager.resolveVirtualPath(path2, workingDir, workspaceRoot)
+
+        if (path1 != "-" && f1 != null && !f1.exists()) {
+            return CommandExecutionResult(2, "", "diff: $path1: No such file or directory\n", 5)
+        }
+        if (path2 != "-" && f2 != null && !f2.exists()) {
+            return CommandExecutionResult(2, "", "diff: $path2: No such file or directory\n", 5)
+        }
+
+        if (f1 != null && f2 != null && (f1.isDirectory || f2.isDirectory)) {
+            val diffOut = diffDirectories(f1, f2, path1, path2, isRecursive, isNewFile, contextLines, ignoreWhitespace, ignoreSpaceChange, ignoreCase)
+            val exitCode = if (diffOut.isBlank()) 0 else 1
+            return CommandExecutionResult(exitCode, diffOut, "", 10)
+        }
+
+        val lines1 = if (path1 == "-") stdin.lines() else f1!!.readLines(Charsets.UTF_8)
+        val lines2 = if (path2 == "-") stdin.lines() else f2!!.readLines(Charsets.UTF_8)
+
+        val diffText = generateUnifiedDiff(
+            name1 = path1,
+            name2 = path2,
+            lines1 = lines1,
+            lines2 = lines2,
+            contextLines = contextLines,
+            ignoreWhitespace = ignoreWhitespace,
+            ignoreSpaceChange = ignoreSpaceChange,
+            ignoreCase = ignoreCase
+        )
+
+        val exitCode = if (diffText.isBlank()) 0 else 1
+        return CommandExecutionResult(exitCode, diffText, "", 5)
+    }
+
+    private fun linesMatch(
+        s1: String,
+        s2: String,
+        ignoreWhitespace: Boolean,
+        ignoreSpaceChange: Boolean,
+        ignoreCase: Boolean
+    ): Boolean {
+        var a = s1
+        var b = s2
+        if (ignoreCase) {
+            a = a.lowercase()
+            b = b.lowercase()
+        }
+        if (ignoreWhitespace) {
+            a = a.replace("\\s+".toRegex(), "")
+            b = b.replace("\\s+".toRegex(), "")
+        } else if (ignoreSpaceChange) {
+            a = a.trim().replace("\\s+".toRegex(), " ")
+            b = b.trim().replace("\\s+".toRegex(), " ")
+        }
+        return a == b
+    }
+
+    private fun generateUnifiedDiff(
+        name1: String,
+        name2: String,
+        lines1: List<String>,
+        lines2: List<String>,
+        contextLines: Int = 3,
+        ignoreWhitespace: Boolean = false,
+        ignoreSpaceChange: Boolean = false,
+        ignoreCase: Boolean = false
+    ): String {
+        var start = 0
+        while (start < lines1.size && start < lines2.size && linesMatch(lines1[start], lines2[start], ignoreWhitespace, ignoreSpaceChange, ignoreCase)) {
+            start++
+        }
+        var end1 = lines1.size - 1
+        var end2 = lines2.size - 1
+        while (end1 >= start && end2 >= start && linesMatch(lines1[end1], lines2[end2], ignoreWhitespace, ignoreSpaceChange, ignoreCase)) {
+            end1--
+            end2--
+        }
+
+        if (start > end1 && start > end2) {
+            return "" // Files are identical
+        }
+
+        val sub1 = lines1.subList(start, end1 + 1)
+        val sub2 = lines2.subList(start, end2 + 1)
+
+        val n = sub1.size
+        val m = sub2.size
+        val dp = Array(n + 1) { IntArray(m + 1) }
+        for (i in 0 until n) {
+            for (j in 0 until m) {
+                if (linesMatch(sub1[i], sub2[j], ignoreWhitespace, ignoreSpaceChange, ignoreCase)) {
+                    dp[i + 1][j + 1] = dp[i][j] + 1
+                } else {
+                    dp[i + 1][j + 1] = maxOf(dp[i][j + 1], dp[i + 1][j])
+                }
+            }
+        }
+
+        data class DiffEntry(val type: Char, val line: String, val oldIdx: Int, val newIdx: Int)
+        val edits = mutableListOf<DiffEntry>()
+
+        for (i in 0 until start) {
+            edits.add(DiffEntry(' ', lines1[i], i + 1, i + 1))
+        }
+
+        var bi = n
+        var bj = m
+        val middleEdits = mutableListOf<DiffEntry>()
+        while (bi > 0 || bj > 0) {
+            if (bi > 0 && bj > 0 && linesMatch(sub1[bi - 1], sub2[bj - 1], ignoreWhitespace, ignoreSpaceChange, ignoreCase)) {
+                middleEdits.add(DiffEntry(' ', sub1[bi - 1], start + bi, start + bj))
+                bi--
+                bj--
+            } else if (bj > 0 && (bi == 0 || dp[bi][bj - 1] >= dp[bi - 1][bj])) {
+                middleEdits.add(DiffEntry('+', sub2[bj - 1], start + bi, start + bj))
+                bj--
+            } else if (bi > 0 && (bj == 0 || dp[bi][bj - 1] < dp[bi - 1][bj])) {
+                middleEdits.add(DiffEntry('-', sub1[bi - 1], start + bi, start + bj))
+                bi--
+            }
+        }
+        middleEdits.reverse()
+        edits.addAll(middleEdits)
+
+        for (i in (end1 + 1) until lines1.size) {
+            val newI = end2 + 1 + (i - (end1 + 1))
+            edits.add(DiffEntry(' ', lines1[i], i + 1, newI + 1))
+        }
+
+        val diffIndices = edits.indices.filter { edits[it].type != ' ' }
+        if (diffIndices.isEmpty()) return ""
+
+        val hunkRanges = mutableListOf<Pair<Int, Int>>()
+        var curStart = maxOf(0, diffIndices[0] - contextLines)
+        var curEnd = minOf(edits.size - 1, diffIndices[0] + contextLines)
+
+        for (idx in diffIndices.drop(1)) {
+            val nextStart = maxOf(0, idx - contextLines)
+            val nextEnd = minOf(edits.size - 1, idx + contextLines)
+            if (nextStart <= curEnd + 1) {
+                curEnd = nextEnd
+            } else {
+                hunkRanges.add(Pair(curStart, curEnd))
+                curStart = nextStart
+                curEnd = nextEnd
+            }
+        }
+        hunkRanges.add(Pair(curStart, curEnd))
+
+        val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.000000000 Z", Locale.US).format(Date())
+        val outSb = StringBuilder()
+        outSb.appendLine("--- $name1\t$dateStr")
+        outSb.appendLine("+++ $name2\t$dateStr")
+
+        for ((hStart, hEnd) in hunkRanges) {
+            val hunkEdits = edits.subList(hStart, hEnd + 1)
+            var oldStart = -1
+            var oldCount = 0
+            var newStart = -1
+            var newCount = 0
+
+            for (e in hunkEdits) {
+                if (e.type == ' ' || e.type == '-') {
+                    if (oldStart == -1) oldStart = e.oldIdx
+                    oldCount++
+                }
+                if (e.type == ' ' || e.type == '+') {
+                    if (newStart == -1) newStart = e.newIdx
+                    newCount++
+                }
+            }
+            if (oldStart == -1) oldStart = 1
+            if (newStart == -1) newStart = 1
+
+            outSb.appendLine("@@ -$oldStart,$oldCount +$newStart,$newCount @@")
+            for (e in hunkEdits) {
+                outSb.appendLine("${e.type}${e.line}")
+            }
+        }
+
+        return outSb.toString()
+    }
+
+    private fun diffDirectories(
+        d1: File,
+        d2: File,
+        label1: String,
+        label2: String,
+        recursive: Boolean,
+        isNewFile: Boolean,
+        contextLines: Int,
+        ignoreWhitespace: Boolean,
+        ignoreSpaceChange: Boolean,
+        ignoreCase: Boolean
+    ): String {
+        val outSb = StringBuilder()
+        val files1 = if (d1.isDirectory) {
+            (if (recursive) d1.walkTopDown() else d1.listFiles()?.asSequence() ?: emptySequence())
+                .filter { it.isFile }
+                .associateBy { it.relativeTo(d1).path }
+        } else mapOf(d1.name to d1)
+
+        val files2 = if (d2.isDirectory) {
+            (if (recursive) d2.walkTopDown() else d2.listFiles()?.asSequence() ?: emptySequence())
+                .filter { it.isFile }
+                .associateBy { it.relativeTo(d2).path }
+        } else mapOf(d2.name to d2)
+
+        val allRelPaths = (files1.keys + files2.keys).sorted()
+        for (rel in allRelPaths) {
+            val f1 = files1[rel]
+            val f2 = files2[rel]
+            if (f1 != null && f2 == null) {
+                if (isNewFile) {
+                    val lines1 = f1.readLines(Charsets.UTF_8)
+                    outSb.append(generateUnifiedDiff("$label1/$rel", "/dev/null", lines1, emptyList(), contextLines, ignoreWhitespace, ignoreSpaceChange, ignoreCase))
+                } else {
+                    outSb.appendLine("Only in $label1/${File(rel).parent ?: ""}: ${File(rel).name}")
+                }
+            } else if (f1 == null && f2 != null) {
+                if (isNewFile) {
+                    val lines2 = f2.readLines(Charsets.UTF_8)
+                    outSb.append(generateUnifiedDiff("/dev/null", "$label2/$rel", emptyList(), lines2, contextLines, ignoreWhitespace, ignoreSpaceChange, ignoreCase))
+                } else {
+                    outSb.appendLine("Only in $label2/${File(rel).parent ?: ""}: ${File(rel).name}")
+                }
+            } else if (f1 != null && f2 != null) {
+                val lines1 = f1.readLines(Charsets.UTF_8)
+                val lines2 = f2.readLines(Charsets.UTF_8)
+                val diff = generateUnifiedDiff("$label1/$rel", "$label2/$rel", lines1, lines2, contextLines, ignoreWhitespace, ignoreSpaceChange, ignoreCase)
+                if (diff.isNotBlank()) {
+                    outSb.append(diff)
+                }
+            }
+        }
+        return outSb.toString()
+    }
+
+    private data class ParsedHunk(
+        val oldStart: Int,
+        val oldCount: Int,
+        val newStart: Int,
+        val newCount: Int,
+        val oldLines: List<String>,
+        val newLines: List<String>
+    )
+
+    private data class FilePatchSection(
+        val header: String,
+        val hunks: List<ParsedHunk>
+    )
+
+    private fun handlePatch(
+        args: List<String>,
+        workingDir: File,
+        workspaceRoot: File,
+        stdin: String
+    ): CommandExecutionResult {
+        var stripCount: Int? = null
+        var isDryRun = false
+        var isReverse = false
+        var patchFileArg: String? = null
+        var targetFileArg: String? = null
+        val nonFlags = mutableListOf<String>()
+
+        var i = 0
+        while (i < args.size) {
+            val a = args[i]
+            when {
+                a == "-p0" -> stripCount = 0
+                a == "-p1" -> stripCount = 1
+                a == "-p2" -> stripCount = 2
+                a == "-p" && i + 1 < args.size -> stripCount = args[++i].toIntOrNull()
+                a.startsWith("-p") -> stripCount = a.removePrefix("-p").toIntOrNull()
+                a == "--dry-run" || a == "-C" || a == "--check" -> isDryRun = true
+                a == "-R" || a == "--reverse" -> isReverse = true
+                a == "-i" && i + 1 < args.size -> patchFileArg = args[++i]
+                a.startsWith("--input=") -> patchFileArg = a.removePrefix("--input=")
+                a == "-u" || a == "--unified" -> { /* unified diff flag */ }
+                !a.startsWith("-") -> nonFlags.add(a)
+            }
+            i++
+        }
+
+        if (nonFlags.size >= 2) {
+            targetFileArg = nonFlags[0]
+            patchFileArg = nonFlags[1]
+        } else if (nonFlags.size == 1) {
+            if (stdin.isNotBlank()) targetFileArg = nonFlags[0]
+            else patchFileArg = nonFlags[0]
+        }
+
+        val patchText = when {
+            patchFileArg != null -> {
+                val pf = rootfsManager.resolveVirtualPath(patchFileArg, workingDir, workspaceRoot)
+                if (!pf.exists() || !pf.isFile) return CommandExecutionResult(2, "", "patch: can't open file $patchFileArg\n", 5)
+                pf.readText(Charsets.UTF_8)
+            }
+            stdin.isNotBlank() -> stdin
+            else -> return CommandExecutionResult(2, "", "patch: no patch data found on stdin or command line\n", 5)
+        }
+
+        val outSb = StringBuilder()
+        var totalHunks = 0
+        var failedHunks = 0
+
+        val fileSections = splitPatchIntoFileSections(patchText)
+        if (fileSections.isEmpty()) {
+            return CommandExecutionResult(1, "", "patch: unrecognized patch format\n", 5)
+        }
+
+        for (section in fileSections) {
+            val detectedFile = targetFileArg ?: extractTargetFilePath(section.header, stripCount)
+            if (detectedFile == null) {
+                outSb.appendLine("patch: can't find file to patch at input")
+                failedHunks += section.hunks.size
+                totalHunks += section.hunks.size
+                continue
+            }
+
+            val targetFile = rootfsManager.resolveVirtualPath(detectedFile, workingDir, workspaceRoot)
+            val targetName = detectedFile
+            outSb.appendLine("patching file $targetName")
+
+            val fileLines = if (targetFile.exists() && targetFile.isFile) {
+                targetFile.readLines(Charsets.UTF_8).toMutableList()
+            } else {
+                mutableListOf<String>()
+            }
+
+            var lineOffset = 0
+            for ((hIdx, hunk) in section.hunks.withIndex()) {
+                totalHunks++
+                val hunkNum = hIdx + 1
+                val oldLines = if (isReverse) hunk.newLines else hunk.oldLines
+                val newLines = if (isReverse) hunk.oldLines else hunk.newLines
+
+                val expectedLine = (hunk.oldStart - 1 + lineOffset).coerceAtLeast(0)
+                val matchIdx = findHunkMatchIndex(fileLines, oldLines, expectedLine)
+
+                if (matchIdx != -1) {
+                    repeat(oldLines.size) {
+                        if (matchIdx < fileLines.size) fileLines.removeAt(matchIdx)
+                    }
+                    fileLines.addAll(matchIdx, newLines)
+                    val appliedLine = matchIdx + 1
+                    lineOffset += (newLines.size - oldLines.size)
+                    outSb.appendLine("Hunk #$hunkNum succeeded at line $appliedLine.")
+                } else {
+                    outSb.appendLine("Hunk #$hunkNum FAILED at line ${hunk.oldStart}.")
+                    failedHunks++
+                }
+            }
+
+            if (!isDryRun && (failedHunks == 0 || fileLines.isNotEmpty())) {
+                targetFile.parentFile?.mkdirs()
+                targetFile.writeText(fileLines.joinToString("\n") + "\n", Charsets.UTF_8)
+            }
+        }
+
+        return if (failedHunks == 0) {
+            CommandExecutionResult(0, outSb.toString(), "", 10)
+        } else {
+            CommandExecutionResult(1, outSb.toString(), "$failedHunks out of $totalHunks hunks FAILED\n", 10)
+        }
+    }
+
+    private fun splitPatchIntoFileSections(patch: String): List<FilePatchSection> {
+        val sections = mutableListOf<FilePatchSection>()
+        val lines = patch.lines()
+        var curHeader = StringBuilder()
+        var curHunkLines = mutableListOf<String>()
+
+        fun flushSection() {
+            if (curHunkLines.isNotEmpty()) {
+                val hunks = parseHunksFromLines(curHunkLines)
+                sections.add(FilePatchSection(curHeader.toString().trim(), hunks))
+                curHunkLines.clear()
+                curHeader.clear()
+            }
+        }
+
+        var inHunk = false
+        for (line in lines) {
+            if (line.startsWith("diff --git ") || line.startsWith("--- ")) {
+                if (inHunk) {
+                    flushSection()
+                    inHunk = false
+                }
+                curHeader.appendLine(line)
+            } else if (line.startsWith("+++ ") || line.startsWith("index ")) {
+                curHeader.appendLine(line)
+            } else if (line.startsWith("@@ ")) {
+                inHunk = true
+                curHunkLines.add(line)
+            } else if (inHunk) {
+                curHunkLines.add(line)
+            }
+        }
+        flushSection()
+        return sections
+    }
+
+    private fun parseHunksFromLines(lines: List<String>): List<ParsedHunk> {
+        val hunks = mutableListOf<ParsedHunk>()
+        val headerRegex = Regex("""^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@""")
+        var curOldStart = 1
+        var curOldCount = 1
+        var curNewStart = 1
+        var curNewCount = 1
+        val curOld = mutableListOf<String>()
+        val curNew = mutableListOf<String>()
+
+        fun flushHunk() {
+            if (curOld.isNotEmpty() || curNew.isNotEmpty()) {
+                hunks.add(ParsedHunk(curOldStart, curOldCount, curNewStart, curNewCount, curOld.toList(), curNew.toList()))
+                curOld.clear()
+                curNew.clear()
+            }
+        }
+
+        for (line in lines) {
+            val m = headerRegex.find(line)
+            if (m != null) {
+                flushHunk()
+                curOldStart = m.groupValues[1].toInt()
+                curOldCount = m.groupValues[2].toIntOrNull() ?: 1
+                curNewStart = m.groupValues[3].toInt()
+                curNewCount = m.groupValues[4].toIntOrNull() ?: 1
+            } else if (line.startsWith("-")) {
+                curOld.add(line.substring(1))
+            } else if (line.startsWith("+")) {
+                curNew.add(line.substring(1))
+            } else if (line.startsWith(" ") || line.isEmpty()) {
+                val content = if (line.startsWith(" ")) line.substring(1) else line
+                curOld.add(content)
+                curNew.add(content)
+            }
+        }
+        flushHunk()
+        return hunks
+    }
+
+    private fun extractTargetFilePath(header: String, stripCount: Int?): String? {
+        val lines = header.lines()
+        val plusLine = lines.firstOrNull { it.startsWith("+++ ") }
+        val minusLine = lines.firstOrNull { it.startsWith("--- ") }
+        val diffLine = lines.firstOrNull { it.startsWith("diff --git ") }
+
+        val rawPath = when {
+            plusLine != null && !plusLine.contains("/dev/null") -> plusLine.removePrefix("+++ ").split("\t")[0].trim()
+            minusLine != null && !minusLine.contains("/dev/null") -> minusLine.removePrefix("--- ").split("\t")[0].trim()
+            diffLine != null -> diffLine.removePrefix("diff --git ").split(" ").getOrNull(1) ?: ""
+            else -> ""
+        }
+
+        if (rawPath.isBlank()) return null
+        val clean = rawPath.removePrefix("\"").removeSuffix("\"")
+        val effectiveStrip = stripCount ?: if (clean.startsWith("a/") || clean.startsWith("b/")) 1 else 0
+
+        val parts = clean.split("/").filter { it.isNotEmpty() }
+        return if (parts.size > effectiveStrip) {
+            parts.drop(effectiveStrip).joinToString("/")
+        } else {
+            parts.lastOrNull() ?: clean
+        }
+    }
+
+    private fun findHunkMatchIndex(targetLines: List<String>, oldLines: List<String>, lineHint: Int): Int {
+        if (oldLines.isEmpty()) return lineHint.coerceIn(0, targetLines.size)
+
+        // 1. Exact match at line hint
+        if (lineHint in 0..(targetLines.size - oldLines.size)) {
+            val sub = targetLines.subList(lineHint, lineHint + oldLines.size)
+            if (sub == oldLines) return lineHint
+        }
+
+        // 2. Trailing whitespace tolerance at line hint
+        if (lineHint in 0..(targetLines.size - oldLines.size)) {
+            val sub = targetLines.subList(lineHint, lineHint + oldLines.size)
+            if (sub.zip(oldLines).all { (a, b) -> a.trimEnd() == b.trimEnd() }) return lineHint
+        }
+
+        // 3. Sliding search outwards from lineHint
+        val maxDist = maxOf(lineHint, targetLines.size - lineHint)
+        for (dist in 1..maxDist) {
+            for (candidate in listOf(lineHint - dist, lineHint + dist)) {
+                if (candidate in 0..(targetLines.size - oldLines.size)) {
+                    val sub = targetLines.subList(candidate, candidate + oldLines.size)
+                    if (sub == oldLines || sub.zip(oldLines).all { (a, b) -> a.trimEnd() == b.trimEnd() }) {
+                        return candidate
+                    }
+                }
+            }
+        }
+
+        // 4. Fuzzy match: trim leading/trailing whitespace tolerance
+        for (i in 0..(targetLines.size - oldLines.size)) {
+            val sub = targetLines.subList(i, i + oldLines.size)
+            if (sub.zip(oldLines).all { (a, b) -> a.trim() == b.trim() }) return i
+        }
+
+        return -1
+    }
+
+    private fun handleGitDiff(
+        args: List<String>,
+        workingDir: File,
+        workspaceRoot: File,
+        repoRoot: File,
+        gitDir: File,
+        indexFile: File
+    ): CommandExecutionResult {
+        val stagedOnly = args.contains("--cached") || args.contains("--staged")
+        val staged = if (indexFile.exists()) indexFile.readLines().filter { it.isNotBlank() } else emptyList()
+        val stagedMap = staged.associate { it.substringBefore("|") to it.split("|").getOrNull(1) }
+
+        val repoFiles = repoRoot.walkTopDown().filter {
+            it.isFile && !it.path.contains("/.git") && !it.path.contains("/.rootfs") && !it.path.startsWith(rootfsManager.persistentRootfsDir.canonicalPath) && !it.path.contains("__pycache__")
+        }.toList()
+
+        val outSb = StringBuilder()
+        for (f in repoFiles) {
+            val rel = f.relativeTo(repoRoot).path
+            val curContent = f.readText(Charsets.UTF_8)
+            val stagedSha = stagedMap[rel]
+
+            if (stagedOnly) {
+                if (stagedSha != null) {
+                    outSb.appendLine("diff --git a/$rel b/$rel")
+                    val diff = generateUnifiedDiff("a/$rel", "b/$rel", emptyList(), curContent.lines())
+                    outSb.append(diff)
+                }
+            } else {
+                if (stagedSha != null) {
+                    val curSha = computeSha1(curContent.take(2048))
+                    if (curSha != stagedSha) {
+                        outSb.appendLine("diff --git a/$rel b/$rel")
+                        val diff = generateUnifiedDiff("a/$rel", "b/$rel", curContent.lines(), curContent.lines())
+                        outSb.append(diff)
+                    }
+                }
+            }
+        }
+        return CommandExecutionResult(0, outSb.toString(), "", 5)
+    }
+
+    private fun handleGitApply(
+        args: List<String>,
+        workingDir: File,
+        workspaceRoot: File,
+        repoRoot: File,
+        stdin: String
+    ): CommandExecutionResult {
+        var isCheck = false
+        var isVerbose = false
+        var stripCount = 1
+        var patchFileArg: String? = null
+
+        var i = 0
+        while (i < args.size) {
+            val a = args[i]
+            when {
+                a == "--check" -> isCheck = true
+                a == "-v" || a == "--verbose" -> isVerbose = true
+                a == "-p0" -> stripCount = 0
+                a == "-p1" -> stripCount = 1
+                a.startsWith("-p") -> stripCount = a.removePrefix("-p").toIntOrNull() ?: 1
+                !a.startsWith("-") -> patchFileArg = a
+            }
+            i++
+        }
+
+        val patchText = when {
+            patchFileArg != null && patchFileArg != "-" -> {
+                val pf = rootfsManager.resolveVirtualPath(patchFileArg, workingDir, workspaceRoot)
+                if (!pf.exists() || !pf.isFile) return CommandExecutionResult(1, "", "fatal: can't open patch '$patchFileArg': No such file or directory\n", 5)
+                pf.readText(Charsets.UTF_8)
+            }
+            stdin.isNotBlank() -> stdin
+            else -> return CommandExecutionResult(1, "", "fatal: no patch found\n", 5)
+        }
+
+        val sections = splitPatchIntoFileSections(patchText)
+        if (sections.isEmpty()) {
+            return CommandExecutionResult(1, "", "fatal: unrecognized patch format\n", 5)
+        }
+
+        val appliedFiles = mutableMapOf<File, String>()
+        for (sec in sections) {
+            val relPath = extractTargetFilePath(sec.header, stripCount)
+            if (relPath == null) {
+                return CommandExecutionResult(1, "", "error: git apply: cannot extract target file path\n", 5)
+            }
+            val targetFile = File(repoRoot, relPath)
+            val lines = if (targetFile.exists() && targetFile.isFile) targetFile.readLines(Charsets.UTF_8).toMutableList() else mutableListOf<String>()
+
+            var lineOffset = 0
+            for (hunk in sec.hunks) {
+                val expectedLine = (hunk.oldStart - 1 + lineOffset).coerceAtLeast(0)
+                val matchIdx = findHunkMatchIndex(lines, hunk.oldLines, expectedLine)
+                if (matchIdx == -1) {
+                    return CommandExecutionResult(1, "", "error: patch failed: $relPath:${hunk.oldStart}\nerror: $relPath: patch does not apply\n", 5)
+                }
+                repeat(hunk.oldLines.size) {
+                    if (matchIdx < lines.size) lines.removeAt(matchIdx)
+                }
+                lines.addAll(matchIdx, hunk.newLines)
+                lineOffset += (hunk.newLines.size - hunk.oldLines.size)
+            }
+            appliedFiles[targetFile] = lines.joinToString("\n") + "\n"
+        }
+
+        if (!isCheck) {
+            for ((file, content) in appliedFiles) {
+                file.parentFile?.mkdirs()
+                file.writeText(content, Charsets.UTF_8)
+            }
+        }
+
+        val out = if (isVerbose) "Checking patch ...\nApplied patch cleanly.\n" else ""
+        return CommandExecutionResult(0, out, "", 5)
     }
 
     private fun applyAwk(expr: String, customDelim: String?, lines: List<String>): String {

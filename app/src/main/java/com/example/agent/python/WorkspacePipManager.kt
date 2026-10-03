@@ -225,6 +225,10 @@ class WorkspacePipManager(
             installedList.addAll(installResult.installedNames)
         }
 
+        try {
+            generateEntrypointBinaries(libDir, workingDir)
+        } catch (_: Exception) {}
+
         val output = buildString {
             if (logSb.isNotBlank()) {
                 appendLine(logSb.toString().trim())
@@ -242,6 +246,69 @@ class WorkspacePipManager(
             stderr = "",
             durationMs = System.currentTimeMillis() - startTime
         )
+    }
+
+    private fun generateEntrypointBinaries(libDir: File, workingDir: File) {
+        val binDir = File(workingDir, "bin").apply { mkdirs() }
+        val rootfsBin = File(com.example.agent.proot.ProotRootfsManager.getInstance().persistentRootfsDir, "usr/local/bin").apply { mkdirs() }
+
+        // 1. Scan for entry_points.txt in all .dist-info directories
+        libDir.listFiles()?.filter { it.isDirectory && it.name.endsWith(".dist-info") }?.forEach { distInfo ->
+            val entryPointsFile = File(distInfo, "entry_points.txt")
+            if (entryPointsFile.exists()) {
+                var inConsoleScripts = false
+                try {
+                    entryPointsFile.forEachLine { line ->
+                        val trimmed = line.trim()
+                        if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+                            inConsoleScripts = trimmed.equals("[console_scripts]", ignoreCase = true)
+                        } else if (inConsoleScripts && trimmed.contains("=")) {
+                            val name = trimmed.substringBefore("=").trim()
+                            val target = trimmed.substringAfter("=").trim()
+                            if (name.isNotBlank()) {
+                                createCliWrapper(name, target, binDir, rootfsBin)
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+
+        // 2. Known standard CLI packages fallback
+        val installed = getInstalledPackageNames(libDir)
+        if ("virtualenv" in installed) {
+            createCliWrapper("virtualenv", "virtualenv.__main__:run_with_catch", binDir, rootfsBin)
+        }
+        if ("uvicorn" in installed) {
+            createCliWrapper("uvicorn", "uvicorn.main:main", binDir, rootfsBin)
+        }
+        if ("pytest" in installed) {
+            createCliWrapper("pytest", "pytest:console_main", binDir, rootfsBin)
+        }
+        if ("flask" in installed) {
+            createCliWrapper("flask", "flask.cli:main", binDir, rootfsBin)
+        }
+        if ("gunicorn" in installed) {
+            createCliWrapper("gunicorn", "gunicorn.app.wsgiapp:run", binDir, rootfsBin)
+        }
+    }
+
+    private fun createCliWrapper(name: String, target: String, binDir: File, rootfsBin: File) {
+        val module = target.substringBefore(":").trim()
+        val func = target.substringAfter(":", "").trim()
+        val scriptContent = if (func.isNotBlank()) {
+            "#!/bin/sh\nexec python3 -c \"import sys; from $module import $func; sys.exit($func())\" \"$@\"\n"
+        } else {
+            "#!/bin/sh\nexec python3 -m $module \"$@\"\n"
+        }
+
+        listOf(File(binDir, name), File(rootfsBin, name)).forEach { script ->
+            try {
+                script.writeText(scriptContent)
+                script.setReadable(true, false)
+                script.setExecutable(true, false)
+            } catch (_: Exception) {}
+        }
     }
 
     private data class PackageInstallResult(

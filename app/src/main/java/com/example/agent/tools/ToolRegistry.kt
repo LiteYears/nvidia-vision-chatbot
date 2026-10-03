@@ -56,6 +56,11 @@ class ToolRegistry {
         return tools[key] ?: when (key) {
             "bash", "terminal", "sh", "shell", "exec", "cmd" -> tools["run_command"]
             "python", "py" -> tools["python_execute"] ?: tools["run_command"]
+            "replace_file_content", "edit_file", "edit", "patch", "patch_file", "apply_diff", "code_edit", "diff", "modify_file", "str_replace" -> tools["file_patch"]
+            "write_to_file", "create_file", "overwrite_file" -> tools["file_write"]
+            "read_file", "view_file", "cat" -> tools["file_read"]
+            "list_dir", "dir_list", "ls" -> tools["file_list"]
+            "delete_file", "remove_file", "rm" -> tools["file_delete"]
             else -> null
         }
     }
@@ -92,12 +97,24 @@ class ToolRegistry {
         sb.append("EOF\n")
         sb.append("python3 solution.py\n")
         sb.append("```\n\n")
+        sb.append("IMPORTANT TERMINAL RULES:\n")
+        sb.append("- In ```bash blocks, write real Linux shell commands only (e.g. `mkdir -p dir`, `cat << 'EOF' > file ... EOF`, `ls -la`, `cd dir`).\n")
+        sb.append("- NEVER emit pseudo-code or abstract commands like `file_write path=...`, `run_command command=...`, or `directory_create` into bash blocks.\n")
+        sb.append("- To invoke structured tools like web_search or calculator, use standard ```tool_call JSON blocks.\n\n")
         sb.append("STANDARD LINUX WORKFLOW IN YOUR TERMINAL:\n")
         sb.append("1. Discover & Inspect: Run `ls -la`, `cat <file>`, `head -n 50 <file>`, `grep -rn 'pattern' .`, `find .`\n")
         sb.append("2. Create & Edit Files: Use bash heredocs (`cat << 'EOF' > filename ... EOF`) or python scripts to write code.\n")
         sb.append("3. Package Management: Run `apt update`, `apt install -y <pkg>`, `pip install <pkg>` to install packages.\n")
         sb.append("4. Execution & Testing: Run `python3 script.py`, `pytest`, `node`, `bash script.sh` and inspect real stdout/stderr.\n")
         sb.append("5. System Tools: `neofetch`, `uname -a`, `whoami`, `df -h`, `free -m`, `ps aux`\n\n")
+        sb.append("CODE EDITING, PATCHING & DIFF INSTRUCTIONS:\n")
+        sb.append("When modifying or fixing existing code, you have three flexible options:\n")
+        sb.append("1. `file_patch` (or `replace_file_content`): Precise search-and-replace, SEARCH/REPLACE blocks, or line range replacements.\n")
+        sb.append("   - Exact/Fuzzy replacement: Provide 'path', 'target_content', and 'replacement_content'.\n")
+        sb.append("   - Line range replacement: Provide 'path', 'start_line', 'end_line', and 'replacement_content'.\n")
+        sb.append("   - SEARCH/REPLACE block: Provide 'path' and 'diff' with <<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE.\n")
+        sb.append("2. Terminal `patch` or `git apply`: In ```bash, you can apply unified diffs using `patch -p1 < file.diff` or `git apply file.diff`.\n")
+        sb.append("3. Terminal `sed`: For quick substitutions, use `sed -i 's/old/new/g' file`.\n\n")
         sb.append("AUTONOMOUS WEB BROWSING & NEWS EXTRACTION FLOW:\n")
         sb.append("1. Search: Use `web_search` with targeted queries.\n")
         sb.append("2. Open: Use `web_open` with target URLs to extract clean markdown, metadata, and outlines.\n")
