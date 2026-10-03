@@ -1791,7 +1791,21 @@ class ProotCommandExecutor(
                     val size = sizeStr.toLongOrNull(8) ?: 0L
                     val typeFlag = header[156].toInt().toChar()
 
-                    val targetFile = File(destDir, nameRaw)
+                    val canonicalDest = destDir.canonicalFile
+                    val canonicalDestPath = canonicalDest.canonicalPath
+                    val targetFile = File(canonicalDest, nameRaw).canonicalFile
+                    val targetPath = targetFile.canonicalPath
+                    if (!targetPath.startsWith(canonicalDestPath + File.separator) && targetPath != canonicalDestPath) {
+                        // Skip entry attempting to escape destDir
+                        val pad = ((512 - (size % 512)) % 512).toInt()
+                        var skipRemaining = size + pad
+                        while (skipRemaining > 0) {
+                            val skipped = stream.skip(skipRemaining)
+                            if (skipped <= 0) break
+                            skipRemaining -= skipped
+                        }
+                        continue
+                    }
                     if (typeFlag == '5' || nameRaw.endsWith("/")) {
                         targetFile.mkdirs()
                         if (verbose) outSb.appendLine(nameRaw)
@@ -2533,6 +2547,12 @@ class ProotCommandExecutor(
             return CommandExecutionResult(1, "", "$cmd: no URL specified\n", 5)
         }
 
+        val urlValidation = com.example.agent.tools.web.UrlSecurityValidator.validate(url)
+        if (urlValidation.isFailure) {
+            return CommandExecutionResult(1, "", "$cmd: blocked by security policy: ${urlValidation.exceptionOrNull()?.message}\n", 5)
+        }
+        val safeUrl = urlValidation.getOrThrow()
+
         return try {
             val client = OkHttpClient.Builder()
                 .followRedirects(true)
@@ -2541,7 +2561,7 @@ class ProotCommandExecutor(
                 .readTimeout(18, TimeUnit.SECONDS)
                 .build()
 
-            val reqBuilder = Request.Builder().url(url)
+            val reqBuilder = Request.Builder().url(safeUrl)
             reqBuilder.header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
             for ((k, v) in headers) {
                 reqBuilder.header(k, v)
@@ -2768,10 +2788,18 @@ class ProotCommandExecutor(
 
         return try {
             val extractedFiles = mutableListOf<String>()
+            val canonicalDest = destDir.canonicalFile
+            val canonicalDestPath = canonicalDest.canonicalPath
             ZipInputStream(zipFile.inputStream()).use { zis ->
                 var entry = zis.nextEntry
                 while (entry != null) {
-                    val outFile = File(destDir, entry.name)
+                    val outFile = File(canonicalDest, entry.name).canonicalFile
+                    val outPath = outFile.canonicalPath
+                    if (!outPath.startsWith(canonicalDestPath + File.separator) && outPath != canonicalDestPath) {
+                        zis.closeEntry()
+                        entry = zis.nextEntry
+                        continue
+                    }
                     if (entry.isDirectory) {
                         outFile.mkdirs()
                     } else {

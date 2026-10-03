@@ -64,11 +64,21 @@ class FileDeleteTool(
         }
 
         val workspaceRoot = workspaceManager.getWorkspaceDir()
-        if (targetFile.canonicalPath == workspaceRoot.canonicalPath) {
+        val targetPath = targetFile.canonicalPath
+        if (targetPath == workspaceRoot.canonicalPath) {
             return ToolResult.failure(
                 callId = callId,
                 toolName = definition.name,
                 error = "Cannot delete the workspace root directory."
+            )
+        }
+
+        val rootfsDir = com.example.agent.proot.ProotRootfsManager.getInstance().ensureRootfs(workspaceRoot).canonicalPath
+        if (targetPath == rootfsDir || targetPath.startsWith(rootfsDir + File.separator)) {
+            return ToolResult.failure(
+                callId = callId,
+                toolName = definition.name,
+                error = "Access denied: Deleting core system rootfs directories and files is prohibited."
             )
         }
 

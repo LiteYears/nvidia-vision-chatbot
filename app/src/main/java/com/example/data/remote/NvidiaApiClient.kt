@@ -30,7 +30,7 @@ class NvidiaApiClient(
         private const val TAG = "NvidiaApiClient"
         const val BASE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
         const val DEFAULT_MODEL = "meta/llama-3.2-11b-vision-instruct"
-        const val FALLBACK_MODEL = "meta/llama-3.2-11b-vision-instruct"
+        const val FALLBACK_MODEL = "meta/llama-3.2-3b-instruct"
         const val QUANTUM_MODEL = "Quantum 3"
         private const val MAX_NETWORK_RETRIES = 3
     }
@@ -126,7 +126,19 @@ class NvidiaApiClient(
                     })
                 }
 
+                // Normalize messages: coalesce consecutive text messages of the same role to prevent API 400 errors
+                val normalizedMessages = mutableListOf<ChatMessage>()
                 for (msg in messages) {
+                    val last = normalizedMessages.lastOrNull()
+                    if (last != null && last.role == msg.role && last.imageBase64.isNullOrBlank() && msg.imageBase64.isNullOrBlank() && msg.role != MessageRole.SYSTEM) {
+                        val mergedContent = "${last.content}\n\n${msg.content}".trim()
+                        normalizedMessages[normalizedMessages.size - 1] = last.copy(content = mergedContent)
+                    } else {
+                        normalizedMessages.add(msg)
+                    }
+                }
+
+                for (msg in normalizedMessages) {
                     when (msg.role) {
                         MessageRole.USER -> {
                             val userMsgObj = JSONObject().apply {

@@ -3284,6 +3284,11 @@ class PythonInterpreter(
 
         var hops = 0
         while (hops < 6) {
+            val urlValidation = com.example.agent.tools.web.UrlSecurityValidator.validate(fullUrl)
+            if (urlValidation.isFailure) {
+                return PyHttpResponse(403, "Blocked by security policy: ${urlValidation.exceptionOrNull()?.message}", emptyMap())
+            }
+            fullUrl = urlValidation.getOrThrow()
             try {
                 val urlObj = java.net.URL(fullUrl)
                 val conn = urlObj.openConnection() as java.net.HttpURLConnection
@@ -3320,7 +3325,17 @@ class PythonInterpreter(
                 }
 
                 val stream = if (code in 200..399) conn.inputStream else conn.errorStream ?: java.io.ByteArrayInputStream(ByteArray(0))
-                val text = stream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                val maxChars = 2 * 1024 * 1024
+                val text = stream.bufferedReader(Charsets.UTF_8).use { reader ->
+                    val buffer = CharArray(4096)
+                    val sb = java.lang.StringBuilder()
+                    var r: Int
+                    while (reader.read(buffer).also { r = it } != -1) {
+                        sb.append(buffer, 0, r)
+                        if (sb.length >= maxChars) break
+                    }
+                    sb.toString()
+                }
                 val respHeaders = mutableMapOf<String, String>()
                 conn.headerFields.forEach { (k, v) ->
                     if (k != null) respHeaders[k.lowercase(Locale.US)] = v.joinToString(", ")

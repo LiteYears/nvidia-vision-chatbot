@@ -118,10 +118,9 @@ class DefaultSearchProvider(
             // 1. DOMAIN SPECIFIC: IP & WHOIS Registries
             // ==========================================
             val ipMatch = extractIpAddress(trimmedQuery)
-            if (ipMatch != null || isIpOrNetworkQuery(trimmedQuery)) {
+            if (ipMatch != null) {
                 try {
-                    val targetIp = ipMatch ?: "8.8.8.8"
-                    val ipResults = queryIpRegistries(targetIp, limit)
+                    val ipResults = queryIpRegistries(ipMatch, limit)
                     addDistinctResults(ipResults)
                 } catch (e: Exception) {
                     if (lastNetworkException == null) lastNetworkException = e
@@ -221,7 +220,7 @@ class DefaultSearchProvider(
 
         // 1. IP Geolocation, ISP, and ASN registry via IP-API
         try {
-            val url = "http://ip-api.com/json/$ip"
+            val url = "https://ip-api.com/json/$ip"
             val request = Request.Builder()
                 .url(url)
                 .header("User-Agent", USER_AGENT)

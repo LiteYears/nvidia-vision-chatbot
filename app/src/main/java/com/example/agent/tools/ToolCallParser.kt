@@ -310,10 +310,16 @@ object ToolCallParser {
 
             // Check start of heredoc: cat << EOF, cat <<- 'EOF'
             if (lineTrim.contains("<<")) {
-                val delimMatch = Regex("""<<-?\s*['"]?([A-Za-z0-9_.-]+)['"]?""").find(lineTrim)
-                if (delimMatch != null) {
-                    inHeredoc = true
-                    heredocDelim = delimMatch.groupValues[1].trim('\'', '"')
+                val isHeredocCommand = lineTrim.startsWith("cat ") || lineTrim.startsWith("tee ") ||
+                    lineTrim.contains("<<-") || lineTrim.contains("<< '") || lineTrim.contains("<< \"") ||
+                    Regex("""\b(?:cat|tee|patch|sh|bash|python|python3)\b.*<<""").containsMatchIn(lineTrim)
+                val delimMatch = Regex("""<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_.-]*)['"]?""").find(lineTrim)
+                if (isHeredocCommand && delimMatch != null) {
+                    val candidateDelim = delimMatch.groupValues[1].trim('\'', '"')
+                    if (candidateDelim.length >= 2 || candidateDelim == "_" || candidateDelim.all { it.isUpperCase() }) {
+                        inHeredoc = true
+                        heredocDelim = candidateDelim
+                    }
                 }
                 cleanedLines.add(line)
                 continue

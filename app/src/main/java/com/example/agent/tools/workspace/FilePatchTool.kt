@@ -154,7 +154,7 @@ class FilePatchTool(
 
         val patchResult: PatchApplicationResult = when {
             diffBlock != null -> applyDiffOrHunk(originalContent, diffBlock, allowMultiple)
-            targetContent != null -> applyDirectReplacement(originalContent, targetContent, replacementContent ?: "", allowMultiple)
+            targetContent != null -> applyDirectReplacement(originalContent, targetContent, replacementContent ?: "", allowMultiple, requestedPath)
             else -> PatchApplicationResult(false, "No patch instructions provided", originalContent, 0, 0)
         }
 
@@ -197,7 +197,8 @@ class FilePatchTool(
         originalContent: String,
         target: String,
         replacement: String,
-        allowMultiple: Boolean
+        allowMultiple: Boolean,
+        requestedPath: String = ""
     ): PatchApplicationResult {
         if (target.isEmpty()) {
             return PatchApplicationResult(false, "target_content cannot be empty.", originalContent, 0, 0)

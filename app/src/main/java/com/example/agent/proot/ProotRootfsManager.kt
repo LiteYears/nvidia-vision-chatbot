@@ -520,16 +520,33 @@ class ProotRootfsManager(
         }
 
         // 4. Relative paths or paths within workingDir
-        if (!trimmed.startsWith("/")) {
-            return File(workingDir, trimmed).canonicalFile
+        val wsPath = workspaceRoot.canonicalPath
+        val rootPath = rootfsDir.canonicalPath
+
+        val resolved = if (!trimmed.startsWith("/")) {
+            File(workingDir, trimmed).canonicalFile
+        } else {
+            val candidate = File(trimmed)
+            if (candidate.isAbsolute && candidate.exists()) {
+                val cPath = candidate.canonicalPath
+                if (cPath.startsWith(wsPath + File.separator) || cPath == wsPath ||
+                    cPath.startsWith(rootPath + File.separator) || cPath == rootPath) {
+                    candidate.canonicalFile
+                } else {
+                    File(workspaceRoot, trimmed.trimStart('/')).canonicalFile
+                }
+            } else {
+                File(workspaceRoot, trimmed.trimStart('/')).canonicalFile
+            }
         }
 
-        val candidate = File(trimmed)
-        if (candidate.isAbsolute && candidate.exists()) {
-            return candidate.canonicalFile
+        val resPath = resolved.canonicalPath
+        if (!resPath.startsWith(wsPath + File.separator) && resPath != wsPath &&
+            !resPath.startsWith(rootPath + File.separator) && resPath != rootPath) {
+            return File(workspaceRoot, File(trimmed).name).canonicalFile
         }
 
-        return File(workspaceRoot, trimmed.trimStart('/')).canonicalFile
+        return resolved
     }
 
     /**

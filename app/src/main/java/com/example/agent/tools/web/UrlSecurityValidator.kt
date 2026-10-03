@@ -107,10 +107,10 @@ object UrlSecurityValidator {
             )
         }
 
-        // 4. Reject direct private and loopback IPv4/IPv6 addresses
-        if (isPrivateOrLoopbackIp(host)) {
+        // 4. Reject direct private and loopback IPv4/IPv6 addresses or domains resolving to private/loopback IPs
+        if (isPrivateOrLoopbackIp(host) || isResolvedAddressPrivate(host)) {
             return Result.failure(
-                SecurityException("Access denied: IP address '$host' is a private, loopback, or local network address.")
+                SecurityException("Access denied: Address '$host' is a private, loopback, or local network address.")
             )
         }
 
@@ -131,12 +131,15 @@ object UrlSecurityValidator {
      * or link-local address.
      */
     fun isPrivateOrLoopbackIp(host: String): Boolean {
+        val clean = host.trim().removeSurrounding("[", "]").lowercase()
+        if (clean == "localhost" || clean == "127.0.0.1" || clean == "0.0.0.0" || clean == "::1" || clean == "0:0:0:0:0:0:0:1") return true
+        if (clean.startsWith("fe80:") || clean.startsWith("fc00:") || clean.startsWith("fd00:")) return true
         // Direct regex check for common private IPv4 patterns
-        if (host.startsWith("127.")) return true // Loopback
-        if (host.startsWith("10.")) return true // Class A private
-        if (host.startsWith("192.168.")) return true // Class C private
-        if (host.startsWith("169.254.")) return true // Link-local
-        if (host == "10.0.2.2") return true // Android emulator host alias
+        if (clean.startsWith("127.")) return true // Loopback
+        if (clean.startsWith("10.")) return true // Class A private
+        if (clean.startsWith("192.168.")) return true // Class C private
+        if (clean.startsWith("169.254.")) return true // Link-local
+        if (clean == "10.0.2.2") return true // Android emulator host alias
 
         // 172.16.0.0 to 172.31.255.255
         if (host.startsWith("172.")) {

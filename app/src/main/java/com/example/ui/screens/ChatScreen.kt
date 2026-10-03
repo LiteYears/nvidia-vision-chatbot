@@ -6,6 +6,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -645,6 +647,7 @@ fun ChatScreen(
                             }
                         }
                     }
+                    }
                     AppMode.AGENT -> {
                         // Agent Mode Content
                     if (uiState.currentAgentSession == null) {
@@ -735,6 +738,7 @@ fun ChatScreen(
                                 }
                             }
                         }
+                    }
                     }
                     AppMode.TERMINAL -> {
                         TerminalScreen(
@@ -895,47 +899,61 @@ private fun startSpeechRecognition(
     onRecognizerCreated: (SpeechRecognizer) -> Unit,
     onPartialResult: ((String) -> Unit)? = null
 ) {
-    if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-        Toast.makeText(context, "Speech recognition not available on device", Toast.LENGTH_SHORT).show()
-        onError()
-        return
+    val runOnMain: (() -> Unit) -> Unit = { action ->
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            action()
+        } else {
+            Handler(Looper.getMainLooper()).post(action)
+        }
     }
 
-    val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
-    onRecognizerCreated(recognizer)
+    runOnMain {
+        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+            Toast.makeText(context, "Speech recognition not available on device", Toast.LENGTH_SHORT).show()
+            onError()
+            return@runOnMain
+        }
 
-    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-        putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-        putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, onPartialResult != null)
-    }
+        try {
+            val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
+            onRecognizerCreated(recognizer)
 
-    recognizer.setRecognitionListener(object : RecognitionListener {
-        override fun onReadyForSpeech(params: Bundle?) {}
-        override fun onBeginningOfSpeech() {}
-        override fun onRmsChanged(rmsdB: Float) {}
-        override fun onBufferReceived(buffer: ByteArray?) {}
-        override fun onEndOfSpeech() {}
-        override fun onError(error: Int) {
-            try { recognizer.destroy() } catch (_: Exception) {}
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, onPartialResult != null)
+            }
+
+            recognizer.setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) {}
+                override fun onBeginningOfSpeech() {}
+                override fun onRmsChanged(rmsdB: Float) {}
+                override fun onBufferReceived(buffer: ByteArray?) {}
+                override fun onEndOfSpeech() {}
+                override fun onError(error: Int) {
+                    try { recognizer.destroy() } catch (_: Exception) {}
+                    onError()
+                }
+                override fun onResults(results: Bundle?) {
+                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    val text = matches?.firstOrNull() ?: ""
+                    try { recognizer.destroy() } catch (_: Exception) {}
+                    onResult(text)
+                }
+                override fun onPartialResults(partialResults: Bundle?) {
+                    val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    val text = matches?.firstOrNull() ?: ""
+                    if (text.isNotBlank()) {
+                        onPartialResult?.invoke(text)
+                    }
+                }
+                override fun onEvent(eventType: Int, params: Bundle?) {}
+            })
+
+            recognizer.startListening(intent)
+        } catch (e: Exception) {
             onError()
         }
-        override fun onResults(results: Bundle?) {
-            val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-            val text = matches?.firstOrNull() ?: ""
-            try { recognizer.destroy() } catch (_: Exception) {}
-            onResult(text)
-        }
-        override fun onPartialResults(partialResults: Bundle?) {
-            val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-            val text = matches?.firstOrNull() ?: ""
-            if (text.isNotBlank()) {
-                onPartialResult?.invoke(text)
-            }
-        }
-        override fun onEvent(eventType: Int, params: Bundle?) {}
-    })
-
-    recognizer.startListening(intent)
+    }
 }

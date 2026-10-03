@@ -690,16 +690,21 @@ class WorkspacePipManager(
 
     private fun extractZipArchive(bytes: ByteArray, targetDir: File): List<String> {
         val extractedFiles = mutableListOf<String>()
+        val canonicalTarget = targetDir.canonicalFile
+        val canonicalTargetPath = canonicalTarget.canonicalPath
         ZipInputStream(ByteArrayInputStream(bytes)).use { zis ->
             var entry = zis.nextEntry
             while (entry != null) {
                 if (!entry.isDirectory && !entry.name.contains("__pycache__")) {
-                    val outFile = File(targetDir, entry.name)
-                    outFile.parentFile?.mkdirs()
-                    FileOutputStream(outFile).use { fos ->
-                        zis.copyTo(fos)
+                    val outFile = File(canonicalTarget, entry.name).canonicalFile
+                    val outPath = outFile.canonicalPath
+                    if (outPath.startsWith(canonicalTargetPath + File.separator) || outPath == canonicalTargetPath) {
+                        outFile.parentFile?.mkdirs()
+                        FileOutputStream(outFile).use { fos ->
+                            zis.copyTo(fos)
+                        }
+                        extractedFiles.add(entry.name)
                     }
-                    extractedFiles.add(entry.name)
                 }
                 entry = zis.nextEntry
             }
@@ -709,6 +714,8 @@ class WorkspacePipManager(
 
     private fun extractTarGzArchive(bytes: ByteArray, targetDir: File): List<String> {
         val extractedFiles = mutableListOf<String>()
+        val canonicalTarget = targetDir.canonicalFile
+        val canonicalTargetPath = canonicalTarget.canonicalPath
         try {
             GZIPInputStream(ByteArrayInputStream(bytes)).use { gzis ->
                 // Simple Tar reader
@@ -737,22 +744,34 @@ class WorkspacePipManager(
 
                     val cleanRel = rawName.substringAfter("/")
                     if (typeFlag == '0' || typeFlag == '\u0000') {
-                        val fileData = ByteArray(size.toInt())
+                        val safeSize = if (size in 0..50_000_000L) size.toInt() else 0
+                        val fileData = ByteArray(safeSize)
                         var fileRead = 0
-                        while (fileRead < size) {
-                            val r = gzis.read(fileData, fileRead, (size - fileRead).toInt())
+                        while (fileRead < safeSize) {
+                            val r = gzis.read(fileData, fileRead, safeSize - fileRead)
                             if (r < 0) break
                             fileRead += r
+                        }
+                        if (size > safeSize) {
+                            var toSkip = size - safeSize
+                            while (toSkip > 0) {
+                                val s = gzis.skip(toSkip)
+                                if (s <= 0) break
+                                toSkip -= s
+                            }
                         }
                         // Skip padding
                         val pad = (512 - (size % 512)) % 512
                         gzis.skip(pad)
 
                         if (cleanRel.isNotBlank() && !cleanRel.contains("__pycache__") && (cleanRel.endsWith(".py") || cleanRel.contains("/"))) {
-                            val outFile = File(targetDir, cleanRel)
-                            outFile.parentFile?.mkdirs()
-                            outFile.writeBytes(fileData)
-                            extractedFiles.add(cleanRel)
+                            val outFile = File(canonicalTarget, cleanRel).canonicalFile
+                            val outPath = outFile.canonicalPath
+                            if (outPath.startsWith(canonicalTargetPath + File.separator) || outPath == canonicalTargetPath) {
+                                outFile.parentFile?.mkdirs()
+                                outFile.writeBytes(fileData)
+                                extractedFiles.add(cleanRel)
+                            }
                         }
                     } else {
                         val pad = ((size + 511) / 512) * 512
