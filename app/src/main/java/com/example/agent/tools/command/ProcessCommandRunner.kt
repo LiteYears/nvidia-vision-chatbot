@@ -46,10 +46,6 @@ class ProcessCommandRunner(
             )
         }
 
-        if (!workingDir.exists()) {
-            workingDir.mkdirs()
-        }
-
         termuxRunner.run(
             command = trimmed,
             workingDir = workingDir,

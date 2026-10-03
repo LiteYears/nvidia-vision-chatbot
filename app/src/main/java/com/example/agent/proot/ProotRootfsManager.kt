@@ -76,12 +76,6 @@ class ProotRootfsManager(
         )
         directories.forEach { File(rootfsDir, it).mkdirs() }
 
-        // Also ensure workspace lib exists if workspaceDir provided
-        if (workspaceDir != null && workspaceDir.exists()) {
-            File(workspaceDir, "lib").mkdirs()
-            File(workspaceDir, "bin").mkdirs()
-        }
-
         // 2. /etc/os-release
         val osRelease = File(rootfsDir, "etc/os-release")
         if (!osRelease.exists() || osRelease.length() == 0L) {

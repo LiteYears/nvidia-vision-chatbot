@@ -377,12 +377,21 @@ object AgentExecutionCoordinator {
         _currentStatus.value = AgentTaskStatus.COMPLETED
         _currentActionDescription.value = "Task completed successfully"
 
+        val lastFailed = _activeSession.value?.toolExecutions?.lastOrNull()?.isSuccess == false
+        val bannerText = if (lastFailed) {
+            "════════════════════════════════════════════════════════\n" +
+            "⚠ [AGENT TASK CONCLUDED WITH ERRORS] Last command failed.\n" +
+            "════════════════════════════════════════════════════════"
+        } else {
+            "════════════════════════════════════════════════════════\n" +
+            "✔ [AGENT TASK COMPLETED] Objective successfully achieved.\n" +
+            "════════════════════════════════════════════════════════"
+        }
+
         postTerminalEvent(
             TerminalLine(
                 type = TerminalLineType.BANNER,
-                text = "════════════════════════════════════════════════════════\n" +
-                        "✔ [AGENT TASK COMPLETED] Objective successfully achieved.\n" +
-                        "════════════════════════════════════════════════════════",
+                text = bannerText,
                 isAgent = true
             )
         )

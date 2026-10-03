@@ -559,7 +559,11 @@ class AgentExecutionService : Service() {
                 session = AgentExecutionCoordinator.activeSession.value ?: session
             } else {
                 // Model returned text without a tool call
-                val hasPendingAction = taskPlanner.hasPendingActionSubtasks(currentPlan) || workspaceContext.hasUnverifiedModifications()
+                val lastExecution = session.toolExecutions.lastOrNull()
+                val lastActionFailed = lastExecution != null && !lastExecution.isSuccess
+                val hasPendingAction = taskPlanner.hasPendingActionSubtasks(currentPlan) ||
+                    workspaceContext.hasUnverifiedModifications() ||
+                    lastActionFailed
                 val canNudge = hasPendingAction &&
                     consecutiveNudges < MAX_CONSECUTIVE_NUDGES &&
                     totalNudges < MAX_TOTAL_NUDGES &&
@@ -589,7 +593,13 @@ class AgentExecutionService : Service() {
 
                     val nudgeContent = buildString {
                         appendLine("[EXECUTION CONTROL: Command or tool execution required]")
-                        appendLine("You provided commentary or described next steps, but did not execute a command in your Ubuntu terminal.")
+                        if (lastActionFailed) {
+                            appendLine("CRITICAL: Your previous command or script failed with an error:")
+                            appendLine(lastExecution?.error?.take(300) ?: "Unknown failure")
+                            appendLine("You cannot complete the task with an active error or syntax failure. You MUST fix the error in the affected file and re-run your verification command before concluding.")
+                        } else {
+                            appendLine("You provided commentary or described next steps, but did not execute a command in your Ubuntu terminal.")
+                        }
                         appendLine("Unfinished action subtask: \"${activeSubtask?.description}\".")
                         if (workspaceContext.hasUnverifiedModifications()) {
                             val unverified = workspaceContext.modifiedFiles.filter { it.value.verificationStatus == VerificationStatus.NEEDS_VERIFICATION }.keys
@@ -630,7 +640,9 @@ class AgentExecutionService : Service() {
                     // Model delivered final response
                     loopActive = false
 
-                    val hasUnfinishedActions = taskPlanner.hasPendingActionSubtasks(currentPlan) || workspaceContext.hasUnverifiedModifications()
+                    val hasUnfinishedActions = taskPlanner.hasPendingActionSubtasks(currentPlan) ||
+                        workspaceContext.hasUnverifiedModifications() ||
+                        lastActionFailed
                     if (!hasUnfinishedActions && activeSubtask != null && activeSubtask.status != SubtaskStatus.FAILED) {
                         currentPlan = taskPlanner.verifyAndCompleteSubtask(
                             plan = currentPlan,

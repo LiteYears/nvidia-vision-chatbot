@@ -55,6 +55,11 @@ class AgentWorkspaceManager(
     }
 
     /**
+     * Alias for getWorkspaceDir to retrieve the workspace root directory.
+     */
+    fun getWorkspaceRoot(sessionId: String = activeSessionId): File = getWorkspaceDir(sessionId)
+
+    /**
      * Ensures all standard development directories and initial project files exist.
      */
     private val sessionWorkingDirs = java.util.concurrent.ConcurrentHashMap<String, File>()
@@ -148,10 +153,6 @@ node_modules/
         var trimmed = relativePath.trim().trim('\'', '"')
         val workspaceRoot = getWorkspaceDir(sessionId)
         val rootPath = workspaceRoot.canonicalPath
-        val rootfsDir = com.example.agent.proot.ProotRootfsManager.getInstance().ensureRootfs(workspaceRoot)
-        val rootfsPath = rootfsDir.canonicalPath
-        val legacyRootfs = File(workspaceRoot, ".rootfs")
-
         // 1. Direct workspace root aliases
         if (trimmed.isEmpty() || trimmed == "." || trimmed == "./" || trimmed == "/" || trimmed == "~" || trimmed == "/workspace") {
             return workspaceRoot
@@ -168,42 +169,37 @@ node_modules/
             return workspaceRoot
         }
 
-        val isSystemPath = trimmed.startsWith("/etc/") || trimmed.startsWith("/proc/") ||
-            trimmed.startsWith("/var/") || trimmed.startsWith("/tmp/") || trimmed.startsWith("/dev/") ||
-            trimmed.startsWith("/root") || trimmed.startsWith("/home/ubuntu") ||
-            trimmed.startsWith("/usr/") || trimmed.startsWith("/bin/") || trimmed.startsWith("/sbin/") || trimmed.startsWith("/lib/")
+        val isBlockedSystemPath = trimmed.startsWith("/etc/") || trimmed == "/etc" ||
+            trimmed.startsWith("/proc/") || trimmed == "/proc" ||
+            trimmed.startsWith("/sys/") || trimmed == "/sys" ||
+            trimmed.startsWith("/dev/") || trimmed == "/dev" ||
+            trimmed.startsWith("/var/") || trimmed == "/var" ||
+            trimmed.startsWith("/root/") || trimmed == "/root" ||
+            trimmed.startsWith("/sbin/") || trimmed == "/sbin" ||
+            trimmed.startsWith("../") || trimmed == ".." || trimmed.contains("/../") || trimmed.contains("\\..\\")
 
-        val target: File = if (isSystemPath) {
-            // Persistent Ubuntu 22.04 LTS rootfs system directories
-            val sub = trimmed.trimStart('/')
-            File(rootfsDir, sub).canonicalFile
-        } else {
-            val candidate = File(trimmed)
-            if (candidate.isAbsolute) {
-                // If it is already an absolute path inside workspaceRoot or rootfs, accept it directly
-                val candCanonical = candidate.canonicalPath
-                if (candCanonical == rootPath || candCanonical.startsWith(rootPath + File.separator)) {
-                    candidate.canonicalFile
-                } else if (candCanonical == rootfsPath || candCanonical.startsWith(rootfsPath + File.separator)) {
-                    candidate.canonicalFile
-                } else {
-                    // Path had a leading slash intended inside workspace, e.g. "/src/prayer_times.py"
-                    val sub = trimmed.trimStart('/')
-                    File(workspaceRoot, sub).canonicalFile
-                }
+        if (isBlockedSystemPath) {
+            throw SecurityException("Access denied: Path '$relativePath' attempts to access system files or escape the workspace.")
+        }
+
+        val candidate = File(trimmed)
+        val target: File = if (candidate.isAbsolute) {
+            val candCanonical = candidate.canonicalPath
+            if (candCanonical == rootPath || candCanonical.startsWith(rootPath + File.separator)) {
+                candidate.canonicalFile
             } else {
-                File(workspaceRoot, trimmed).canonicalFile
+                // Path had a leading slash intended inside workspace, e.g. "/src/prayer_times.py"
+                val sub = trimmed.trimStart('/')
+                File(workspaceRoot, sub).canonicalFile
             }
+        } else {
+            File(workspaceRoot, trimmed).canonicalFile
         }
 
         val targetPath = target.canonicalPath
 
-        // Strict boundary check: target must be inside rootPath or rootfsPath
-        val isInside = targetPath == rootPath ||
-            targetPath.startsWith(rootPath + File.separator) ||
-            targetPath == rootfsPath ||
-            targetPath.startsWith(rootfsPath + File.separator) ||
-            (legacyRootfs.exists() && (targetPath == legacyRootfs.canonicalPath || targetPath.startsWith(legacyRootfs.canonicalPath + File.separator)))
+        // Strict boundary check: target must be inside rootPath
+        val isInside = targetPath == rootPath || targetPath.startsWith(rootPath + File.separator)
 
         if (!isInside) {
             throw SecurityException("Access denied: Path '$relativePath' attempts to escape the agent workspace.")

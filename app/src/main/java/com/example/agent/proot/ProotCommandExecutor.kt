@@ -80,6 +80,12 @@ class ProotCommandExecutor(
     private data class CompoundStep(val command: String, val operator: String)
 
     private fun splitCompound(raw: String): List<CompoundStep> {
+        val trimmed = raw.trim()
+        if ((trimmed.startsWith("for ") || trimmed.startsWith("while ") || trimmed.startsWith("if ")) &&
+            (trimmed.endsWith("; done") || trimmed.endsWith(" done") || trimmed.endsWith("; fi") || trimmed.endsWith(" fi") || trimmed.endsWith("\ndone") || trimmed.endsWith("\nfi"))) {
+            return listOf(CompoundStep(trimmed, ""))
+        }
+
         val steps = mutableListOf<CompoundStep>()
         val current = StringBuilder()
         var inSingle = false
@@ -411,8 +417,9 @@ class ProotCommandExecutor(
             rawBodyLines.joinToString("\n")
         } else {
             // Single-line or inline heredoc fallback
-            val afterDelim = firstLine.substringAfter(delim).trim()
-            var rawInline = afterDelim.substringBeforeLast(delim).trim()
+            val delimToken = delimMatch?.value ?: delim
+            val afterDelim = firstLine.substringAfter(delimToken).trim()
+            var rawInline = if (afterDelim.contains(delim)) afterDelim.substringBeforeLast(delim).trim() else afterDelim
             if (rawInline.startsWith(">") || rawInline.startsWith(">>")) {
                 rawInline = rawInline.replaceFirst(Regex("""^>{1,2}\s*(?:"[^"]+"|\'[^\']+\'|\S+)\s*"""), "").trim()
             }
@@ -1093,7 +1100,7 @@ class ProotCommandExecutor(
                 return handleUnzip(args, workingDir, workspaceRoot)
             }
             "git" -> {
-                return handleGit(args, workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
+                return handleGit(args, workingDir, workspaceRoot, timeoutMs, maxOutputBytes, stdin)
             }
             "make" -> {
                 return handleMake(args, workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
@@ -2221,7 +2228,8 @@ class ProotCommandExecutor(
         workingDir: File,
         workspaceRoot: File,
         timeoutMs: Long,
-        maxOutputBytes: Int
+        maxOutputBytes: Int,
+        stdin: String = ""
     ): CommandExecutionResult {
         val hostGit = listOf(
             "/data/data/com.termux/files/usr/bin/git",
@@ -2854,15 +2862,18 @@ class ProotCommandExecutor(
 
         return try {
             val process = processBuilder.start()
-            val stdout = process.inputStream.bufferedReader().use { it.readText().take(maxOutputBytes) }
-            val stderr = process.errorStream.bufferedReader().use { it.readText().take(maxOutputBytes) }
+            val rawStdout = process.inputStream.bufferedReader().use { it.readText() }
+            val rawStderr = process.errorStream.bufferedReader().use { it.readText() }
+            val isTruncated = rawStdout.length > maxOutputBytes || rawStderr.length > maxOutputBytes
+            val stdout = rawStdout.take(maxOutputBytes)
+            val stderr = rawStderr.take(maxOutputBytes)
             val finished = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
             if (!finished) {
                 process.destroyForcibly()
-                return CommandExecutionResult(-1, stdout, "Process timed out after ${timeoutMs}ms", System.currentTimeMillis() - startTime, isTimedOut = true)
+                return CommandExecutionResult(-1, stdout, "Process timed out after ${timeoutMs}ms", System.currentTimeMillis() - startTime, isTimedOut = true, isTruncated = isTruncated)
             }
             val exitCode = try { process.exitValue() } catch (_: Exception) { 127 }
-            CommandExecutionResult(exitCode, stdout, stderr, System.currentTimeMillis() - startTime)
+            CommandExecutionResult(exitCode, stdout, stderr, System.currentTimeMillis() - startTime, isTimedOut = false, isTruncated = isTruncated)
         } catch (e: Exception) {
             val execName = command.trim().split(Regex("\\s+")).firstOrNull() ?: command
             if (execName == "neofetch") {

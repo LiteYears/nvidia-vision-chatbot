@@ -185,6 +185,9 @@ class RuntimeCapabilityDetector(
             normalized in setOf("java", "javac", "jar", "gradle", "mvn") -> {
                 "Java development kit command line tools are unavailable in this Android environment."
             }
+            normalized in setOf("docker", "dockerd", "podman", "containerd") -> {
+                "Docker and container daemons cannot run inside Android userspace or PRoot environments (Android kernel cgroups and root namespaces are restricted). Run services and test scripts directly via 'python3 script.py' or 'python_execute' instead of Docker."
+            }
             normalized in setOf("curl", "wget") -> {
                 "For entering websites, downloading web pages, or fetching news, use the dedicated 'web_open' tool with parameter 'url'. For web search, use 'web_search'."
             }
@@ -283,8 +286,8 @@ class RuntimeCapabilityDetector(
                 File(rootfsDir, "sbin"),
                 File("/data/data/com.termux/files/usr/bin")
             )
-            val wsRoot = try { com.example.agent.tools.workspace.AgentWorkspaceManager.getInstance().getWorkspaceRoot() } catch (_: Exception) { null }
-            val wsDirs = if (wsRoot != null) {
+            val wsRoot: File? = try { com.example.agent.tools.workspace.AgentWorkspaceManager.getInstance().getWorkspaceRoot() } catch (_: Exception) { null }
+            val wsDirs: List<File> = if (wsRoot != null) {
                 listOf(
                     File(wsRoot, "bin"),
                     File(wsRoot, "venv/bin"),
@@ -293,7 +296,8 @@ class RuntimeCapabilityDetector(
                 )
             } else emptyList()
             val pathEnv = System.getenv("PATH") ?: "/system/bin:/system/xbin:/bin:/usr/bin:/usr/local/bin"
-            val envDirs = pathEnv.split(':')
+            val envDirs: List<File> = pathEnv.split(':')
+                .filter { it.isNotBlank() }
                 .map { File(it.trim()) }
             return (wsDirs + rootfsDirs + envDirs).distinct().filter { it.isDirectory }
         }

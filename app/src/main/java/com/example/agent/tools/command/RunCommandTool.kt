@@ -116,10 +116,6 @@ class RunCommandTool(
         }
 
         if (!resolvedWorkingDir.exists() || !resolvedWorkingDir.isDirectory) {
-            resolvedWorkingDir.mkdirs()
-        }
-
-        if (!resolvedWorkingDir.exists() || !resolvedWorkingDir.isDirectory) {
             return ToolResult.failure(
                 callId = callId,
                 toolName = definition.name,
@@ -181,19 +177,15 @@ class RunCommandTool(
             sanitizedCommand.contains("||") ||
             (sanitizedCommand.contains(";") && !sanitizedCommand.contains("<<"))
 
-        val cleanExec = if (isMultiCommand) {
-            "bash"
+        val singleLine = nonCommentLines.firstOrNull() ?: sanitizedCommand.trim()
+        val tokens = singleLine.split(Regex("\\s+|&&|\\|\\||;")).map { it.trim('\'', '"') }.filter { it.isNotBlank() }
+        val effectiveExecutable = if (tokens.firstOrNull() == "sudo" && tokens.size > 1) {
+            tokens[1]
         } else {
-            val singleLine = nonCommentLines.firstOrNull() ?: sanitizedCommand.trim()
-            val tokens = singleLine.split(Regex("\\s+")).map { it.trim('\'', '"') }.filter { it.isNotBlank() }
-            val effectiveExecutable = if (tokens.firstOrNull() == "sudo" && tokens.size > 1) {
-                tokens[1]
-            } else {
-                tokens.firstOrNull() ?: ""
-            }
-            val rawExec = if (effectiveExecutable.contains('/')) File(effectiveExecutable).name else effectiveExecutable
-            if (rawExec.isBlank() || rawExec == "#" || rawExec.contains('@') || rawExec.endsWith('$')) "bash" else rawExec
+            tokens.firstOrNull() ?: ""
         }
+        val rawExec = if (effectiveExecutable.contains('/')) File(effectiveExecutable).name else effectiveExecutable
+        val cleanExec = if (rawExec.isBlank() || rawExec == "#" || rawExec.contains('@') || rawExec.endsWith('$')) "bash" else rawExec
 
         // 5. Execute via modular CommandRunner
         val execResult = commandRunner.run(
@@ -236,26 +228,15 @@ class RunCommandTool(
             )
 
             if (isUnavailable) {
-                val aptPkg = com.example.agent.proot.ProotAptManager.findPackageProviding(cleanExec)
-                if (aptPkg != null) {
-                    val errorMsg = buildString {
-                        appendLine("bash: $cleanExec: command not found")
-                        appendLine("Command '$cleanExec' can be installed in Ubuntu userspace with:")
-                        appendLine("  apt update && apt install -y ${aptPkg.name}")
-                    }
-                    return ToolResult.failure(callId = callId, toolName = definition.name, error = errorMsg.trim())
+                val missingFromStderr = Regex("""(?:bash:\s*|/system/bin/sh:\s*)?([a-zA-Z0-9_.-]+):\s*(?:inaccessible or not found|command not found|not found)""", RegexOption.IGNORE_CASE)
+                    .find(execResult.stderr)?.groupValues?.get(1)?.trim()
+                val missingExecutable = if (!missingFromStderr.isNullOrBlank() && missingFromStderr != "sh") {
+                    missingFromStderr
+                } else {
+                    cleanExec
                 }
-
-                val errorMsg = buildString {
-                    appendLine("bash: $cleanExec: command not found")
-                    appendLine("Command: $rawCommand")
-                    appendLine("Working Directory: $relativeDir")
-                    if (execResult.stderr.isNotBlank() && !execResult.stderr.contains("inaccessible or not found", ignoreCase = true)) {
-                        appendLine("\n[stderr]")
-                        append(execResult.stderr)
-                    }
-                }
-                return ToolResult.failure(callId = callId, toolName = definition.name, error = errorMsg.trim())
+                val errorMsg = capabilityDetector.buildCapabilityUnavailableError(missingExecutable, rawCommand, execResult.stderr)
+                return ToolResult.failure(callId = callId, toolName = definition.name, error = errorMsg)
             }
 
             val errorMsg = buildString {
@@ -405,6 +386,14 @@ class RunCommandTool(
 
         val tokens = nonComment.split(Regex("\\s+")).filter { it.isNotBlank() }
         val firstToken = tokens.firstOrNull()?.lowercase()?.trim('\'', '"', '`', ':', '.') ?: ""
+
+        // Allow bash control statements and loops
+        if (firstToken == "for" && (nonComment.contains(" in ") || nonComment.contains("; do") || nonComment.contains(";do") || nonComment.contains("(("))) {
+            return false
+        }
+        if (firstToken == "while" || firstToken == "if" || firstToken == "until" || firstToken == "case") {
+            return false
+        }
 
         val rawCodeKeywords = setOf("def", "class", "return", "import", "from", "function", "const", "let", "var", "public", "private")
         if (firstToken in rawCodeKeywords) {
