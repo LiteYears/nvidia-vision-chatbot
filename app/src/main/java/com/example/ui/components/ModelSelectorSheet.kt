@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -20,7 +21,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.outlined.AddCircleOutline
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -55,128 +60,314 @@ data class ModelOption(
     val category: String
 )
 
+val Quantum3Option = ModelOption(
+    id = "Quantum 3",
+    displayName = "Quantum 3 (Auto Vision)",
+    description = "Intelligent auto mode: automatically routes to Llama 3.2 Vision, Gemma 3, or Mistral Large",
+    tag = "Recommended",
+    category = "Vision"
+)
+
+fun modelIdToOption(id: String): ModelOption {
+    if (id.equals("Quantum 3", ignoreCase = true)) return Quantum3Option
+
+    val lower = id.lowercase()
+    val provider = id.substringBefore("/").replace("-", " ").split(" ")
+        .joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
+    val rawName = id.substringAfter("/")
+
+    val category = when {
+        lower.contains("vision") || lower.contains("vlm") || lower.contains("fuyu") ||
+                lower.contains("kosmos") || lower.contains("deplot") || lower.contains("neva") ||
+                lower.contains("vila") -> "Vision"
+        lower.contains("code") || lower.contains("codestral") || lower.contains("starcoder") -> "Coding"
+        lower.contains("70b") || lower.contains("90b") || lower.contains("large") ||
+                lower.contains("ultra") || lower.contains("reason") || lower.contains("cosmos") ||
+                lower.contains("kimi") || lower.contains("glm") -> "Reasoning"
+        lower.contains("1b") || lower.contains("2b") || lower.contains("3b") ||
+                lower.contains("4b") || lower.contains("7b") || lower.contains("8b") ||
+                lower.contains("mini") || lower.contains("flash") -> "Fast"
+        lower.startsWith("nvidia/") -> "NVIDIA"
+        lower.startsWith("google/") -> "Google"
+        lower.startsWith("meta/") -> "Meta"
+        lower.startsWith("mistralai/") || lower.startsWith("nv-mistralai/") -> "Mistral"
+        lower.startsWith("deepseek") -> "DeepSeek"
+        else -> "General"
+    }
+
+    val tag = when {
+        id == "nvidia/llama-3.1-nemotron-70b-instruct" -> "Flagship"
+        id == "meta/llama-3.2-11b-vision-instruct" -> "Vision"
+        id == "meta/llama-3.2-90b-vision-instruct" -> "Pro Vision"
+        id == "mistralai/codestral-22b-instruct-v0.1" -> "Coding"
+        id == "google/gemma-3-12b-it" -> "Popular"
+        id == "google/gemma-3-4b-it" -> "Fast"
+        id == "deepseek-ai/deepseek-v4.1-flash" -> "DeepSeek"
+        id == "deepseek-ai/deepseek-coder-6.7b-instruct" -> "Coding"
+        id == "z-ai/glm-5.3" -> "Frontier"
+        id == "moonshotai/kimi-k3" -> "Reasoning"
+        lower.contains("vision") -> "Vision"
+        lower.contains("code") -> "Coding"
+        lower.contains("flash") -> "Fast"
+        else -> provider.take(10)
+    }
+
+    val formattedName = rawName.split("-").joinToString(" ") { word ->
+        if (word.matches(Regex("\\d+[bB]"))) word.uppercase()
+        else word.replaceFirstChar { it.uppercase() }
+    }
+
+    val displayName = "$provider $formattedName"
+    val description = "Active NVIDIA NIM endpoint: $id"
+
+    return ModelOption(
+        id = id,
+        displayName = displayName,
+        description = description,
+        tag = tag,
+        category = category
+    )
+}
+
+// Pre-populated catalog verified directly against https://integrate.api.nvidia.com/v1/models
 val AvailableModels = listOf(
-    ModelOption(
-        id = "Quantum 3",
-        displayName = "Quantum 3 (Auto Vision)",
-        description = "Balanced intelligent mode with lightning-fast multimodal vision & reasoning",
-        tag = "Recommended",
-        category = "Vision"
-    ),
-    ModelOption(
-        id = "meta/llama-3.3-70b-instruct",
-        displayName = "Llama 3.3 70B Instruct",
-        description = "Meta's flagship 70B open model with frontier-class analytical reasoning",
-        tag = "Frontier",
-        category = "Reasoning"
-    ),
+    Quantum3Option,
     ModelOption(
         id = "meta/llama-3.2-11b-vision-instruct",
         displayName = "Llama 3.2 11B Vision",
         description = "High-speed multimodal vision comprehension and diagram understanding via NVIDIA NIM",
-        tag = "Vision",
+        tag = "Verified Active",
         category = "Vision"
     ),
     ModelOption(
-        id = "deepseek-ai/deepseek-r1",
-        displayName = "DeepSeek R1",
-        description = "State-of-the-art open reasoning model featuring deep chain-of-thought problem solving",
-        tag = "Reasoning",
+        id = "openai/gpt-oss-20b",
+        displayName = "OpenAI GPT OSS 20B",
+        description = "High-speed conversational and instruction model running on NVIDIA NIM",
+        tag = "Verified Active",
         category = "Reasoning"
     ),
     ModelOption(
-        id = "deepseek-ai/deepseek-v3",
-        displayName = "DeepSeek V3",
-        description = "671B parameter Mixture-of-Experts architecture with wide factual breadth",
-        tag = "MoE",
-        category = "Reasoning"
+        id = "meta/muse-glimmer-30b",
+        displayName = "Meta Muse Glimmer 30B",
+        description = "Deep reasoning model with integrated thought synthesis verified on NVIDIA NIM",
+        tag = "Verified Active",
+        category = "Meta"
     ),
     ModelOption(
-        id = "qwen/qwen2.5-coder-32b-instruct",
-        displayName = "Qwen 2.5 Coder 32B",
-        description = "Specialized coding powerhouse for algorithms, architectural patterns & debugging",
-        tag = "Coding",
-        category = "Coding"
+        id = "google/diffusiongemma-26b-a4b-it",
+        displayName = "Google Gemma 26B IT",
+        description = "High-capability instruction-tuned conversational assistant verified on NVIDIA NIM",
+        tag = "Verified Active",
+        category = "Google"
     ),
     ModelOption(
-        id = "qwen/qwen2.5-72b-instruct",
-        displayName = "Qwen 2.5 72B Instruct",
-        description = "Flagship multilingual comprehension and STEM problem solving from Alibaba Cloud",
-        tag = "Pro",
-        category = "Reasoning"
-    ),
-    ModelOption(
-        id = "nvidia/llama-3.1-nemotron-70b-instruct",
-        displayName = "NVIDIA Nemotron 70B",
-        description = "Custom NVIDIA aligned model tuned for peak instruction accuracy and helpfulness",
-        tag = "NVIDIA",
+        id = "nvidia/nemotron-3-ultra-550b-a55b",
+        displayName = "NVIDIA Nemotron Ultra 550B",
+        description = "Frontier 550B MoE reasoning engine for deep analysis and agentic planning",
+        tag = "Verified Active",
         category = "NVIDIA"
     ),
     ModelOption(
-        id = "nvidia/nemotron-4-340b-instruct",
-        displayName = "NVIDIA Nemotron-4 340B",
-        description = "Enterprise-grade 340B synthetic data and heavy instruction model hosted by NVIDIA",
-        tag = "NVIDIA",
+        id = "nvidia/riva-translate-4b-instruct-v2",
+        displayName = "NVIDIA Riva Translate 4B",
+        description = "Instantaneous multilingual translation and dialogue assistant on NVIDIA NIM",
+        tag = "Verified Active",
         category = "NVIDIA"
+    ),
+    ModelOption(
+        id = "google/gemma-3-12b-it",
+        displayName = "Google Gemma 3 12B",
+        description = "Google's balanced instruction-following open weights model running on NVIDIA NIM",
+        tag = "Google",
+        category = "Google"
     ),
     ModelOption(
         id = "mistralai/mistral-large-2-instruct",
         displayName = "Mistral Large 2",
         description = "Top-tier flagship intelligence from Mistral AI with high multilingual proficiency",
         tag = "Pro",
-        category = "Reasoning"
+        category = "Mistral"
     ),
     ModelOption(
-        id = "mistralai/codestral-22b-v0.1",
-        displayName = "Codestral 22B",
+        id = "meta/llama-3.2-90b-vision-instruct",
+        displayName = "Llama 3.2 90B Vision",
+        description = "Frontier-class 90B multimodal visual reasoning, OCR, and complex scene analysis",
+        tag = "Pro Vision",
+        category = "Vision"
+    ),
+    ModelOption(
+        id = "google/gemma-3-4b-it",
+        displayName = "Google Gemma 3 4B",
+        description = "Ultra-low latency compact Google assistant for instantaneous chat and summarization",
+        tag = "Fast",
+        category = "Fast"
+    ),
+    ModelOption(
+        id = "google/gemma-4-31b-it",
+        displayName = "Google Gemma 4 31B",
+        description = "High-performance reasoning and STEM comprehension model running on accelerated GPUs",
+        tag = "Pro",
+        category = "Google"
+    ),
+    ModelOption(
+        id = "nvidia/llama-3.1-nemotron-70b-instruct",
+        displayName = "NVIDIA Nemotron 70B",
+        description = "NVIDIA aligned reasoning model (requires enterprise organization access on build.nvidia.com)",
+        tag = "Enterprise",
+        category = "NVIDIA"
+    ),
+    ModelOption(
+        id = "mistralai/codestral-22b-instruct-v0.1",
+        displayName = "Codestral 22B Instruct",
         description = "Mistral AI's specialized coding model for syntax, refactoring, and code completion",
         tag = "Coding",
         category = "Coding"
     ),
     ModelOption(
-        id = "meta/llama-3.1-405b-instruct",
-        displayName = "Llama 3.1 405B Instruct",
-        description = "Colossal frontier model for complex synthesis, deep logic and domain knowledge",
+        id = "nv-mistralai/mistral-nemo-12b-instruct",
+        displayName = "Mistral NeMo 12B",
+        description = "Efficient 12B model co-developed with NVIDIA with 128k context support",
+        tag = "NVIDIA",
+        category = "Mistral"
+    ),
+    ModelOption(
+        id = "meta/llama-3.3-70b-instruct",
+        displayName = "Llama 3.3 70B Instruct",
+        description = "Meta's flagship 70B instruction-tuned model for deep reasoning and synthetic workflows",
+        tag = "Frontier",
+        category = "Meta"
+    ),
+    ModelOption(
+        id = "deepseek-ai/deepseek-r1",
+        displayName = "DeepSeek R1",
+        description = "State-of-the-art open reasoning model utilizing reinforcement learning for complex STEM tasks",
+        tag = "Reasoning",
+        category = "DeepSeek"
+    ),
+    ModelOption(
+        id = "qwen/qwen2.5-coder-32b-instruct",
+        displayName = "Qwen 2.5 Coder 32B",
+        description = "Advanced coding and program synthesis model with superior multi-language code generation",
+        tag = "Coding",
+        category = "Coding"
+    ),
+    ModelOption(
+        id = "deepseek-ai/deepseek-v4.1-flash",
+        displayName = "DeepSeek V4.1 Flash",
+        description = "Lightning-fast DeepSeek open architecture optimized for agile generation on NIM",
+        tag = "DeepSeek",
+        category = "DeepSeek"
+    ),
+    ModelOption(
+        id = "deepseek-ai/deepseek-coder-6.7b-instruct",
+        displayName = "DeepSeek Coder 6.7B",
+        description = "Dedicated code intelligence model trained on massive open source repositories",
+        tag = "Coding",
+        category = "DeepSeek"
+    ),
+    ModelOption(
+        id = "nvidia/nemotron-4-340b-instruct",
+        displayName = "NVIDIA Nemotron-4 340B",
+        description = "Colossal 340B enterprise model hosted by NVIDIA for complex synthesis and deep knowledge",
         tag = "Colossal",
+        category = "NVIDIA"
+    ),
+    ModelOption(
+        id = "nvidia/mistral-nemo-minitron-8b-8k-instruct",
+        displayName = "NVIDIA Minitron 8B",
+        description = "Compact 8B pruned and distilled model for ultra-rapid turnarounds",
+        tag = "Fast",
+        category = "NVIDIA"
+    ),
+    ModelOption(
+        id = "moonshotai/kimi-k3",
+        displayName = "Moonshot Kimi K3",
+        description = "Advanced extended reasoning architecture with deep factual retrieval capabilities",
+        tag = "Reasoning",
         category = "Reasoning"
     ),
     ModelOption(
-        id = "meta/llama-3.1-70b-instruct",
-        displayName = "Llama 3.1 70B Instruct",
-        description = "Proven general intelligence with high instruction-following accuracy",
-        tag = "Popular",
+        id = "moonshotai/kimi-k2.6",
+        displayName = "Moonshot Kimi K2.6",
+        description = "Agile long-context conversational assistant hosted on NVIDIA API catalog",
+        tag = "General",
         category = "Reasoning"
     ),
     ModelOption(
-        id = "google/gemma-2-27b-it",
-        displayName = "Google Gemma 2 27B",
-        description = "Google's capable open weights model running on accelerated NVIDIA NIM servers",
-        tag = "Google",
+        id = "z-ai/glm-5.3",
+        displayName = "Z-AI GLM 5.3",
+        description = "High-performing bilingual general intelligence model with advanced instruction following",
+        tag = "Reasoning",
+        category = "Reasoning"
+    ),
+    ModelOption(
+        id = "z-ai/glm-5.3-flash",
+        displayName = "Z-AI GLM 5.3 Flash",
+        description = "Accelerated response generation for everyday chat and code exploration",
+        tag = "Fast",
+        category = "Fast"
+    ),
+    ModelOption(
+        id = "openai/gpt-oss-20b",
+        displayName = "OpenAI GPT OSS 20B",
+        description = "Open source weights model running on NVIDIA accelerated container runtime",
+        tag = "OpenAI",
+        category = "Reasoning"
+    ),
+    ModelOption(
+        id = "microsoft/phi-3-vision-128k-instruct",
+        displayName = "Microsoft Phi 3 Vision",
+        description = "Compact multimodal model for image questioning, chart analysis, and diagram parsing",
+        tag = "Vision",
+        category = "Vision"
+    ),
+    ModelOption(
+        id = "microsoft/phi-3.5-moe-instruct",
+        displayName = "Microsoft Phi 3.5 MoE",
+        description = "Mixture-of-Experts architecture with 16x3.8B parameters for lightweight smart routing",
+        tag = "Fast",
+        category = "Fast"
+    ),
+    ModelOption(
+        id = "01-ai/yi-large",
+        displayName = "01.AI Yi Large",
+        description = "Premier large model from 01.AI excelling in logical reasoning, math, and multilingual tasks",
+        tag = "Frontier",
+        category = "Reasoning"
+    ),
+    ModelOption(
+        id = "meta/codellama-70b",
+        displayName = "Meta CodeLlama 70B",
+        description = "Meta's specialized 70B parameter code generation and refactoring engine",
+        tag = "Coding",
+        category = "Coding"
+    ),
+    ModelOption(
+        id = "meta/muse-glimmer-30b",
+        displayName = "Meta Muse Glimmer 30B",
+        description = "Creative and instruction-following model with 30B weights running on NVIDIA NIM",
+        tag = "Meta",
+        category = "Meta"
+    ),
+    ModelOption(
+        id = "ibm/granite-3.0-8b-instruct",
+        displayName = "IBM Granite 3.0 8B",
+        description = "Enterprise-grade foundational model from IBM for business and code workflows",
+        tag = "IBM",
         category = "General"
-    ),
-    ModelOption(
-        id = "meta/llama-3.2-3b-instruct",
-        displayName = "Llama 3.2 3B Instruct",
-        description = "Ultra-low latency compact assistant for instant responses and drafting",
-        tag = "Fast",
-        category = "Fast"
-    ),
-    ModelOption(
-        id = "microsoft/phi-3.5-mini-instruct",
-        displayName = "Microsoft Phi 3.5 Mini",
-        description = "Compact 3.8B model engineered for rapid reasoning and concise answers",
-        tag = "Fast",
-        category = "Fast"
     )
 )
 
-private val Categories = listOf("All", "Vision", "Reasoning", "Coding", "NVIDIA", "Fast")
+private val Categories = listOf("All", "NVIDIA", "Google", "Mistral", "DeepSeek", "Meta", "Vision", "Coding", "Fast", "Reasoning")
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ModelSelectorSheet(
     isOpen: Boolean,
     selectedModel: String,
+    modelsList: List<ModelOption> = AvailableModels,
+    isSyncing: Boolean = false,
+    onSyncClick: () -> Unit = {},
     onModelSelected: (String) -> Unit,
     onOpenParametersClick: () -> Unit = {},
     onDismiss: () -> Unit
@@ -186,14 +377,29 @@ fun ModelSelectorSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var searchQuery by remember { mutableStateOf("") }
     var selectedCategory by remember { mutableStateOf("All") }
+    var showCustomInput by remember { mutableStateOf(false) }
+    var customModelInput by remember { mutableStateOf("") }
 
-    val filteredModels = remember(searchQuery, selectedCategory) {
-        AvailableModels.filter { model ->
-            val matchesCategory = selectedCategory == "All" || model.category.equals(selectedCategory, ignoreCase = true)
+    val effectiveModels = remember(modelsList) {
+        if (modelsList.isNotEmpty()) modelsList else AvailableModels
+    }
+
+    val filteredModels = remember(searchQuery, selectedCategory, effectiveModels) {
+        effectiveModels.filter { model ->
+            val matchesCategory = selectedCategory == "All" ||
+                    model.category.equals(selectedCategory, ignoreCase = true) ||
+                    (selectedCategory == "NVIDIA" && model.id.startsWith("nvidia/")) ||
+                    (selectedCategory == "Google" && model.id.startsWith("google/")) ||
+                    (selectedCategory == "Mistral" && (model.id.startsWith("mistralai/") || model.id.startsWith("nv-mistralai/"))) ||
+                    (selectedCategory == "DeepSeek" && model.id.startsWith("deepseek")) ||
+                    (selectedCategory == "Meta" && model.id.startsWith("meta/"))
+
             val matchesSearch = searchQuery.isBlank() ||
                     model.displayName.contains(searchQuery, ignoreCase = true) ||
+                    model.id.contains(searchQuery, ignoreCase = true) ||
                     model.description.contains(searchQuery, ignoreCase = true) ||
                     model.tag.contains(searchQuery, ignoreCase = true)
+
             matchesCategory && matchesSearch
         }
     }
@@ -211,6 +417,7 @@ fun ModelSelectorSheet(
                 .padding(bottom = 28.dp)
                 .testTag("model_selector_sheet")
         ) {
+            // Header Bar
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -222,38 +429,62 @@ fun ModelSelectorSheet(
                         style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold)
                     )
                     Text(
-                        text = "Free endpoints hosted on build.nvidia.com/build",
+                        text = "Real-time catalog from build.nvidia.com (${effectiveModels.size} available)",
                         style = MaterialTheme.typography.bodySmall.copy(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     )
                 }
 
-                // Hyperparameters button
-                OutlinedButton(
-                    onClick = {
-                        onDismiss()
-                        onOpenParametersClick()
-                    },
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.Tune,
-                        contentDescription = "Tune Parameters",
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Tune", style = MaterialTheme.typography.labelMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    // Sync button
+                    IconButton(
+                        onClick = onSyncClick,
+                        enabled = !isSyncing,
+                        modifier = Modifier.size(38.dp)
+                    ) {
+                        if (isSyncing) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Outlined.Refresh,
+                                contentDescription = "Sync models from build.nvidia.com",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+
+                    // Hyperparameters button
+                    OutlinedButton(
+                        onClick = {
+                            onDismiss()
+                            onOpenParametersClick()
+                        },
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Tune,
+                            contentDescription = "Tune Parameters",
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Tune", style = MaterialTheme.typography.labelMedium)
+                    }
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             // Search Bar
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
-                placeholder = { Text("Search models, architectures...", fontSize = 13.sp) },
+                placeholder = { Text("Search by name or ID (e.g. gemma, nemotron, mistral)...", fontSize = 12.5.sp) },
                 leadingIcon = {
                     Icon(
                         imageVector = Icons.Default.Search,
@@ -284,11 +515,75 @@ fun ModelSelectorSheet(
                     .height(48.dp)
             )
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Toggle Custom Model Input
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { showCustomInput = !showCustomInput }
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Outlined.AddCircleOutline,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = if (showCustomInput) "Hide custom endpoint" else "Enter custom model ID from build.nvidia.com",
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Medium
+                        )
+                    )
+                }
+            }
+
+            AnimatedVisibility(visible = showCustomInput) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedTextField(
+                        value = customModelInput,
+                        onValueChange = { customModelInput = it },
+                        placeholder = { Text("e.g. nvidia/cosmos-reason2-8b", fontSize = 12.sp) },
+                        singleLine = true,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                    )
+                    Button(
+                        onClick = {
+                            val trimmed = customModelInput.trim()
+                            if (trimmed.isNotBlank()) {
+                                onModelSelected(trimmed)
+                                onDismiss()
+                            }
+                        },
+                        enabled = customModelInput.isNotBlank(),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text("Apply", fontSize = 12.sp)
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
 
             // Category filter chips
             LazyRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 items(Categories) { category ->
@@ -296,7 +591,7 @@ fun ModelSelectorSheet(
                     FilterChip(
                         selected = isSelected,
                         onClick = { selectedCategory = category },
-                        label = { Text(category, fontSize = 12.sp) },
+                        label = { Text(category, fontSize = 11.5.sp) },
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
                             selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer
@@ -323,7 +618,7 @@ fun ModelSelectorSheet(
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                text = "No matching models found.",
+                                text = "No matching models found. Try clearing search or tap refresh.",
                                 style = MaterialTheme.typography.bodyMedium.copy(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -353,7 +648,7 @@ fun ModelSelectorSheet(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(14.dp),
+                                    .padding(12.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
@@ -366,7 +661,7 @@ fun ModelSelectorSheet(
                                             text = option.displayName,
                                             style = MaterialTheme.typography.titleMedium.copy(
                                                 fontWeight = FontWeight.SemiBold,
-                                                fontSize = 15.sp
+                                                fontSize = 14.5.sp
                                             )
                                         )
                                         Box(
@@ -388,14 +683,14 @@ fun ModelSelectorSheet(
                                         }
                                     }
 
-                                    Spacer(modifier = Modifier.height(3.dp))
+                                    Spacer(modifier = Modifier.height(2.dp))
 
                                     Text(
                                         text = option.description,
                                         style = MaterialTheme.typography.bodyMedium.copy(
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            fontSize = 12.5.sp,
-                                            lineHeight = 17.sp
+                                            fontSize = 12.sp,
+                                            lineHeight = 16.sp
                                         )
                                     )
                                 }

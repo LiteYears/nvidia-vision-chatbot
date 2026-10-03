@@ -10,9 +10,14 @@ import com.example.data.model.AgentStep
 import com.example.data.model.AgentTaskStatus
 import com.example.data.model.ChatMessage
 import com.example.data.model.MessageRole
+import com.example.data.model.TerminalLine
+import com.example.data.model.TerminalLineType
 import com.example.data.model.ToolExecutionRecord
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 
@@ -39,6 +44,14 @@ object AgentExecutionCoordinator {
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
 
+    // Live terminal events channel for piping agent execution into the Linux Terminal UI
+    private val _terminalEvents = MutableSharedFlow<TerminalLine>(extraBufferCapacity = 500)
+    val terminalEvents: SharedFlow<TerminalLine> = _terminalEvents.asSharedFlow()
+
+    fun postTerminalEvent(line: TerminalLine) {
+        _terminalEvents.tryEmit(line)
+    }
+
     fun setActiveSession(session: AgentSession?) {
         _activeSession.value = session
         if (session != null) {
@@ -57,6 +70,17 @@ object AgentExecutionCoordinator {
         _currentStatus.value = AgentTaskStatus.IN_PROGRESS
         _errorMessage.value = null
         _currentActionDescription.value = "Starting agent execution..."
+
+        postTerminalEvent(
+            TerminalLine(
+                type = TerminalLineType.BANNER,
+                text = "════════════════════════════════════════════════════════\n" +
+                        "▶ [AGENT TASK STARTED] ${userMessage.content.trim().take(70)}\n" +
+                        "  Model: ${session.modelUsed} | Environment: Ubuntu 22.04 LTS\n" +
+                        "════════════════════════════════════════════════════════",
+                isAgent = true
+            )
+        )
 
         val intent = Intent(context, AgentExecutionService::class.java).apply {
             action = AgentExecutionService.ACTION_START_AGENT
@@ -79,6 +103,14 @@ object AgentExecutionCoordinator {
         _errorMessage.value = null
         _currentActionDescription.value = "Processing follow-up command..."
 
+        postTerminalEvent(
+            TerminalLine(
+                type = TerminalLineType.BANNER,
+                text = "▶ [AGENT RESUMING] Follow-up: ${userMessage.content.trim().take(70)}",
+                isAgent = true
+            )
+        )
+
         val intent = Intent(context, AgentExecutionService::class.java).apply {
             action = AgentExecutionService.ACTION_FOLLOW_UP
             putExtra(AgentExecutionService.EXTRA_SESSION_ID, session.id)
@@ -97,6 +129,15 @@ object AgentExecutionCoordinator {
         _isRunning.value = false
         _currentStatus.value = AgentTaskStatus.PAUSED
         _currentActionDescription.value = "Task paused"
+
+        postTerminalEvent(
+            TerminalLine(
+                type = TerminalLineType.SYSTEM_INFO,
+                text = "⏸ [AGENT PAUSED] Autonomous execution paused by user.",
+                isAgent = true
+            )
+        )
+
         _activeSession.update { current ->
             current?.copy(
                 status = AgentTaskStatus.PAUSED,
@@ -117,6 +158,15 @@ object AgentExecutionCoordinator {
             } else {
                 current
             }
+        }
+        if (actionDescription.isNotBlank()) {
+            postTerminalEvent(
+                TerminalLine(
+                    type = TerminalLineType.AGENT_STEP,
+                    text = "● [AGENT] $actionDescription",
+                    isAgent = true
+                )
+            )
         }
     }
 
@@ -153,6 +203,13 @@ object AgentExecutionCoordinator {
                 current
             }
         }
+        postTerminalEvent(
+            TerminalLine(
+                type = TerminalLineType.AGENT_THOUGHT,
+                text = "💬 [AGENT THOUGHT] ${cleanThought.take(160)}...",
+                isAgent = true
+            )
+        )
     }
 
     fun addToolExecution(sessionId: String, record: ToolExecutionRecord) {
@@ -164,6 +221,118 @@ object AgentExecutionCoordinator {
                 )
             } else {
                 current
+            }
+        }
+
+        // Live stream agent tool execution into the Linux terminal buffer
+        when (record.toolName.lowercase()) {
+            "run_command", "bash", "terminal", "sh", "cmd", "exec" -> {
+                val cmd = (record.arguments["command"] ?: record.arguments["cmd"] ?: "").toString()
+                postTerminalEvent(
+                    TerminalLine(
+                        type = TerminalLineType.AGENT_COMMAND,
+                        text = "agent@termux:~$ $cmd",
+                        isAgent = true,
+                        tag = "RUN_COMMAND"
+                    )
+                )
+                if (!record.result.isNullOrBlank()) {
+                    record.result.lines().take(80).forEach { line ->
+                        postTerminalEvent(
+                            TerminalLine(
+                                type = TerminalLineType.AGENT_OUTPUT,
+                                text = line,
+                                isAgent = true
+                            )
+                        )
+                    }
+                }
+                if (!record.error.isNullOrBlank()) {
+                    record.error.lines().take(40).forEach { line ->
+                        postTerminalEvent(
+                            TerminalLine(
+                                type = TerminalLineType.STDERR,
+                                text = line,
+                                isAgent = true
+                            )
+                        )
+                    }
+                }
+            }
+            "python_execute" -> {
+                val code = (record.arguments["code"] ?: "").toString()
+                val preview = code.lines().firstOrNull()?.take(55) ?: "python script"
+                postTerminalEvent(
+                    TerminalLine(
+                        type = TerminalLineType.AGENT_COMMAND,
+                        text = "agent@termux:~$ python3 -c \"$preview...\"",
+                        isAgent = true,
+                        tag = "PYTHON"
+                    )
+                )
+                if (!record.result.isNullOrBlank()) {
+                    record.result.lines().take(80).forEach { line ->
+                        postTerminalEvent(
+                            TerminalLine(
+                                type = TerminalLineType.AGENT_OUTPUT,
+                                text = line,
+                                isAgent = true
+                            )
+                        )
+                    }
+                }
+                if (!record.error.isNullOrBlank()) {
+                    record.error.lines().take(40).forEach { line ->
+                        postTerminalEvent(
+                            TerminalLine(
+                                type = TerminalLineType.STDERR,
+                                text = line,
+                                isAgent = true
+                            )
+                        )
+                    }
+                }
+            }
+            "file_write", "file_patch" -> {
+                val path = (record.arguments["path"] ?: record.arguments["file"] ?: "").toString()
+                val status = if (record.isSuccess) "✓ Created/Patched" else "✗ Failed writing"
+                postTerminalEvent(
+                    TerminalLine(
+                        type = TerminalLineType.SYSTEM_INFO,
+                        text = "📝 [AGENT FILE] $status: $path",
+                        isAgent = true
+                    )
+                )
+            }
+            "file_read" -> {
+                val path = (record.arguments["path"] ?: record.arguments["file"] ?: "").toString()
+                postTerminalEvent(
+                    TerminalLine(
+                        type = TerminalLineType.SYSTEM_INFO,
+                        text = "📖 [AGENT FILE] Inspected: $path",
+                        isAgent = true
+                    )
+                )
+            }
+            "file_delete" -> {
+                val path = (record.arguments["path"] ?: record.arguments["file"] ?: "").toString()
+                postTerminalEvent(
+                    TerminalLine(
+                        type = TerminalLineType.SYSTEM_INFO,
+                        text = "🗑 [AGENT FILE] Deleted: $path",
+                        isAgent = true
+                    )
+                )
+            }
+            else -> {
+                val summary = (record.arguments["query"] ?: record.arguments["url"] ?: record.arguments["command"] ?: "").toString().take(60)
+                postTerminalEvent(
+                    TerminalLine(
+                        type = TerminalLineType.SYSTEM_INFO,
+                        text = "⚙ [AGENT TOOL: ${record.toolName}] $summary ${if (record.isSuccess) "✓" else "✗"}",
+                        isAgent = true
+                    )
+                )
             }
         }
     }
@@ -207,6 +376,17 @@ object AgentExecutionCoordinator {
         _isRunning.value = false
         _currentStatus.value = AgentTaskStatus.COMPLETED
         _currentActionDescription.value = "Task completed successfully"
+
+        postTerminalEvent(
+            TerminalLine(
+                type = TerminalLineType.BANNER,
+                text = "════════════════════════════════════════════════════════\n" +
+                        "✔ [AGENT TASK COMPLETED] Objective successfully achieved.\n" +
+                        "════════════════════════════════════════════════════════",
+                isAgent = true
+            )
+        )
+
         _activeSession.update { current ->
             if (current?.id == sessionId) {
                 val exists = current.messages.any { it.id == finalAssistantMessage.id }
@@ -242,6 +422,14 @@ object AgentExecutionCoordinator {
         val errorText = error.message ?: "Could not complete autonomous agent loop."
         _errorMessage.value = errorText
         _currentActionDescription.value = "Task failed: $errorText"
+
+        postTerminalEvent(
+            TerminalLine(
+                type = TerminalLineType.STDERR,
+                text = "✖ [AGENT FAILED] $errorText",
+                isAgent = true
+            )
+        )
 
         val errorMessage = streamingAssistantMessage.copy(
             content = "Task Error: $errorText",

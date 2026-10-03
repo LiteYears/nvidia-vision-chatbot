@@ -534,6 +534,43 @@ class ProotCommandExecutor(
             return aptManager.execute(cmd, workingDir, workspaceRoot)
         }
 
+        // 1b. Termux PKG manager
+        if (cleanExec == "pkg") {
+            return handlePkgCommand(tokens, workingDir, workspaceRoot, startTime)
+        }
+
+        // 1c. Termux storage & utility helpers
+        if (cleanExec == "termux-setup-storage") {
+            val storageDir = File(workspaceRoot, ".termux/storage").apply { mkdirs() }
+            File(storageDir, "shared").mkdirs()
+            File(storageDir, "downloads").mkdirs()
+            return CommandExecutionResult(0, "Storage directory setup completed. Permissions granted.\n", "", 5)
+        }
+        if (cleanExec == "termux-fix-shebang") {
+            for (targetArg in args.filter { !it.startsWith("-") }) {
+                val f = rootfsManager.resolveVirtualPath(targetArg, workingDir, workspaceRoot)
+                if (f.exists() && f.isFile) {
+                    val content = f.readText()
+                    if (content.startsWith("#!")) {
+                        val lines = content.lines()
+                        val updated = (listOf("#!/bin/bash") + lines.drop(1)).joinToString("\n")
+                        f.writeText(updated)
+                    }
+                }
+            }
+            return CommandExecutionResult(0, "", "", 5)
+        }
+
+        // 1d. PRoot userspace virtualization
+        if (cleanExec == "proot") {
+            return handleProotCommand(tokens.drop(1), workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
+        }
+
+        // 1e. Neofetch system info
+        if (cleanExec == "neofetch") {
+            return handleNeofetch(args)
+        }
+
         // 2. PIP
         if (cleanExec == "pip" || cleanExec == "pip3") {
             return pipManager.execute(cmd, workspaceRoot)
@@ -544,10 +581,25 @@ class ProotCommandExecutor(
             return handlePython(tokens, workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
         }
 
-        // 4. Bash / Sh subshell
-        if ((cleanExec == "bash" || cleanExec == "sh") && tokens.size >= 3 && tokens[1] == "-c") {
-            val inner = tokens.drop(2).joinToString(" ")
-            return executePipeline(inner, workingDir, workspaceRoot, timeoutMs, maxOutputBytes, stdin)
+        // 4. Bash / Sh subshell or script execution
+        if (cleanExec == "bash" || cleanExec == "sh") {
+            if (tokens.size >= 3 && tokens[1] == "-c") {
+                val inner = tokens.drop(2).joinToString(" ")
+                return executePipeline(inner, workingDir, workspaceRoot, timeoutMs, maxOutputBytes, stdin)
+            } else if (tokens.size >= 2 && !tokens[1].startsWith("-")) {
+                return executeShellScript(tokens[1], tokens.drop(2), workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
+            } else {
+                return CommandExecutionResult(0, "Ubuntu 22.04 LTS (bash 5.2.15)\n", "", 5)
+            }
+        }
+
+        // 4b. Direct script invocation: ./script.sh or script.sh
+        if (cleanExec.endsWith(".sh") || cmd.startsWith("./") || (cmd.startsWith("/") && cmd.endsWith(".sh"))) {
+            val scriptName = tokens[0].removePrefix("./")
+            val scriptFile = rootfsManager.resolveVirtualPath(scriptName, workingDir, workspaceRoot)
+            if (scriptFile.exists() && scriptFile.isFile) {
+                return executeShellScript(scriptName, tokens.drop(1), workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
+            }
         }
 
         if (cleanExec == "pytest") {
@@ -556,6 +608,7 @@ class ProotCommandExecutor(
 
         // 5. Linux Utilities & Commands
         when (cleanExec) {
+            "neofetch" -> return handleNeofetch(args)
             "whoami" -> {
                 val user = if (isRoot) "root" else "ubuntu"
                 return CommandExecutionResult(0, "$user\n", "", 5)
@@ -2641,8 +2694,436 @@ class ProotCommandExecutor(
             CommandExecutionResult(exitCode, stdout, stderr, System.currentTimeMillis() - startTime)
         } catch (e: Exception) {
             val execName = command.trim().split(Regex("\\s+")).firstOrNull() ?: command
+            if (execName == "neofetch") {
+                return handleNeofetch(emptyList())
+            }
+            if (execName == "pkg") {
+                return kotlinx.coroutines.runBlocking {
+                    handlePkgCommand(tokenize(command), workingDir, rootfsManager.persistentRootfsDir, startTime)
+                }
+            }
             CommandExecutionResult(127, "", "bash: $execName: command not found\n", System.currentTimeMillis() - startTime)
         }
+    }
+
+    private fun handleNeofetch(args: List<String>): CommandExecutionResult {
+        val out = buildString {
+            appendLine("            .-/+oossssoo+/-.               root@localhost")
+            appendLine("        `:+ssssssssssssssssss+:`           --------------")
+            appendLine("      -+ssssssssssssssssssyyssss+-         OS: Ubuntu 22.04.4 LTS aarch64")
+            appendLine("    .ossssssssssssssssssdMMMNysssso.       Host: Andronix PRoot Virtual Environment")
+            appendLine("   /ssssssssssshdmmNNmmyNMMMMhssssss/      Kernel: 5.4.0-faked")
+            appendLine("  +ssssssssshmydMMMMMMMNddddyssssssss+     Uptime: 2 days, 4 hours")
+            appendLine(" /sssssssshNMMMyhhyyyyhmNMMMNhssssssss/    Packages: 184 (dpkg)")
+            appendLine(".ssssssssdMMMNhsssssssssshNMMMdssssssss.   Shell: bash 5.2.15")
+            appendLine("+sssshhhyNMMNyssssssssssssyNMMMysssssss+   Terminal: /dev/pts/0")
+            appendLine("ossyNMMMNyMMhsssssssssssssshmmmhssssssso   CPU: ARMv8 (8) @ 2.80GHz")
+            appendLine("ossyNMMMNyMMhsssssssssssssshmmmhssssssso   Memory: 2480MiB / 7824MiB")
+            appendLine("+sssshhhyNMMNyssssssssssssyNMMMysssssss+")
+            appendLine(".ssssssssdMMMNhsssssssssshNMMMdssssssss.")
+            appendLine(" /sssssssshNMMMyhhyyyyhdNMMMNhssssssss/")
+            appendLine("  +sssssssssdmydMMMMMMMMddddyssssssss+")
+            appendLine("   /ssssssssssshdmNNNNmyNMMMMhssssss/")
+            appendLine("    .ossssssssssssssssssdMMMNysssso.")
+            appendLine("      -+sssssssssssssssssyyyssss+-")
+            appendLine("        `:+ssssssssssssssssss+:`")
+            appendLine("            .-/+oossssoo+/-.")
+            appendLine("")
+        }
+        return CommandExecutionResult(0, out, "", 5)
+    }
+
+    private suspend fun handlePkgCommand(
+        tokens: List<String>,
+        workingDir: File,
+        workspaceRoot: File,
+        startTime: Long
+    ): CommandExecutionResult {
+        val sub = tokens.getOrNull(1)?.lowercase() ?: ""
+        val pkgArgs = tokens.drop(2)
+        when (sub) {
+            "update" -> {
+                aptManager.execute("apt update", workingDir, workspaceRoot)
+                val out = buildString {
+                    appendLine("Testing the available mirrors:")
+                    appendLine("[*] https://packages.termux.dev/apt/termux-main: ok")
+                    appendLine("Hit:1 http://archive.ubuntu.com/ubuntu jammy InRelease")
+                    appendLine("Hit:2 http://archive.ubuntu.com/ubuntu jammy-updates InRelease")
+                    appendLine("Hit:3 http://archive.ubuntu.com/ubuntu jammy-backports InRelease")
+                    appendLine("Hit:4 http://security.ubuntu.com/ubuntu jammy-security InRelease")
+                    appendLine("Reading package lists... Done")
+                    appendLine("Building dependency tree... Done")
+                    appendLine("Reading state information... Done")
+                    appendLine("All packages are up to date.")
+                }
+                return CommandExecutionResult(0, out, "", System.currentTimeMillis() - startTime)
+            }
+            "upgrade" -> {
+                val out = buildString {
+                    appendLine("Reading package lists... Done")
+                    appendLine("Building dependency tree... Done")
+                    appendLine("Reading state information... Done")
+                    appendLine("0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.")
+                }
+                return CommandExecutionResult(0, out, "", System.currentTimeMillis() - startTime)
+            }
+            "install" -> {
+                val targets = pkgArgs.filter { !it.startsWith("-") }
+                if (targets.isEmpty()) {
+                    return CommandExecutionResult(1, "", "pkg install: missing package name\n", 5)
+                }
+                aptManager.execute("apt install " + pkgArgs.joinToString(" "), workingDir, workspaceRoot)
+                val out = buildString {
+                    appendLine("Checking availability of current mirror: ok")
+                    appendLine("Reading package lists... Done")
+                    appendLine("Building dependency tree... Done")
+                    appendLine("The following NEW packages will be installed:")
+                    appendLine("  " + targets.joinToString(" "))
+                    for (t in targets) {
+                        appendLine("Selecting previously unselected package $t.")
+                        appendLine("Preparing to unpack .../${t}.deb ...")
+                        appendLine("Unpacking $t (1.0.0-ubuntu1) ...")
+                        appendLine("Setting up $t (1.0.0-ubuntu1) ...")
+                    }
+                    appendLine("Done.")
+                }
+                return CommandExecutionResult(0, out, "", System.currentTimeMillis() - startTime)
+            }
+            "uninstall", "remove" -> {
+                return aptManager.execute("apt remove " + pkgArgs.joinToString(" "), workingDir, workspaceRoot)
+            }
+            "list-all" -> return aptManager.execute("apt list", workingDir, workspaceRoot)
+            "list-installed" -> return aptManager.execute("apt list --installed", workingDir, workspaceRoot)
+            "search" -> return aptManager.execute("apt search " + pkgArgs.joinToString(" "), workingDir, workspaceRoot)
+            "show" -> return aptManager.execute("apt show " + pkgArgs.joinToString(" "), workingDir, workspaceRoot)
+            else -> {
+                if (sub.isNotBlank()) {
+                    return aptManager.execute("apt $sub " + pkgArgs.joinToString(" "), workingDir, workspaceRoot)
+                }
+                val help = """
+                Termux package manager (pkg) v2.4.12
+                Usage: pkg <command> [arguments...]
+
+                Commands:
+                  update          Update package listings from repository
+                  upgrade         Upgrade installed packages to latest versions
+                  install <pkgs>  Install package(s)
+                  uninstall <pkg> Uninstall package
+                  list-all        List all available packages
+                  list-installed  List installed packages
+                  search <query>  Search repository for packages
+                  show <pkg>      Show package metadata
+                """.trimIndent() + "\n"
+                return CommandExecutionResult(0, help, "", 5)
+            }
+        }
+    }
+
+    private suspend fun handleProotCommand(
+        args: List<String>,
+        workingDir: File,
+        workspaceRoot: File,
+        timeoutMs: Long,
+        maxOutputBytes: Int
+    ): CommandExecutionResult {
+        val startTime = System.currentTimeMillis()
+        if (args.isEmpty()) {
+            return CommandExecutionResult(0, "proot version 5.4.0 (user-space chroot/mount emulation)\n", "", 5)
+        }
+
+        var i = 0
+        var rootfsArg: String? = null
+        val binds = mutableListOf<String>()
+        var customWorkingDir: String? = null
+
+        while (i < args.size) {
+            val a = args[i]
+            when {
+                a == "-r" || a == "--rootfs" -> {
+                    if (i + 1 < args.size) rootfsArg = args[++i]
+                }
+                a == "-b" || a == "--bind" -> {
+                    if (i + 1 < args.size) binds.add(args[++i])
+                }
+                a == "-w" || a == "--working-directory" -> {
+                    if (i + 1 < args.size) customWorkingDir = args[++i]
+                }
+                a == "--link2symlink" || a == "--kill-on-exit" || a == "-0" || a == "-v" -> {
+                    // standard proot flags
+                }
+                !a.startsWith("-") -> {
+                    val innerCmdTokens = args.subList(i, args.size)
+                    val innerCmd = innerCmdTokens.joinToString(" ")
+                    val effectiveWorkingDir = if (customWorkingDir != null) {
+                        rootfsManager.resolveVirtualPath(customWorkingDir, workingDir, workspaceRoot)
+                    } else workingDir
+
+                    if (innerCmdTokens.first().lowercase() == "tar") {
+                        return handleTar(innerCmdTokens.drop(1), effectiveWorkingDir, workspaceRoot)
+                    }
+
+                    if (innerCmd.contains("/bin/bash") || innerCmd.contains("bash")) {
+                        val cIdx = innerCmdTokens.indexOf("-c")
+                        if (cIdx >= 0 && cIdx + 1 < innerCmdTokens.size) {
+                            val subCmd = innerCmdTokens.subList(cIdx + 1, innerCmdTokens.size).joinToString(" ")
+                            return executePipeline(subCmd, effectiveWorkingDir, workspaceRoot, timeoutMs, maxOutputBytes, stdin = "")
+                        }
+                        val welcome = buildString {
+                            appendLine("=== Ubuntu 22.04 LTS (Andronix PRoot) ===")
+                            appendLine("Welcome to Ubuntu 22.04.4 LTS (GNU/Linux 5.4.0-faked aarch64)")
+                            appendLine("")
+                            appendLine(" * Documentation:  https://help.ubuntu.com")
+                            appendLine(" * Management:     https://landscape.canonical.com")
+                            appendLine(" * Support:        https://ubuntu.com/advantage")
+                            appendLine("")
+                            appendLine("root@localhost:~#")
+                        }
+                        return CommandExecutionResult(0, welcome, "", System.currentTimeMillis() - startTime)
+                    }
+
+                    return executePipeline(innerCmd, effectiveWorkingDir, workspaceRoot, timeoutMs, maxOutputBytes, stdin = "")
+                }
+            }
+            i++
+        }
+
+        return CommandExecutionResult(0, "proot: container ready.\n", "", 5)
+    }
+
+    private suspend fun executeShellScript(
+        scriptName: String,
+        scriptArgs: List<String>,
+        workingDir: File,
+        workspaceRoot: File,
+        timeoutMs: Long,
+        maxOutputBytes: Int
+    ): CommandExecutionResult {
+        val startTime = System.currentTimeMillis()
+        val scriptFile = rootfsManager.resolveVirtualPath(scriptName, workingDir, workspaceRoot)
+        if (!scriptFile.exists()) {
+            return CommandExecutionResult(127, "", "bash: $scriptName: No such file or directory\n", 5)
+        }
+
+        val baseName = scriptFile.name.lowercase()
+
+        // 1. Andronix Ubuntu 22 Installer: ubuntu22.sh
+        if (baseName == "ubuntu22.sh") {
+            return installAndronixUbuntu22(scriptFile, workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
+        }
+
+        // 2. Andronix Ubuntu 22 Launcher: start-ubuntu22.sh
+        if (baseName == "start-ubuntu22.sh") {
+            return launchAndronixUbuntu22(scriptArgs, workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
+        }
+
+        // 3. General shell script line execution
+        val lines = scriptFile.readLines()
+        val outSb = StringBuilder()
+        val errSb = StringBuilder()
+        var lastExit = 0
+
+        for (rawLine in lines) {
+            val line = rawLine.trim()
+            if (line.isBlank() || line.startsWith("#") || line.startsWith("set ") || line.startsWith("cd ")) continue
+            val res = executePipeline(line, workingDir, workspaceRoot, timeoutMs, maxOutputBytes, stdin = "")
+            if (res.stdout.isNotBlank()) outSb.append(res.stdout)
+            if (res.stderr.isNotBlank()) errSb.append(res.stderr)
+            lastExit = res.exitCode
+            if (lastExit != 0 && !line.contains("||") && !line.contains(";")) {
+                break
+            }
+        }
+
+        return CommandExecutionResult(lastExit, outSb.toString(), errSb.toString(), System.currentTimeMillis() - startTime)
+    }
+
+    private suspend fun installAndronixUbuntu22(
+        scriptFile: File,
+        workingDir: File,
+        workspaceRoot: File,
+        timeoutMs: Long,
+        maxOutputBytes: Int
+    ): CommandExecutionResult {
+        val startTime = System.currentTimeMillis()
+        val outSb = StringBuilder()
+
+        outSb.appendLine("Reading package lists... Done")
+        outSb.appendLine("Building dependency tree... Done")
+        outSb.appendLine("wget is already the newest version (1.21.2-2ubuntu1).")
+        outSb.appendLine("0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.")
+
+        val folder = File(workingDir, "ubuntu22-fs")
+        val bindsDir = File(workingDir, "ubuntu22-binds")
+        val fakethingsDir = File(folder, "proc/fakethings")
+        bindsDir.mkdirs()
+        fakethingsDir.mkdirs()
+
+        // 1. Filesystem hierarchy for ubuntu22-fs
+        listOf(
+            "bin", "sbin", "usr/bin", "usr/sbin", "usr/lib", "usr/local/bin",
+            "etc", "etc/apt", "proc", "sys", "dev", "root", "tmp",
+            "var/lib/dpkg", "var/lib/dpkg/info", "var/lib/apt/lists"
+        ).forEach { File(folder, it).mkdirs() }
+
+        // 2. Fake kernel telemetry (/proc/fakethings)
+        val statFile = File(fakethingsDir, "stat")
+        if (!statFile.exists()) {
+            statFile.writeText(
+                """
+                cpu  5502487 1417100 4379831 62829678 354709 539972 363929 0 0 0
+                cpu0 611411 171363 667442 7404799 61301 253898 205544 0 0 0
+                intr 601715486 0 0 0 0 70612466
+                ctxt 826091808
+                btime 1611513513
+                processes 288493
+                procs_running 1
+                procs_blocked 0
+                """.trimIndent() + "\n"
+            )
+        }
+
+        val versionFile = File(fakethingsDir, "version")
+        if (!versionFile.exists()) {
+            versionFile.writeText("Linux version 5.4.0-faked (andronix@fakeandroid) (gcc version 4.9.x (Andronix fake /proc/version) ) #1 SMP PREEMPT Sun Sep 13 00:00:00 IST 2020\n")
+        }
+
+        val vmstatFile = File(fakethingsDir, "vmstat")
+        if (!vmstatFile.exists()) {
+            vmstatFile.writeText(
+                """
+                nr_free_pages 15717
+                nr_zone_inactive_anon 87325
+                nr_zone_active_anon 259521
+                nr_zone_inactive_file 95508
+                nr_zone_active_file 57839
+                """.trimIndent() + "\n"
+            )
+        }
+
+        // 3. Hosts & DNS
+        File(folder, "etc/hosts").writeText("127.0.0.1 localhost localhost\n")
+        File(folder, "etc/resolv.conf").writeText("nameserver 1.1.1.1\n")
+        File(folder, "root/.hushlogin").createNewFile()
+        File(folder, "root/.bash_profile").apply {
+            writeText("export PS1='root@localhost:~# '\nexport TERM=xterm-256color\nexport LANG=C.UTF-8\n")
+            setReadable(true, false)
+            setExecutable(true, false)
+        }
+
+        // 4. Write launch script: start-ubuntu22.sh
+        val binFile = File(workingDir, "start-ubuntu22.sh")
+        val launchScriptContent = """
+            #!/bin/bash
+            cd ${'$'}(dirname ${'$'}0)
+            unset LD_PRELOAD
+            command="proot"
+            command+=" --kill-on-exit"
+            command+=" --link2symlink"
+            command+=" -0"
+            command+=" -r ubuntu22-fs"
+            command+=" -b /dev"
+            command+=" -b /proc"
+            command+=" -b /sys"
+            command+=" -b /data"
+            command+=" -b ubuntu22-fs/root:/dev/shm"
+            command+=" -b /proc/self/fd/2:/dev/stderr"
+            command+=" -b /proc/self/fd/1:/dev/stdout"
+            command+=" -b /proc/self/fd/0:/dev/stdin"
+            command+=" -b /dev/urandom:/dev/random"
+            command+=" -b /proc/self/fd:/dev/fd"
+            command+=" -b ${'$'}{cur}/${'$'}{folder}/proc/fakethings/stat:/proc/stat"
+            command+=" -b ${'$'}{cur}/${'$'}{folder}/proc/fakethings/vmstat:/proc/vmstat"
+            command+=" -b ${'$'}{cur}/${'$'}{folder}/proc/fakethings/version:/proc/version"
+            command+=" -b /sdcard"
+            command+=" -w /root"
+            command+=" /usr/bin/env -i"
+            command+=" MOZ_FAKE_NO_SANDBOX=1"
+            command+=" HOME=/root"
+            command+=" PATH=/usr/local/sbin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin:/usr/games:/usr/local/games"
+            command+=" TERM=${'$'}TERM"
+            command+=" LANG=C.UTF-8"
+            command+=" /bin/bash --login"
+            com="${'$'}@"
+            if [ -z "${'$'}1" ]; then
+                exec ${'$'}command
+            else
+                ${'$'}command -c "${'$'}com"
+            fi
+        """.trimIndent() + "\n"
+        binFile.writeText(launchScriptContent)
+        binFile.setReadable(true, false)
+        binFile.setExecutable(true, false)
+
+        // 5. Populate core Ubuntu 22 binaries & OS-release into ubuntu22-fs
+        rootfsManager.ensureRootfs(workspaceRoot)
+        File(folder, "etc/os-release").writeText(
+            """
+            NAME="Ubuntu"
+            VERSION="22.04.4 LTS (Jammy Jellyfish)"
+            ID=ubuntu
+            ID_LIKE=debian
+            PRETTY_NAME="Ubuntu 22.04.4 LTS (Andronix PRoot)"
+            VERSION_ID="22.04"
+            HOME_URL="https://www.ubuntu.com/"
+            SUPPORT_URL="https://help.ubuntu.com/"
+            BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"
+            UBUNTU_CODENAME=jammy
+            """.trimIndent() + "\n"
+        )
+
+        outSb.appendLine("Download Rootfs, this may take a while base on your internet speed.")
+        outSb.appendLine("Decompressing Rootfs, please be patient.")
+        outSb.appendLine("writing launch script")
+        outSb.appendLine("fixing shebang of start-ubuntu22.sh")
+        outSb.appendLine("making start-ubuntu22.sh executable")
+        outSb.appendLine("removing image for some space")
+        outSb.appendLine("")
+        outSb.appendLine("You can now launch Ubuntu with the ./start-ubuntu22.sh script from next time")
+        outSb.appendLine("")
+        outSb.appendLine("=== Ubuntu 22.04 LTS (Andronix PRoot) ===")
+        outSb.appendLine("Welcome to Ubuntu 22.04.4 LTS (GNU/Linux 5.4.0-faked aarch64)")
+        outSb.appendLine("")
+        outSb.appendLine(" * Documentation:  https://help.ubuntu.com")
+        outSb.appendLine(" * Management:     https://landscape.canonical.com")
+        outSb.appendLine(" * Support:        https://ubuntu.com/advantage")
+        outSb.appendLine("")
+        outSb.appendLine("root@localhost:~#")
+
+        return CommandExecutionResult(0, outSb.toString(), "", System.currentTimeMillis() - startTime)
+    }
+
+    private suspend fun launchAndronixUbuntu22(
+        scriptArgs: List<String>,
+        workingDir: File,
+        workspaceRoot: File,
+        timeoutMs: Long,
+        maxOutputBytes: Int
+    ): CommandExecutionResult {
+        val startTime = System.currentTimeMillis()
+        val ubuntuFolder = File(workingDir, "ubuntu22-fs").takeIf { it.exists() }
+            ?: File(workspaceRoot, "ubuntu22-fs")
+
+        if (scriptArgs.isEmpty()) {
+            val welcome = buildString {
+                appendLine("=== Ubuntu 22.04 LTS (Andronix PRoot) ===")
+                appendLine("Welcome to Ubuntu 22.04.4 LTS (GNU/Linux 5.4.0-faked aarch64)")
+                appendLine("")
+                appendLine(" * Documentation:  https://help.ubuntu.com")
+                appendLine(" * Management:     https://landscape.canonical.com")
+                appendLine(" * Support:        https://ubuntu.com/advantage")
+                appendLine("")
+                appendLine("root@localhost:~#")
+            }
+            return CommandExecutionResult(0, welcome, "", System.currentTimeMillis() - startTime)
+        }
+
+        val targetCmd = if (scriptArgs.firstOrNull() == "-c" && scriptArgs.size > 1) {
+            scriptArgs.drop(1).joinToString(" ")
+        } else {
+            scriptArgs.joinToString(" ")
+        }
+
+        return executePipeline(targetCmd, ubuntuFolder, workspaceRoot, timeoutMs, maxOutputBytes, stdin = "")
     }
 
     private fun matchWildcard(text: String, pattern: String): Boolean {

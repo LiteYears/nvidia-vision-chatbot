@@ -189,18 +189,20 @@ class AgentExecutionService : Service() {
                         streamingAssistantMessage = streamingAssistantMessage
                     )
                 } catch (e: CancellationException) {
-                    val cur = AgentExecutionCoordinator.activeSession.value ?: session
-                    AgentExecutionCoordinator.notifyPaused(cur.id)
-                    try {
-                        agentPlanRepository.saveAgentSession(
-                            cur.copy(
-                                status = AgentTaskStatus.PAUSED,
-                                updatedAt = System.currentTimeMillis()
+                    if (!AgentExecutionCoordinator.isRunning.value) {
+                        val cur = AgentExecutionCoordinator.activeSession.value ?: session
+                        AgentExecutionCoordinator.notifyPaused(cur.id)
+                        try {
+                            agentPlanRepository.saveAgentSession(
+                                cur.copy(
+                                    status = AgentTaskStatus.PAUSED,
+                                    updatedAt = System.currentTimeMillis()
+                                )
                             )
-                        )
-                    } catch (_: Exception) {}
-                    stopForegroundCompat(true)
-                    stopSelf()
+                        } catch (_: Exception) {}
+                        stopForegroundCompat(true)
+                        stopSelf()
+                    }
                     throw e
                 } catch (e: Throwable) {
                     val cur = AgentExecutionCoordinator.activeSession.value ?: session
@@ -1022,7 +1024,7 @@ class AgentExecutionService : Service() {
         const val EXTRA_NAVIGATE_TO_AGENT = "com.example.agent.extra.NAVIGATE_TO_AGENT"
 
         private const val MAX_AUTONOMOUS_TOOL_STEPS = 30
-        private const val MAX_CONSECUTIVE_NUDGES = 2
-        private const val MAX_TOTAL_NUDGES = 4
+        private const val MAX_CONSECUTIVE_NUDGES = 4
+        private const val MAX_TOTAL_NUDGES = 10
     }
 }

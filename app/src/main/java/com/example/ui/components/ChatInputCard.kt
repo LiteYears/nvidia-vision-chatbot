@@ -282,12 +282,25 @@ fun ChatInputCard(
                             horizontalArrangement = Arrangement.spacedBy(3.dp)
                         ) {
                             val displayModel = when {
-                                selectedModel.contains("llama", ignoreCase = true) -> "Llama 3.2"
                                 selectedModel.contains("quantum", ignoreCase = true) -> "Quantum 3"
-                                selectedModel.contains("gemma", ignoreCase = true) -> "Gemma 26B"
-                                selectedModel.contains("muse", ignoreCase = true) -> "Muse 30B"
+                                selectedModel.contains("nemotron-70b", ignoreCase = true) -> "Nemotron 70B"
+                                selectedModel.contains("nemotron", ignoreCase = true) -> "Nemotron"
+                                selectedModel.contains("llama-3.2-11b", ignoreCase = true) -> "Llama 3.2 Vision"
+                                selectedModel.contains("llama-3.2-90b", ignoreCase = true) -> "Llama 3.2 90B"
+                                selectedModel.contains("gemma-3-12b", ignoreCase = true) -> "Gemma 3 12B"
+                                selectedModel.contains("gemma-3-4b", ignoreCase = true) -> "Gemma 3 4B"
+                                selectedModel.contains("gemma-4-31b", ignoreCase = true) -> "Gemma 4 31B"
+                                selectedModel.contains("codestral", ignoreCase = true) -> "Codestral 22B"
+                                selectedModel.contains("mistral-large", ignoreCase = true) -> "Mistral Large"
+                                selectedModel.contains("mistral-nemo", ignoreCase = true) -> "Mistral NeMo"
+                                selectedModel.contains("deepseek-v4", ignoreCase = true) -> "DeepSeek V4.1"
                                 selectedModel.contains("deepseek", ignoreCase = true) -> "DeepSeek"
-                                else -> selectedModel.substringAfterLast("/").take(12)
+                                selectedModel.contains("kimi", ignoreCase = true) -> "Moonshot Kimi"
+                                selectedModel.contains("glm", ignoreCase = true) -> "GLM 5.3"
+                                selectedModel.contains("gpt-oss", ignoreCase = true) -> "GPT OSS 20B"
+                                selectedModel.contains("phi-3", ignoreCase = true) -> "Phi 3 Vision"
+                                selectedModel.contains("yi-large", ignoreCase = true) -> "Yi Large"
+                                else -> selectedModel.substringAfterLast("/").take(14)
                             }
 
                             Text(

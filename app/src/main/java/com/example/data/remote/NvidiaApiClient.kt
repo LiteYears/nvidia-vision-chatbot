@@ -16,6 +16,12 @@ import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
+data class NvidiaModelItem(
+    val id: String,
+    val ownedBy: String,
+    val created: Long = 0
+)
+
 class NvidiaApiClient(
     private val getApiKey: () -> String
 ) {
@@ -29,10 +35,62 @@ class NvidiaApiClient(
     companion object {
         private const val TAG = "NvidiaApiClient"
         const val BASE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
+        const val MODELS_URL = "https://integrate.api.nvidia.com/v1/models"
         const val DEFAULT_MODEL = "meta/llama-3.2-11b-vision-instruct"
-        const val FALLBACK_MODEL = "meta/llama-3.2-3b-instruct"
+        const val VISION_MODEL = "meta/llama-3.2-11b-vision-instruct"
         const val QUANTUM_MODEL = "Quantum 3"
-        private const val MAX_NETWORK_RETRIES = 3
+        private const val MAX_NETWORK_RETRIES = 1
+
+        val FALLBACK_CANDIDATES = listOf(
+            "meta/llama-3.2-11b-vision-instruct",
+            "openai/gpt-oss-20b",
+            "meta/muse-glimmer-30b",
+            "google/diffusiongemma-26b-a4b-it",
+            "nvidia/nemotron-3-ultra-550b-a55b"
+        )
+    }
+
+    /**
+     * Dynamically queries https://integrate.api.nvidia.com/v1/models (build.nvidia.com/models)
+     * to fetch all active available models.
+     */
+    suspend fun fetchAvailableModels(): Result<List<NvidiaModelItem>> = withContext(Dispatchers.IO) {
+        val apiKey = getApiKey().trim().trim('.', ',', ';', ':', '"', '\'', '`', ' ')
+        val requestBuilder = Request.Builder()
+            .url(MODELS_URL)
+            .get()
+            .addHeader("Accept", "application/json")
+
+        if (apiKey.isNotBlank() && !apiKey.contains("placeholder", ignoreCase = true)) {
+            requestBuilder.addHeader("Authorization", "Bearer $apiKey")
+        }
+
+        try {
+            client.newCall(requestBuilder.build()).execute().use { response ->
+                if (!response.isSuccessful) {
+                    return@withContext Result.failure(
+                        NvidiaApiException(response.code, "Failed to fetch models from NVIDIA: HTTP ${response.code}")
+                    )
+                }
+                val body = response.body?.string() ?: ""
+                val json = JSONObject(body)
+                val data = json.optJSONArray("data") ?: return@withContext Result.success(emptyList())
+                val list = mutableListOf<NvidiaModelItem>()
+                for (i in 0 until data.length()) {
+                    val item = data.optJSONObject(i) ?: continue
+                    val id = item.optString("id", "")
+                    val owner = item.optString("owned_by", "")
+                    val created = item.optLong("created", 0)
+                    if (id.isNotBlank()) {
+                        list.add(NvidiaModelItem(id = id, ownedBy = owner, created = created))
+                    }
+                }
+                Result.success(list)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error fetching models from $MODELS_URL", e)
+            Result.failure(e)
+        }
     }
 
     suspend fun sendChatCompletion(
@@ -43,7 +101,7 @@ class NvidiaApiClient(
         topP: Double = 0.95,
         maxTokens: Int = 4096
     ): Result<String> = withContext(Dispatchers.IO) {
-        val apiKey = getApiKey().trim()
+        val apiKey = getApiKey().trim().trim('.', ',', ';', ':', '"', '\'', '`', ' ')
         if (apiKey.isEmpty() || apiKey.contains("placeholder", ignoreCase = true)) {
             return@withContext Result.failure(
                 NvidiaApiException(
@@ -56,16 +114,18 @@ class NvidiaApiClient(
         // Determine if there are image attachments in the message list
         val hasImage = messages.any { !it.imageBase64.isNullOrBlank() }
 
-        // Resolve requested model
+        // Resolve requested model - smoothly auto-migrate any deprecated/EOL or restricted models
         val targetModel = when {
             hasImage -> {
-                // If message has an image, ensure a vision-capable model is used
-                if (model.contains("vision", ignoreCase = true)) model else DEFAULT_MODEL
+                if (model.contains("vision", ignoreCase = true) || model.contains("vila", ignoreCase = true)) model else VISION_MODEL
             }
             model.equals(QUANTUM_MODEL, ignoreCase = true) ||
                     model.contains("Quantum", ignoreCase = true) -> DEFAULT_MODEL
             model.isBlank() -> DEFAULT_MODEL
-            else -> model
+            model.contains("llama-3.2-3b", ignoreCase = true) ||
+                    model.contains("llama-3.2-1b", ignoreCase = true) ||
+                    model.contains("nemotron-70b", ignoreCase = true) -> DEFAULT_MODEL
+            else -> model.trim()
         }
 
         // Attempt API call with targetModel with network retry
@@ -77,25 +137,59 @@ class NvidiaApiClient(
             }
             lastResult = result
             val exception = result.exceptionOrNull()
-            // If it's an authentication error or validation error, don't retry same model
-            if (exception is NvidiaApiException && exception.code in 400..404) {
+            // If it's an authentication error (bad API key), don't retry or fallback
+            if (exception is NvidiaApiException && (exception.code == 401 || (exception.code == 403 && exception.message?.contains("Authorization failed", ignoreCase = true) == true))) {
+                return@withContext result
+            }
+            // If it's a client error (e.g. 404 model not found, not found for account, 400 bad request, 422), stop retrying same model
+            if (exception is NvidiaApiException && (exception.code in 400..404 || exception.message?.contains("Not found for account", ignoreCase = true) == true)) {
                 break
             }
             if (attempt < MAX_NETWORK_RETRIES) {
-                Log.w(TAG, "Request to $targetModel failed on attempt ${attempt + 1}, retrying in 1200ms... Error: ${exception?.message}")
-                delay(1200L * (attempt + 1))
+                Log.w(TAG, "Request to $targetModel failed on attempt ${attempt + 1}, retrying in 750ms... Error: ${exception?.message}")
+                delay(750L * (attempt + 1))
             }
         }
 
-        if (targetModel == FALLBACK_MODEL) {
-            return@withContext lastResult ?: Result.failure(NvidiaApiException(0, "Request failed"))
+        val primaryErrorMsg = lastResult?.exceptionOrNull()?.message ?: "Request failed for model '$targetModel'"
+        val isAccountOrFunctionError = primaryErrorMsg.contains("Not found for account", ignoreCase = true) ||
+                (lastResult?.exceptionOrNull() as? NvidiaApiException)?.code == 404
+
+        // If targetModel is already one of the candidates, filter it out from fallback attempts
+        val fallbackCandidates = FALLBACK_CANDIDATES.filter { !it.equals(targetModel, ignoreCase = true) }
+
+        delay(500L)
+
+        // Attempt intelligent fallback across verified active public models
+        for (candidate in fallbackCandidates) {
+            Log.w(TAG, "Primary model '$targetModel' failed ($primaryErrorMsg). Retrying with fallback: $candidate")
+            val fallbackAttempt = executeRequest(apiKey, candidate, messages, systemPrompt, temperature, topP, maxTokens)
+            if (fallbackAttempt.isSuccess) {
+                val successfulReply = fallbackAttempt.getOrNull() ?: ""
+                val adjustedReply = if (isAccountOrFunctionError) {
+                    "[Note: '$targetModel' is not provisioned for your NVIDIA account on build.nvidia.com. Answer generated via '$candidate']\n\n$successfulReply"
+                } else {
+                    successfulReply
+                }
+                return@withContext Result.success(adjustedReply)
+            }
         }
 
-        delay(1500L)
+        // Both primary and all fallbacks failed: report informative error message
+        val finalErrorMessage = when {
+            isAccountOrFunctionError ->
+                "Model '$targetModel' is not provisioned for your NVIDIA Developer account (Function not found for account). Please select an active public model like Llama 3.2 Vision, Gemma 3, or Mistral from the model selector."
+            lastResult?.exceptionOrNull() is NvidiaApiException ->
+                "Error with model '$targetModel': $primaryErrorMsg"
+            else -> primaryErrorMsg
+        }
 
-        Log.w(TAG, "All attempts to $targetModel failed (${lastResult?.exceptionOrNull()?.message}). Retrying with $FALLBACK_MODEL")
-        val fallbackAttempt = executeRequest(apiKey, FALLBACK_MODEL, messages, systemPrompt, temperature, topP, maxTokens)
-        return@withContext fallbackAttempt
+        return@withContext Result.failure(
+            NvidiaApiException(
+                code = (lastResult?.exceptionOrNull() as? NvidiaApiException)?.code ?: 0,
+                message = finalErrorMessage
+            )
+        )
     }
 
     private fun executeRequest(
@@ -107,10 +201,14 @@ class NvidiaApiClient(
         topP: Double = 0.95,
         maxTokens: Int = 4096
     ): Result<String> {
+        val isDeepSeekR1 = resolvedModel.contains("deepseek-r1", ignoreCase = true)
+
         return try {
             val jsonBody = JSONObject().apply {
                 put("model", resolvedModel)
-                put("temperature", temperature.coerceIn(0.0, 1.5))
+                // For DeepSeek R1, temperature should be moderate (0.6 recommended, max 1.0)
+                val safeTemp = if (isDeepSeekR1) temperature.coerceIn(0.0, 1.0) else temperature.coerceIn(0.0, 1.5)
+                put("temperature", safeTemp)
                 put("top_p", topP.coerceIn(0.05, 1.0))
                 put("max_tokens", maxTokens.coerceIn(256, 8192))
                 put("stream", false)
@@ -118,8 +216,9 @@ class NvidiaApiClient(
                 val messagesArray = JSONArray()
 
                 // Insert custom system prompt if provided and not already present
+                // Note: DeepSeek R1 on NVIDIA NIM rejects {"role": "system"}; we prepend it to the first user message instead
                 val hasSystemMessageInList = messages.any { it.role == MessageRole.SYSTEM }
-                if (!systemPrompt.isNullOrBlank() && !hasSystemMessageInList) {
+                if (!systemPrompt.isNullOrBlank() && !hasSystemMessageInList && !isDeepSeekR1) {
                     messagesArray.put(JSONObject().apply {
                         put("role", "system")
                         put("content", systemPrompt.trim())
@@ -138,17 +237,23 @@ class NvidiaApiClient(
                     }
                 }
 
-                for (msg in normalizedMessages) {
+                for ((index, msg) in normalizedMessages.withIndex()) {
                     when (msg.role) {
                         MessageRole.USER -> {
                             val userMsgObj = JSONObject().apply {
                                 put("role", "user")
+                                val textContent = if (isDeepSeekR1 && index == 0 && !systemPrompt.isNullOrBlank()) {
+                                    "[System Instructions: ${systemPrompt.trim()}]\n\n${msg.content.ifBlank { "Hello" }}"
+                                } else {
+                                    msg.content.ifBlank { "Hello" }
+                                }
+
                                 if (!msg.imageBase64.isNullOrBlank()) {
                                     // Multimodal format for vision-capable models
                                     val contentParts = JSONArray().apply {
                                         put(JSONObject().apply {
                                             put("type", "text")
-                                            put("text", msg.content.ifBlank { "Describe this image in detail." })
+                                            put("text", textContent)
                                         })
                                         put(JSONObject().apply {
                                             put("type", "image_url")
@@ -161,7 +266,7 @@ class NvidiaApiClient(
                                     put("content", contentParts)
                                 } else {
                                     // Pure text format: simple String (avoids 422 errors on standard LLMs)
-                                    put("content", msg.content.ifBlank { "Hello" })
+                                    put("content", textContent)
                                 }
                             }
                             messagesArray.put(userMsgObj)
@@ -175,7 +280,7 @@ class NvidiaApiClient(
                             }
                         }
                         MessageRole.SYSTEM -> {
-                            if (msg.content.isNotBlank()) {
+                            if (msg.content.isNotBlank() && !isDeepSeekR1) {
                                 messagesArray.put(JSONObject().apply {
                                     put("role", "system")
                                     put("content", msg.content)
@@ -197,6 +302,7 @@ class NvidiaApiClient(
                 .url(BASE_URL)
                 .addHeader("Authorization", "Bearer $apiKey")
                 .addHeader("Content-Type", "application/json")
+                .addHeader("Accept", "application/json")
                 .post(requestBody)
                 .build()
 

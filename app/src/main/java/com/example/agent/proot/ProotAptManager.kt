@@ -377,6 +377,15 @@ class ProotAptManager(
                 description = "GNU version of the tar archiving utility",
                 binaries = listOf("tar")
             ),
+            "proot" to UbuntuPackage(
+                name = "proot",
+                version = "5.4.0-android",
+                section = "utils",
+                priority = "optional",
+                installedSizeKb = 890,
+                description = "Emulate chroot, bind mount and binfmt_misc for unprivileged users",
+                binaries = listOf("proot", "proot-distro")
+            ),
             "zip" to UbuntuPackage(
                 name = "zip",
                 version = "3.0-12build2",
@@ -888,6 +897,10 @@ class ProotAptManager(
         val installed = parseDpkgStatus(statusFile)
 
         when (flag) {
+            "--print-architecture" -> {
+                return CommandExecutionResult(0, "aarch64\n", "", System.currentTimeMillis() - startTime)
+            }
+
             "-i", "--install" -> {
                 if (rest.isEmpty()) return CommandExecutionResult(1, "", "dpkg: error: --install requires at least one package archive file\n", 5)
                 val outSb = StringBuilder()

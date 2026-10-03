@@ -27,6 +27,11 @@ object ToolCallParser {
         RegexOption.IGNORE_CASE
     )
 
+    private val PYTHON_BLOCK_REGEX = Regex(
+        """```(?:python3?|py)\s*([\s\S]*?)\s*```""",
+        RegexOption.IGNORE_CASE
+    )
+
     private val VALID_TOOL_IDENTIFIER_REGEX = Regex("""^[a-zA-Z_][a-zA-Z0-9_-]*$""")
 
     private val KNOWN_TOOL_NAMES = setOf(
@@ -90,7 +95,22 @@ object ToolCallParser {
             }
         }
 
-        // 4. Fourth priority: Explicit raw JSON tool call outside of code blocks
+        // 4. Fourth priority: Support direct ```python or ```py code blocks
+        val pythonMatches = PYTHON_BLOCK_REGEX.findAll(text).toList()
+        if (pythonMatches.isNotEmpty()) {
+            val nonJsonCodes = pythonMatches.map { it.groupValues[1].trim() }
+                .filter { it.isNotBlank() && !it.contains("\"tool\"", ignoreCase = true) }
+            if (nonJsonCodes.isNotEmpty()) {
+                val combinedCode = nonJsonCodes.joinToString("\n\n")
+                return ToolCall(
+                    callId = UUID.randomUUID().toString(),
+                    toolName = "python_execute",
+                    arguments = mapOf("code" to combinedCode)
+                )
+            }
+        }
+
+        // 5. Fifth priority: Explicit raw JSON tool call outside of code blocks
         val rawJson = extractBalancedJsonObject(text)
         if (rawJson != null) {
             val toolCall = parseJsonToToolCall(rawJson, isExplicitToolCallBlock = false)
@@ -418,6 +438,14 @@ object ToolCallParser {
         clean = clean.replace(BASH_BLOCK_REGEX) { match ->
             val content = match.groupValues[1].trim()
             if (extractExecutableCommandsFromBlock(content) != null) {
+                ""
+            } else {
+                match.value
+            }
+        }
+        clean = clean.replace(PYTHON_BLOCK_REGEX) { match ->
+            val content = match.groupValues[1].trim()
+            if (content.isNotBlank() && !content.contains("\"tool\"", ignoreCase = true)) {
                 ""
             } else {
                 match.value

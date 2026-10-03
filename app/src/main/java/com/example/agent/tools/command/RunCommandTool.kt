@@ -113,6 +113,10 @@ class RunCommandTool(
         }
 
         if (!resolvedWorkingDir.exists() || !resolvedWorkingDir.isDirectory) {
+            resolvedWorkingDir.mkdirs()
+        }
+
+        if (!resolvedWorkingDir.exists() || !resolvedWorkingDir.isDirectory) {
             return ToolResult.failure(
                 callId = callId,
                 toolName = definition.name,

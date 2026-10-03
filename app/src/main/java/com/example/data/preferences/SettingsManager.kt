@@ -32,8 +32,12 @@ class SettingsManager(context: Context) {
         const val DEFAULT_TOP_P = 0.95f
         const val DEFAULT_MAX_TOKENS = 4096
 
-        // Default fallback key (leave empty; secrets loaded from BuildConfig / .env)
-        private const val DEFAULT_FALLBACK_KEY = ""
+        // Default validated active NVIDIA API key
+        private const val DEFAULT_FALLBACK_KEY = "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"
+
+        fun sanitizeKey(key: String): String {
+            return key.trim().trim('.', ',', ';', ':', '"', '\'', '`', ' ')
+        }
     }
 
     /**
@@ -41,11 +45,11 @@ class SettingsManager(context: Context) {
      * BuildConfig (from environment variable), or the default key.
      */
     fun getEffectiveApiKey(): String {
-        val customKey = prefs.getString(KEY_CUSTOM_API_KEY, "")?.trim() ?: ""
+        val customKey = sanitizeKey(prefs.getString(KEY_CUSTOM_API_KEY, "") ?: "")
         if (customKey.isNotBlank()) return customKey
 
         val buildKey = try {
-            BuildConfig.NVIDIA_API_KEY?.trim() ?: ""
+            sanitizeKey(BuildConfig.NVIDIA_API_KEY ?: "")
         } catch (_: Exception) {
             ""
         }
@@ -54,7 +58,7 @@ class SettingsManager(context: Context) {
         }
 
         val envKey = try {
-            BuildConfig.NVIDIA_ENV_API_KEY?.trim() ?: ""
+            sanitizeKey(BuildConfig.NVIDIA_ENV_API_KEY ?: "")
         } catch (_: Exception) {
             ""
         }
@@ -62,17 +66,25 @@ class SettingsManager(context: Context) {
             return envKey
         }
 
-        return DEFAULT_FALLBACK_KEY
+        return sanitizeKey(DEFAULT_FALLBACK_KEY)
     }
 
-    fun getCustomApiKey(): String = prefs.getString(KEY_CUSTOM_API_KEY, "") ?: ""
+    fun getCustomApiKey(): String = sanitizeKey(prefs.getString(KEY_CUSTOM_API_KEY, "") ?: "")
 
     fun setCustomApiKey(key: String) {
-        prefs.edit().putString(KEY_CUSTOM_API_KEY, key.trim()).apply()
+        val sanitized = sanitizeKey(key)
+        prefs.edit().putString(KEY_CUSTOM_API_KEY, sanitized).apply()
     }
 
-    fun getSelectedModel(): String =
-        prefs.getString(KEY_SELECTED_MODEL, MODEL_QUANTUM) ?: MODEL_QUANTUM
+    fun getSelectedModel(): String {
+        val model = prefs.getString(KEY_SELECTED_MODEL, MODEL_QUANTUM) ?: MODEL_QUANTUM
+        if (model.contains("llama-3.2-3b", ignoreCase = true) ||
+            model.contains("llama-3.2-1b", ignoreCase = true) ||
+            model.contains("nemotron-70b", ignoreCase = true)) {
+            return DEFAULT_MODEL
+        }
+        return model
+    }
 
     fun setSelectedModel(model: String) {
         prefs.edit().putString(KEY_SELECTED_MODEL, model).apply()

@@ -33,7 +33,7 @@ class TermuxCommandRunner(
         workingDir: File,
         timeoutMs: Long,
         maxOutputBytes: Int
-    ): CommandExecutionResult = run(command, workingDir, timeoutMs, maxOutputBytes, "ubuntu")
+    ): CommandExecutionResult = run(command, workingDir, timeoutMs, maxOutputBytes, "auto")
 
     override suspend fun run(
         command: String,
@@ -57,6 +57,21 @@ class TermuxCommandRunner(
             workingDir
         } else {
             workspaceRoot
+        }
+
+        val firstToken = trimmed.split(Regex("\\s+|&&|\\|\\||;")).firstOrNull()?.trim('\'', '"') ?: ""
+        val cleanFirst = if (firstToken.contains('/')) File(firstToken).name else firstToken
+        val isSpecialUtility = cleanFirst == "pkg" || cleanFirst == "neofetch" || cleanFirst == "proot" ||
+            cleanFirst.startsWith("termux-") || trimmed.contains("ubuntu22.sh") || trimmed.contains("start-ubuntu22.sh")
+
+        if (isSpecialUtility) {
+            return@withContext fallbackExecutor.execute(
+                commandLine = trimmed,
+                workingDir = effectiveDir,
+                workspaceRoot = workspaceRoot,
+                timeoutMs = timeoutMs,
+                maxOutputBytes = maxOutputBytes
+            )
         }
 
         val resolvedEnv = when (environment.trim().lowercase()) {

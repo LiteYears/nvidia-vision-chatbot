@@ -105,6 +105,8 @@ fun ChatScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val terminalState by viewModel.terminalState.collectAsState()
+    val availableModels by viewModel.availableModels.collectAsState()
+    val isSyncingModels by viewModel.isSyncingModels.collectAsState()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -748,6 +750,7 @@ fun ChatScreen(
                             onClearTerminal = viewModel::clearTerminal,
                             onReinitializeEnv = { viewModel.initializeTermuxEnvironment(force = true) },
                             onHistoryNavigate = viewModel::navigateTerminalHistory,
+                            onViewAgentClick = { viewModel.setAppMode(AppMode.AGENT) },
                             modifier = Modifier.fillMaxSize()
                         )
                     }
@@ -760,6 +763,9 @@ fun ChatScreen(
     ModelSelectorSheet(
         isOpen = uiState.isModelSheetOpen,
         selectedModel = uiState.selectedModel,
+        modelsList = availableModels,
+        isSyncing = isSyncingModels,
+        onSyncClick = viewModel::syncModelsFromNvidia,
         onModelSelected = viewModel::setSelectedModel,
         onOpenParametersClick = { viewModel.setParametersSheetOpen(true) },
         onDismiss = { viewModel.setModelSheetOpen(false) }

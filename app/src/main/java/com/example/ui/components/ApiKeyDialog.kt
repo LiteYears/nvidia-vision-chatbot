@@ -314,8 +314,8 @@ fun ApiKeyDialog(
                                 if (clip != null && clip.itemCount > 0) {
                                     val text = clip.getItemAt(0).text?.toString() ?: ""
                                     if (text.isNotBlank()) {
-                                        keyInput = text.trim()
-                                        Toast.makeText(context, "Pasted from clipboard", Toast.LENGTH_SHORT).show()
+                                        keyInput = text.trim().trim('.', ',', ';', ':', '"', '\'', '`', ' ')
+                                        Toast.makeText(context, "Pasted and formatted from clipboard", Toast.LENGTH_SHORT).show()
                                     }
                                 }
                             }
@@ -373,7 +373,8 @@ fun ApiKeyDialog(
 
                     Button(
                         onClick = {
-                            onSaveKey(keyInput.trim())
+                            val sanitizedKey = keyInput.trim().trim('.', ',', ';', ':', '"', '\'', '`', ' ')
+                            onSaveKey(sanitizedKey)
                             Toast.makeText(context, "API Key saved successfully", Toast.LENGTH_SHORT).show()
                             onDismiss()
                         },

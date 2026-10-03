@@ -159,11 +159,44 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     )
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
 
+    private val _availableModels = MutableStateFlow<List<com.example.ui.components.ModelOption>>(com.example.ui.components.AvailableModels)
+    val availableModels: StateFlow<List<com.example.ui.components.ModelOption>> = _availableModels.asStateFlow()
+
+    private val _isSyncingModels = MutableStateFlow(false)
+    val isSyncingModels: StateFlow<Boolean> = _isSyncingModels.asStateFlow()
+
+    fun syncModelsFromNvidia() {
+        viewModelScope.launch {
+            _isSyncingModels.value = true
+            try {
+                val result = apiClient.fetchAvailableModels()
+                result.onSuccess { remoteItems ->
+                    if (remoteItems.isNotEmpty()) {
+                        // Filter out non-chat models (embeddings, reward, safety classifiers, parsers)
+                        val chatModels = remoteItems.filter { item ->
+                            val id = item.id.lowercase()
+                            !id.contains("embed") && !id.contains("reward") &&
+                                    !id.contains("detector") && !id.contains("guard") &&
+                                    !id.contains("clip") && !id.contains("parse") &&
+                                    !id.contains("synthetic") && !id.contains("calibration")
+                        }
+                        val mapped = chatModels.map { com.example.ui.components.modelIdToOption(it.id) }
+                        _availableModels.value = listOf(com.example.ui.components.Quantum3Option) + mapped.filter { it.id != "Quantum 3" }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+            _isSyncingModels.value = false
+        }
+    }
+
     private var tts: TextToSpeech? = null
     private var messageCollectionJob: Job? = null
     private var generationJob: Job? = null
 
     init {
+        // Initial sync of live models from build.nvidia.com
+        syncModelsFromNvidia()
         // Observe conversation history
         viewModelScope.launch {
             repository.allConversations.collectLatest { convs ->
@@ -206,6 +239,23 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             AgentExecutionCoordinator.isRunning.collectLatest { running ->
                 _uiState.update { it.copy(isAgentLoading = running) }
+                _terminalState.update { it.copy(isAgentRunning = running) }
+            }
+        }
+
+        // Observe Foreground Service action descriptions for terminal header
+        viewModelScope.launch {
+            AgentExecutionCoordinator.currentActionDescription.collectLatest { action ->
+                _terminalState.update { it.copy(currentAgentAction = action) }
+            }
+        }
+
+        // Live stream Agent terminal lines into the terminal buffer
+        viewModelScope.launch {
+            AgentExecutionCoordinator.terminalEvents.collect { line ->
+                _terminalState.update { current ->
+                    current.copy(lines = (current.lines + line).takeLast(1000))
+                }
             }
         }
 
@@ -873,7 +923,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     isInitializingEnv = true,
                     lines = it.lines + TerminalLine(
                         type = TerminalLineType.SYSTEM_INFO,
-                        text = ">>> [Termux Bootstrap] Initializing real Ubuntu 22.04 LTS environment..."
+                        text = ">>> [Termux Bootstrap] Initializing Andronix Ubuntu 22.04 LTS CLI environment..."
                     )
                 )
             }
@@ -895,7 +945,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     isEnvInitialized = success,
                     lines = it.lines + TerminalLine(
                         type = if (success) TerminalLineType.SYSTEM_INFO else TerminalLineType.STDERR,
-                        text = if (success) ">>> [Termux Bootstrap] Ubuntu PRoot environment ready on Android kernel (/system/bin/sh)."
+                        text = if (success) ">>> [Termux Bootstrap] Andronix Ubuntu 22.04 LTS CLI environment ready on Android kernel (/system/bin/sh)."
                                else ">>> [Termux Bootstrap] Initialization finished with fallback mode."
                     )
                 )
@@ -933,7 +983,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val result = termuxRunner.run(
                     command = command,
                     workingDir = currentDir,
-                    timeoutMs = 30000L,
+                    timeoutMs = 60000L,
                     maxOutputBytes = 65536
                 )
 
@@ -1166,7 +1216,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun createAgentSession(goal: String) {
         val trimmedGoal = goal.trim()
         if (trimmedGoal.isBlank()) return
-        AgentExecutionCoordinator.stopExecution(getApplication())
 
         val state = _uiState.value
         val sessionId = UUID.randomUUID().toString()
@@ -1269,8 +1318,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         } else {
             return
         }
-
-        AgentExecutionCoordinator.stopExecution(getApplication())
 
         val userMessage = ChatMessage(
             id = UUID.randomUUID().toString(),
