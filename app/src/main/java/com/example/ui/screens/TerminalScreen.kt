@@ -179,7 +179,7 @@ fun TerminalScreen(
             onCopyClick = {
                 val fullText = filteredLines.joinToString("\n") { line ->
                     when (line.type) {
-                        TerminalLineType.INPUT -> "ubuntu@termux:~$ ${line.text}"
+                        TerminalLineType.INPUT -> "root@localhost:~# ${line.text}"
                         TerminalLineType.AGENT_COMMAND -> line.text
                         else -> line.text
                     }
@@ -889,7 +889,7 @@ private fun TacticalLineItem(line: TerminalLine) {
                     .padding(vertical = 2.dp)
             ) {
                 Text(
-                    text = "ubuntu@termux:~$ ",
+                    text = "root@localhost:~# ",
                     style = TextStyle(
                         fontFamily = FontFamily.Monospace,
                         fontSize = 11.5.sp,

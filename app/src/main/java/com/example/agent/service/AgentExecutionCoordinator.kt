@@ -231,7 +231,7 @@ object AgentExecutionCoordinator {
                 postTerminalEvent(
                     TerminalLine(
                         type = TerminalLineType.AGENT_COMMAND,
-                        text = "agent@termux:~$ $cmd",
+                        text = "root@localhost:~# $cmd",
                         isAgent = true,
                         tag = "RUN_COMMAND"
                     )
@@ -265,7 +265,7 @@ object AgentExecutionCoordinator {
                 postTerminalEvent(
                     TerminalLine(
                         type = TerminalLineType.AGENT_COMMAND,
-                        text = "agent@termux:~$ python3 -c \"$preview...\"",
+                        text = "root@localhost:~# python3 -c \"$preview...\"",
                         isAgent = true,
                         tag = "PYTHON"
                     )

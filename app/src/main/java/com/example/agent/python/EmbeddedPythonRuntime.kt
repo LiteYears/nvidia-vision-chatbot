@@ -3722,6 +3722,76 @@ class PythonInterpreter(
                 )
                 PyModule("runpy", members)
             }
+            "socketserver" -> {
+                val members = mapOf<String, Any?>(
+                    "TCPServer" to PyBuiltinFunc("TCPServer") { args, _ ->
+                        val address = args.getOrNull(0) as? List<*> ?: listOf("", 8000)
+                        val port = address.getOrNull(1) ?: 8000
+                        val server = PyFastApiApp()
+                        server.customAttrs["server_address"] = address
+                        server.customAttrs["serve_forever"] = PyBuiltinFunc("serve_forever") { _, _ ->
+                            appendStdout("Serving at port $port\n")
+                            null
+                        }
+                        server.customAttrs["shutdown"] = PyBuiltinFunc("shutdown") { _, _ -> null }
+                        server.customAttrs["server_close"] = PyBuiltinFunc("server_close") { _, _ -> null }
+                        server
+                    },
+                    "ThreadingTCPServer" to PyBuiltinFunc("ThreadingTCPServer") { args, _ ->
+                        val address = args.getOrNull(0) as? List<*> ?: listOf("", 8000)
+                        val port = address.getOrNull(1) ?: 8000
+                        val server = PyFastApiApp()
+                        server.customAttrs["server_address"] = address
+                        server.customAttrs["serve_forever"] = PyBuiltinFunc("serve_forever") { _, _ ->
+                            appendStdout("Serving at port $port\n")
+                            null
+                        }
+                        server.customAttrs["shutdown"] = PyBuiltinFunc("shutdown") { _, _ -> null }
+                        server.customAttrs["server_close"] = PyBuiltinFunc("server_close") { _, _ -> null }
+                        server
+                    },
+                    "BaseRequestHandler" to PyFastApiApp(),
+                    "StreamRequestHandler" to PyFastApiApp()
+                )
+                PyModule("socketserver", members)
+            }
+            "http.server" -> {
+                val members = mapOf<String, Any?>(
+                    "SimpleHTTPRequestHandler" to PyFastApiApp(),
+                    "BaseHTTPRequestHandler" to PyFastApiApp(),
+                    "HTTPServer" to PyBuiltinFunc("HTTPServer") { args, _ ->
+                        val address = args.getOrNull(0) as? List<*> ?: listOf("", 8000)
+                        val port = address.getOrNull(1) ?: 8000
+                        val server = PyFastApiApp()
+                        server.customAttrs["server_address"] = address
+                        server.customAttrs["serve_forever"] = PyBuiltinFunc("serve_forever") { _, _ ->
+                            appendStdout("Serving HTTP on 0.0.0.0 port $port (http://0.0.0.0:$port/) ...\n")
+                            null
+                        }
+                        server.customAttrs["shutdown"] = PyBuiltinFunc("shutdown") { _, _ -> null }
+                        server.customAttrs["server_close"] = PyBuiltinFunc("server_close") { _, _ -> null }
+                        server
+                    }
+                )
+                PyModule("http.server", members)
+            }
+            "http" -> {
+                val httpMembers = mapOf<String, Any?>(
+                    "server" to resolveModule("http.server", line)
+                )
+                PyModule("http", httpMembers)
+            }
+            "socket" -> {
+                val members = mapOf<String, Any?>(
+                    "AF_INET" to 2,
+                    "SOCK_STREAM" to 1,
+                    "SOL_SOCKET" to 1,
+                    "SO_REUSEADDR" to 2,
+                    "gethostname" to PyBuiltinFunc("gethostname") { _, _ -> "localhost" },
+                    "gethostbyname" to PyBuiltinFunc("gethostbyname") { _, _ -> "127.0.0.1" }
+                )
+                PyModule("socket", members)
+            }
             else -> {
                 // Workspace module resolution
                 val cleanSub = module.replace('.', '/')

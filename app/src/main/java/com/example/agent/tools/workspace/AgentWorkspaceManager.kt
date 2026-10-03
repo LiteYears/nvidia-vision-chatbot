@@ -152,9 +152,14 @@ node_modules/
         // Clean quotes and trim whitespace
         var trimmed = relativePath.trim().trim('\'', '"')
         val workspaceRoot = getWorkspaceDir(sessionId)
+        val currentWorkingDir = getCurrentWorkingDir(sessionId)
         val rootPath = workspaceRoot.canonicalPath
+
         // 1. Direct workspace root aliases
-        if (trimmed.isEmpty() || trimmed == "." || trimmed == "./" || trimmed == "/" || trimmed == "~" || trimmed == "/workspace") {
+        if (trimmed.isEmpty() || trimmed == "." || trimmed == "./" || trimmed == "/" || trimmed == "~" ||
+            trimmed == "/workspace" || trimmed == "/workspace/" || trimmed == "workspace" || trimmed == "workspace/" ||
+            trimmed == "/home/ubuntu" || trimmed == "/home/ubuntu/" || trimmed == "/home/ubuntu/workspace" || trimmed == "/home/ubuntu/workspace/" ||
+            trimmed == "/home" || trimmed == "/root" || trimmed == "~/workspace" || trimmed == "~/workspace/") {
             return workspaceRoot
         }
 
@@ -165,8 +170,14 @@ node_modules/
             trimmed = trimmed.removePrefix("/home/ubuntu/workspace/").trimStart('/')
         } else if (trimmed.startsWith("~/workspace/")) {
             trimmed = trimmed.removePrefix("~/workspace/").trimStart('/')
-        } else if (trimmed == "/home/ubuntu/workspace" || trimmed == "~/workspace") {
-            return workspaceRoot
+        } else if (trimmed.startsWith("/home/ubuntu/")) {
+            val sub = trimmed.removePrefix("/home/ubuntu/").trimStart('/')
+            trimmed = if (sub.startsWith("workspace/")) sub.removePrefix("workspace/").trimStart('/')
+            else if (sub == "workspace") ""
+            else sub
+            if (trimmed.isEmpty()) return workspaceRoot
+        } else if (trimmed.startsWith("workspace/")) {
+            trimmed = trimmed.removePrefix("workspace/").trimStart('/')
         }
 
         val isBlockedSystemPath = trimmed.startsWith("/etc/") || trimmed == "/etc" ||
@@ -193,7 +204,25 @@ node_modules/
                 File(workspaceRoot, sub).canonicalFile
             }
         } else {
-            File(workspaceRoot, trimmed).canonicalFile
+            // Check if file/dir exists relative to currentWorkingDir first, then workspaceRoot
+            val inCwd = if (currentWorkingDir != workspaceRoot && currentWorkingDir.exists()) File(currentWorkingDir, trimmed) else null
+            val inRoot = File(workspaceRoot, trimmed)
+
+            if (inCwd != null && inCwd.exists()) {
+                inCwd.canonicalFile
+            } else if (inRoot.exists()) {
+                inRoot.canonicalFile
+            } else if (inCwd != null && currentWorkingDir.exists()) {
+                // If creating a new file/dir while inside a subfolder:
+                // If trimmed already starts with the subfolder name (e.g. cwd is rest_api_service and trimmed is "rest_api_service/tests"):
+                if (trimmed.startsWith(currentWorkingDir.name + "/")) {
+                    File(workspaceRoot, trimmed).canonicalFile
+                } else {
+                    inCwd.canonicalFile
+                }
+            } else {
+                inRoot.canonicalFile
+            }
         }
 
         val targetPath = target.canonicalPath

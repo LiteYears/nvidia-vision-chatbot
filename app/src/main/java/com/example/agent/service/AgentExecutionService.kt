@@ -501,7 +501,7 @@ class AgentExecutionService : Service() {
                 val cmdExecuted = (record.arguments["command"] ?: record.arguments["cmd"] ?: record.arguments["code"] ?: record.arguments["script_path"])?.toString() ?: record.toolName
                 val toolFeedbackContent = buildString {
                     appendLine("```terminal-output")
-                    appendLine("ubuntu@termux:~/workspace$ $cmdExecuted")
+                    appendLine("root@localhost:~# $cmdExecuted")
                     if (record.isSuccess) {
                         appendLine(record.result?.trim() ?: "(Command finished with no output)")
                         appendLine("[Process exited 0]")

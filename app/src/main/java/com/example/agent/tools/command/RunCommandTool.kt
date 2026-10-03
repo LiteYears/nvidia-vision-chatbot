@@ -95,32 +95,56 @@ class RunCommandTool(
         val workspaceRoot = workspaceManager.getWorkspaceDir()
         val activeWorkingDir = workspaceManager.getCurrentWorkingDir()
 
-        // 1. Resolve and validate working directory (supporting active working dir, /workspace, ~/workspace, and relative paths)
-        val resolvedWorkingDir: File = if (workingDirArg.isBlank() || workingDirArg == "." || workingDirArg == "./") {
-            activeWorkingDir
-        } else if (workingDirArg == "/workspace" || workingDirArg == "~/workspace" || workingDirArg == "~") {
-            workspaceRoot
-        } else if (workingDirArg.startsWith("/workspace/")) {
-            val sub = workingDirArg.removePrefix("/workspace/").trimStart('/')
-            File(workspaceRoot, sub).canonicalFile
-        } else if (workingDirArg.startsWith("~/workspace/")) {
-            val sub = workingDirArg.removePrefix("~/workspace/").trimStart('/')
-            File(workspaceRoot, sub).canonicalFile
-        } else {
-            val candidate = File(workingDirArg)
-            if (candidate.isAbsolute && candidate.exists()) {
-                candidate.canonicalFile
-            } else {
-                File(activeWorkingDir, workingDirArg.trimStart('/')).canonicalFile
+        // 1. Resolve and validate working directory (supporting active working dir, /workspace, /home/ubuntu, ~/workspace, and relative paths)
+        val cleanWorkingDir = workingDirArg.trim('\'', '"')
+        val strippedDir = when {
+            cleanWorkingDir.startsWith("/home/ubuntu/workspace/") -> cleanWorkingDir.removePrefix("/home/ubuntu/workspace/").trimStart('/')
+            cleanWorkingDir.startsWith("/workspace/") -> cleanWorkingDir.removePrefix("/workspace/").trimStart('/')
+            cleanWorkingDir.startsWith("~/workspace/") -> cleanWorkingDir.removePrefix("~/workspace/").trimStart('/')
+            cleanWorkingDir.startsWith("/home/ubuntu/") -> {
+                val rem = cleanWorkingDir.removePrefix("/home/ubuntu/").trimStart('/')
+                if (rem.startsWith("workspace/")) rem.removePrefix("workspace/").trimStart('/')
+                else if (rem == "workspace") ""
+                else rem
             }
+            cleanWorkingDir.startsWith("~/") -> cleanWorkingDir.removePrefix("~/").trimStart('/')
+            cleanWorkingDir == "/home/ubuntu/workspace" || cleanWorkingDir == "/workspace" ||
+            cleanWorkingDir == "~/workspace" || cleanWorkingDir == "/home/ubuntu" ||
+            cleanWorkingDir == "~" || cleanWorkingDir == "/" || cleanWorkingDir == "/home" -> ""
+            else -> cleanWorkingDir
         }
 
-        if (!resolvedWorkingDir.exists() || !resolvedWorkingDir.isDirectory) {
-            return ToolResult.failure(
-                callId = callId,
-                toolName = definition.name,
-                error = "Working directory does not exist or is not a directory: '$workingDirArg'"
-            )
+        val resolvedWorkingDir: File = when {
+            strippedDir.isEmpty() || strippedDir == "." || strippedDir == "./" -> {
+                if (activeWorkingDir.exists() && activeWorkingDir.isDirectory) activeWorkingDir else workspaceRoot
+            }
+            File(strippedDir).isAbsolute && File(strippedDir).exists() && File(strippedDir).isDirectory -> {
+                File(strippedDir).canonicalFile
+            }
+            // Check if activeWorkingDir is already the requested directory name
+            (activeWorkingDir.name.equals(strippedDir.trimEnd('/'), ignoreCase = true) ||
+             activeWorkingDir.canonicalPath.endsWith(File.separator + strippedDir.trimEnd('/'))) && activeWorkingDir.exists() && activeWorkingDir.isDirectory -> {
+                activeWorkingDir
+            }
+            // Check relative to activeWorkingDir
+            File(activeWorkingDir, strippedDir).exists() && File(activeWorkingDir, strippedDir).isDirectory -> {
+                File(activeWorkingDir, strippedDir).canonicalFile
+            }
+            // Check relative to workspaceRoot
+            File(workspaceRoot, strippedDir).exists() && File(workspaceRoot, strippedDir).isDirectory -> {
+                File(workspaceRoot, strippedDir).canonicalFile
+            }
+            // Check if user specified "workspace/foo" and we strip "workspace/"
+            strippedDir.startsWith("workspace/") && File(workspaceRoot, strippedDir.removePrefix("workspace/")).isDirectory -> {
+                File(workspaceRoot, strippedDir.removePrefix("workspace/")).canonicalFile
+            }
+            else -> {
+                return ToolResult.failure(
+                    callId = callId,
+                    toolName = definition.name,
+                    error = "Working directory does not exist or is not a directory: '$workingDirArg'"
+                )
+            }
         }
 
         // 2. Validate command and arguments through security policy

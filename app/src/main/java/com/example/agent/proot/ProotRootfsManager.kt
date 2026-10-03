@@ -480,8 +480,14 @@ class ProotRootfsManager(
         val rootfsDir = persistentRootfsDir
 
         // 1. Direct workspace root aliases
-        if (trimmed == "/workspace" || trimmed == "/home/ubuntu/workspace" || trimmed == "~/workspace") {
+        if (trimmed == "/workspace" || trimmed == "/home/ubuntu/workspace" || trimmed == "~/workspace" ||
+            trimmed == "~" || trimmed == "/home/ubuntu" || trimmed == "/root") {
             return workspaceRoot
+        }
+        if (trimmed.startsWith("~/")) {
+            val sub = trimmed.removePrefix("~/").trimStart('/')
+            val cleaned = if (sub.startsWith("workspace/")) sub.removePrefix("workspace/").trimStart('/') else sub
+            return if (cleaned.isBlank()) workspaceRoot else File(workspaceRoot, cleaned).canonicalFile
         }
         if (trimmed.startsWith("/workspace/")) {
             val sub = trimmed.removePrefix("/workspace/").trimStart('/')
@@ -491,9 +497,15 @@ class ProotRootfsManager(
             val sub = trimmed.removePrefix("/home/ubuntu/workspace/").trimStart('/')
             return if (sub.isBlank()) workspaceRoot else File(workspaceRoot, sub).canonicalFile
         }
-        if (trimmed.startsWith("~/workspace/")) {
-            val sub = trimmed.removePrefix("~/workspace/").trimStart('/')
-            return if (sub.isBlank()) workspaceRoot else File(workspaceRoot, sub).canonicalFile
+        if (trimmed.startsWith("/home/ubuntu/")) {
+            val sub = trimmed.removePrefix("/home/ubuntu/").trimStart('/')
+            val cleaned = if (sub.startsWith("workspace/")) sub.removePrefix("workspace/").trimStart('/') else sub
+            return if (cleaned.isBlank()) workspaceRoot else File(workspaceRoot, cleaned).canonicalFile
+        }
+        if (trimmed.startsWith("/root/")) {
+            val sub = trimmed.removePrefix("/root/").trimStart('/')
+            val cleaned = if (sub.startsWith("workspace/")) sub.removePrefix("workspace/").trimStart('/') else sub
+            return if (cleaned.isBlank()) workspaceRoot else File(workspaceRoot, cleaned).canonicalFile
         }
 
         // 2. Python dist-packages mapping to workspace lib/ when requested
