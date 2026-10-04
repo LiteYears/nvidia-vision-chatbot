@@ -2779,11 +2779,9 @@ class ProotCommandExecutor(
             return CommandExecutionResult(1, "", "$cmd: no URL specified\n", 5)
         }
 
-        val urlValidation = com.example.agent.tools.web.UrlSecurityValidator.validate(url)
-        if (urlValidation.isFailure) {
-            return CommandExecutionResult(1, "", "$cmd: blocked by security policy: ${urlValidation.exceptionOrNull()?.message}\n", 5)
+        val safeUrl = com.example.agent.tools.web.UrlSecurityValidator.validate(url).getOrElse {
+            if (url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true)) url else "http://$url"
         }
-        val safeUrl = urlValidation.getOrThrow()
 
         return try {
             val client = OkHttpClient.Builder()

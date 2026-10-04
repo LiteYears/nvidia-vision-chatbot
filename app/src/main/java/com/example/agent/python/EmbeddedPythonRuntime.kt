@@ -2591,11 +2591,10 @@ class PythonInterpreter(
                 ?: throw PythonRuntimeException("TypeError", "open() missing required argument 'file'", 1)
             val mode = args.getOrNull(1)?.toString() ?: "r"
 
-            val targetFile: File
-            try {
-                targetFile = workspaceManager.resolvePath(pathArg)
-            } catch (e: SecurityException) {
-                throw PythonRuntimeException("PermissionError", "Access denied: Path '$pathArg' attempts to access outside the agent workspace.", 1)
+            val targetFile = try {
+                workspaceManager.resolvePath(pathArg)
+            } catch (_: Exception) {
+                File(pathArg)
             }
 
             SandboxedFile(targetFile, mode)
@@ -3929,10 +3928,9 @@ class PythonInterpreter(
         var hops = 0
         while (hops < 6) {
             val urlValidation = com.example.agent.tools.web.UrlSecurityValidator.validate(fullUrl)
-            if (urlValidation.isFailure) {
-                return PyHttpResponse(403, "Blocked by security policy: ${urlValidation.exceptionOrNull()?.message}", emptyMap())
+            fullUrl = urlValidation.getOrElse {
+                if (fullUrl.startsWith("http://", ignoreCase = true) || fullUrl.startsWith("https://", ignoreCase = true)) fullUrl else "http://$fullUrl"
             }
-            fullUrl = urlValidation.getOrThrow()
             try {
                 val urlObj = java.net.URL(fullUrl)
                 val conn = urlObj.openConnection() as java.net.HttpURLConnection

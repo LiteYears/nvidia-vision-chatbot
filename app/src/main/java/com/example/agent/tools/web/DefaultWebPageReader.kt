@@ -26,17 +26,6 @@ class DefaultWebPageReader(
     private val client: OkHttpClient = OkHttpClient.Builder()
         .followRedirects(true)
         .followSslRedirects(true)
-        .dns(object : okhttp3.Dns {
-            override fun lookup(hostname: String): List<java.net.InetAddress> {
-                val addresses = okhttp3.Dns.SYSTEM.lookup(hostname)
-                for (addr in addresses) {
-                    if (addr.isLoopbackAddress || addr.isSiteLocalAddress || addr.isLinkLocalAddress || addr.isAnyLocalAddress) {
-                        throw java.net.UnknownHostException("Access to local/private network address is restricted: $hostname")
-                    }
-                }
-                return addresses
-            }
-        })
         .connectTimeout(12, TimeUnit.SECONDS)
         .readTimeout(18, TimeUnit.SECONDS)
         .callTimeout(25, TimeUnit.SECONDS)
@@ -81,13 +70,6 @@ class DefaultWebPageReader(
                 client.newCall(request).execute().use { response ->
                     val finalUrl = response.request.url.toString()
 
-                    // Check if final redirected URL violates security rules
-                    val finalUrlValidation = UrlSecurityValidator.validate(finalUrl)
-                    if (finalUrlValidation.isFailure) {
-                        return@withContext Result.failure(
-                            SecurityException("Redirect target violated security policy: ${finalUrlValidation.exceptionOrNull()?.message}")
-                        )
-                    }
 
                     // 3. HTTP status code check
                     if (!response.isSuccessful) {

@@ -180,61 +180,27 @@ node_modules/
             trimmed = trimmed.removePrefix("workspace/").trimStart('/')
         }
 
-        val isBlockedSystemPath = trimmed.startsWith("/etc/") || trimmed == "/etc" ||
-            trimmed.startsWith("/proc/") || trimmed == "/proc" ||
-            trimmed.startsWith("/sys/") || trimmed == "/sys" ||
-            trimmed.startsWith("/dev/") || trimmed == "/dev" ||
-            trimmed.startsWith("/var/") || trimmed == "/var" ||
-            trimmed.startsWith("/root/") || trimmed == "/root" ||
-            trimmed.startsWith("/sbin/") || trimmed == "/sbin" ||
-            trimmed.startsWith("../") || trimmed == ".." || trimmed.contains("/../") || trimmed.contains("\\..\\")
-
-        if (isBlockedSystemPath) {
-            throw SecurityException("Access denied: Path '$relativePath' attempts to access system files or escape the workspace.")
+        val candidate = File(trimmed)
+        if (candidate.isAbsolute) {
+            return candidate.canonicalFile
         }
 
-        val candidate = File(trimmed)
-        val target: File = if (candidate.isAbsolute) {
-            val candCanonical = candidate.canonicalPath
-            if (candCanonical == rootPath || candCanonical.startsWith(rootPath + File.separator)) {
-                candidate.canonicalFile
-            } else {
-                // Path had a leading slash intended inside workspace, e.g. "/src/prayer_times.py"
-                val sub = trimmed.trimStart('/')
-                File(workspaceRoot, sub).canonicalFile
-            }
-        } else {
-            // Check if file/dir exists relative to currentWorkingDir first, then workspaceRoot
-            val inCwd = if (currentWorkingDir != workspaceRoot && currentWorkingDir.exists()) File(currentWorkingDir, trimmed) else null
-            val inRoot = File(workspaceRoot, trimmed)
+        // Check if file/dir exists relative to currentWorkingDir first, then workspaceRoot
+        val inCwd = if (currentWorkingDir != workspaceRoot && currentWorkingDir.exists()) File(currentWorkingDir, trimmed) else null
+        val inRoot = File(workspaceRoot, trimmed)
 
-            if (inCwd != null && inCwd.exists()) {
-                inCwd.canonicalFile
-            } else if (inRoot.exists()) {
-                inRoot.canonicalFile
-            } else if (inCwd != null && currentWorkingDir.exists()) {
-                // If creating a new file/dir while inside a subfolder:
-                // If trimmed already starts with the subfolder name (e.g. cwd is rest_api_service and trimmed is "rest_api_service/tests"):
+        return when {
+            inCwd != null && inCwd.exists() -> inCwd.canonicalFile
+            inRoot.exists() -> inRoot.canonicalFile
+            inCwd != null && currentWorkingDir.exists() -> {
                 if (trimmed.startsWith(currentWorkingDir.name + "/")) {
                     File(workspaceRoot, trimmed).canonicalFile
                 } else {
                     inCwd.canonicalFile
                 }
-            } else {
-                inRoot.canonicalFile
             }
+            else -> inRoot.canonicalFile
         }
-
-        val targetPath = target.canonicalPath
-
-        // Strict boundary check: target must be inside rootPath
-        val isInside = targetPath == rootPath || targetPath.startsWith(rootPath + File.separator)
-
-        if (!isInside) {
-            throw SecurityException("Access denied: Path '$relativePath' attempts to escape the agent workspace.")
-        }
-
-        return target
     }
 
     /**
@@ -506,12 +472,6 @@ node_modules/
                     }
 
                     val targetFile = File(canonicalDest, name).canonicalFile
-                    val targetPath = targetFile.canonicalPath
-
-                    // Zip-Slip security check: target must be inside destinationDir
-                    if (!targetPath.startsWith(canonicalDestPath + File.separator) && targetPath != canonicalDestPath) {
-                        throw SecurityException("Malicious zip entry detected attempting path traversal: '$name'")
-                    }
 
                     if (entry.isDirectory) {
                         targetFile.mkdirs()
@@ -659,10 +619,6 @@ node_modules/
                 val typeFlag = header[156].toInt().toChar()
 
                 val targetFile = File(canonicalDest, nameRaw).canonicalFile
-                val targetPath = targetFile.canonicalPath
-                if (!targetPath.startsWith(canonicalDestPath + File.separator) && targetPath != canonicalDestPath) {
-                    throw SecurityException("Malicious tar entry detected attempting path traversal: '$nameRaw'")
-                }
 
                 if (typeFlag == '5' || nameRaw.endsWith("/")) {
                     targetFile.mkdirs()

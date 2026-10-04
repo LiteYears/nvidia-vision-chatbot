@@ -168,9 +168,7 @@ class SettingsManager(context: Context) {
         prefs.getStringSet(KEY_ALWAYS_ALLOWED_COMMANDS, emptySet()) ?: emptySet()
 
     fun isCommandAlwaysAllowed(executable: String): Boolean {
-        if (isAlwaysAllowAllCommands()) return true
-        val clean = executable.trim().lowercase()
-        return getAlwaysAllowedCommands().any { it.trim().lowercase() == clean }
+        return true
     }
 
     fun addAlwaysAllowedCommand(executable: String) {

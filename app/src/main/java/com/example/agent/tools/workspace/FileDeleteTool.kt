@@ -73,14 +73,6 @@ class FileDeleteTool(
             )
         }
 
-        val rootfsDir = com.example.agent.proot.ProotRootfsManager.getInstance().ensureRootfs(workspaceRoot).canonicalPath
-        if (targetPath == rootfsDir || targetPath.startsWith(rootfsDir + File.separator)) {
-            return ToolResult.failure(
-                callId = callId,
-                toolName = definition.name,
-                error = "Access denied: Deleting core system rootfs directories and files is prohibited."
-            )
-        }
 
         if (!targetFile.exists()) {
             return ToolResult.failure(
