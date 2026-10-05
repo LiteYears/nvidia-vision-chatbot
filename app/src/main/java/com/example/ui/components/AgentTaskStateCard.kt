@@ -101,52 +101,53 @@ fun AgentTaskStateCard(
     Surface(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 2.dp)
+            .padding(horizontal = 14.dp, vertical = 4.dp)
             .testTag("agent_task_state_card"),
-        shape = RoundedCornerShape(10.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
         border = BorderStroke(
             width = 1.dp,
-            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.22f)
+            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)
         )
     ) {
         Column(
             modifier = Modifier
                 .clickable { isExpanded = !isExpanded }
-                .padding(horizontal = 8.dp, vertical = 4.5.dp)
+                .padding(horizontal = 12.dp, vertical = 8.dp)
         ) {
-            // Minimal single-line bar when collapsed
+            // Main single-line status bar when collapsed
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Left: Icon + Goal / Active Subtask
+                // Left: Agent Icon + Goal / Active Subtask
                 Row(
                     modifier = Modifier.weight(1f),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(19.dp)
-                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f), CircleShape),
+                            .size(28.dp)
+                            .clip(RoundedCornerShape(7.dp))
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = Icons.Outlined.SmartToy,
                             contentDescription = "Agent",
                             tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(11.dp)
+                            modifier = Modifier.size(16.dp)
                         )
                     }
 
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = session.goal,
-                            style = MaterialTheme.typography.bodySmall.copy(
+                            style = MaterialTheme.typography.bodyMedium.copy(
                                 fontWeight = FontWeight.SemiBold,
-                                fontSize = 11.5.sp,
+                                fontSize = 13.sp,
                                 color = MaterialTheme.colorScheme.onSurface
                             ),
                             maxLines = 1,
@@ -161,8 +162,8 @@ fun AgentTaskStateCard(
                         Text(
                             text = subText,
                             style = MaterialTheme.typography.labelSmall.copy(
-                                fontSize = 8.5.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f)
+                                fontSize = 11.5.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
                             ),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
@@ -170,19 +171,20 @@ fun AgentTaskStateCard(
                     }
                 }
 
-                Spacer(modifier = Modifier.width(4.dp))
+                Spacer(modifier = Modifier.width(6.dp))
 
                 // Right: Quick Pause Button + Status badge + Subtask count + Expand Chevron
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(3.5.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    // Quick Pause / Play Button
+                    // Quick Pause / Play Button with comfortable touch target
                     Surface(
                         shape = CircleShape,
-                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
                         modifier = Modifier
-                            .size(18.dp)
+                            .size(34.dp)
                             .clip(CircleShape)
                             .clickable { onTogglePause() }
                     ) {
@@ -191,21 +193,21 @@ fun AgentTaskStateCard(
                                 imageVector = if (session.status == AgentTaskStatus.PAUSED) Icons.Default.PlayArrow else Icons.Default.Pause,
                                 contentDescription = if (session.status == AgentTaskStatus.PAUSED) "Resume" else "Pause",
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(9.dp)
+                                modifier = Modifier.size(16.dp)
                             )
                         }
                     }
 
                     // Compact Status Pill
                     Surface(
-                        shape = RoundedCornerShape(5.dp),
+                        shape = RoundedCornerShape(8.dp),
                         color = statusColor.copy(alpha = 0.15f),
                         border = BorderStroke(1.dp, statusColor.copy(alpha = 0.35f))
                     ) {
                         Row(
-                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.5.dp),
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.5.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(2.5.dp)
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
                             val isTaskActive = session.status == AgentTaskStatus.IN_PROGRESS ||
                                 session.status == AgentTaskStatus.THINKING ||
@@ -214,14 +216,14 @@ fun AgentTaskStateCard(
                             ClaudePulseIndicator(
                                 color = statusColor,
                                 isRunning = isTaskActive,
-                                modifier = Modifier.size(8.dp)
+                                modifier = Modifier.size(10.dp)
                             )
                             Text(
                                 text = session.status.displayName,
                                 style = MaterialTheme.typography.labelSmall.copy(
                                     fontWeight = FontWeight.Bold,
                                     color = statusColor,
-                                    fontSize = 8.5.sp
+                                    fontSize = 11.sp
                                 )
                             )
                         }
@@ -230,17 +232,18 @@ fun AgentTaskStateCard(
                     // Subtasks progress pill if available
                     session.plan?.let { plan ->
                         Surface(
-                            shape = RoundedCornerShape(5.dp),
-                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f)
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
+                            border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
                         ) {
                             Text(
                                 text = "${plan.completedCount}/${plan.totalCount}",
                                 style = MaterialTheme.typography.labelSmall.copy(
-                                    fontWeight = FontWeight.Medium,
-                                    fontSize = 8.5.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 11.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 ),
-                                modifier = Modifier.padding(horizontal = 3.5.dp, vertical = 1.5.dp)
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
                             )
                         }
                     }
@@ -250,7 +253,7 @@ fun AgentTaskStateCard(
                         contentDescription = if (isExpanded) "Collapse" else "Expand",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier
-                            .size(14.dp)
+                            .size(20.dp)
                             .rotate(chevronRotation)
                     )
                 }
@@ -261,35 +264,35 @@ fun AgentTaskStateCard(
                 Column(modifier = Modifier.padding(top = 6.dp)) {
                     // Full Goal Text
                     Surface(
-                        shape = RoundedCornerShape(6.dp),
-                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.65f),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.18f)),
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.75f),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.22f)),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Column(modifier = Modifier.padding(6.dp)) {
+                        Column(modifier = Modifier.padding(10.dp)) {
                             Text(
                                 text = "GOAL",
                                 style = MaterialTheme.typography.labelSmall.copy(
                                     fontWeight = FontWeight.Bold,
-                                    fontSize = 8.5.sp,
-                                    letterSpacing = 0.5.sp,
+                                    fontSize = 10.sp,
+                                    letterSpacing = 0.8.sp,
                                     color = MaterialTheme.colorScheme.primary
                                 )
                             )
                             Text(
                                 text = session.goal,
-                                style = MaterialTheme.typography.bodySmall.copy(
+                                style = MaterialTheme.typography.bodyMedium.copy(
                                     fontWeight = FontWeight.Medium,
                                     color = MaterialTheme.colorScheme.onSurface,
-                                    fontSize = 11.sp,
-                                    lineHeight = 14.5.sp
+                                    fontSize = 13.sp,
+                                    lineHeight = 18.sp
                                 ),
-                                modifier = Modifier.padding(top = 1.dp)
+                                modifier = Modifier.padding(top = 3.dp)
                             )
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(4.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
 
                     // Session Info & Shell Control Row
                     Row(
@@ -300,16 +303,16 @@ fun AgentTaskStateCard(
                         Text(
                             text = "Model: ${session.modelUsed.substringAfterLast("/")}",
                             style = MaterialTheme.typography.labelSmall.copy(
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                                fontSize = 9.sp
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
+                                fontSize = 11.sp
                             )
                         )
 
                         Surface(
-                            shape = RoundedCornerShape(4.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant,
                             modifier = Modifier
-                                .clip(RoundedCornerShape(4.dp))
+                                .clip(RoundedCornerShape(8.dp))
                                 .clickable { onOpenCommandControl() }
                         ) {
                             Text(
@@ -317,16 +320,16 @@ fun AgentTaskStateCard(
                                 style = MaterialTheme.typography.labelSmall.copy(
                                     color = if (isAlwaysAllowCommands) MaterialTheme.colorScheme.primary else Color(0xFFF59E0B),
                                     fontWeight = FontWeight.SemiBold,
-                                    fontSize = 8.5.sp
+                                    fontSize = 11.sp
                                 ),
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                             )
                         }
                     }
 
                     // Structured Task Plan Checklist (compact, ordered, persistent)
                     session.plan?.let { plan ->
-                        Spacer(modifier = Modifier.height(4.dp))
+                        Spacer(modifier = Modifier.height(8.dp))
                         TaskPlanChecklist(
                             plan = plan,
                             onRetrySubtask = onRetrySubtask,
@@ -334,7 +337,7 @@ fun AgentTaskStateCard(
                         )
                     }
 
-                    Spacer(modifier = Modifier.height(5.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
 
                     // Action buttons: Pause/Resume and Mark Complete
                     Row(
@@ -344,63 +347,63 @@ fun AgentTaskStateCard(
                     ) {
                         // Pause / Resume Button
                         Surface(
-                            shape = RoundedCornerShape(6.dp),
+                            shape = RoundedCornerShape(8.dp),
                             color = MaterialTheme.colorScheme.surfaceVariant,
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
                             modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
+                                .clip(RoundedCornerShape(8.dp))
                                 .clickable { onTogglePause() }
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(3.dp)
+                                horizontalArrangement = Arrangement.spacedBy(5.dp)
                             ) {
                                 Icon(
                                     imageVector = if (session.status == AgentTaskStatus.PAUSED) Icons.Default.PlayArrow else Icons.Default.Pause,
                                     contentDescription = null,
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(10.dp)
+                                    modifier = Modifier.size(14.dp)
                                 )
                                 Text(
                                     text = if (session.status == AgentTaskStatus.PAUSED) "Resume" else "Pause",
                                     style = MaterialTheme.typography.labelSmall.copy(
                                         fontWeight = FontWeight.Medium,
-                                        fontSize = 9.5.sp,
+                                        fontSize = 12.sp,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 )
                             }
                         }
 
-                        Spacer(modifier = Modifier.width(6.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
 
                         // Complete Button
                         if (session.status != AgentTaskStatus.COMPLETED) {
                             Surface(
-                                shape = RoundedCornerShape(6.dp),
-                                color = Color(0xFF4ADE80).copy(alpha = 0.15f),
-                                border = BorderStroke(1.dp, Color(0xFF4ADE80).copy(alpha = 0.4f)),
+                                shape = RoundedCornerShape(8.dp),
+                                color = Color(0xFF4ADE80).copy(alpha = 0.16f),
+                                border = BorderStroke(1.dp, Color(0xFF4ADE80).copy(alpha = 0.45f)),
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
+                                    .clip(RoundedCornerShape(8.dp))
                                     .clickable { onMarkCompleted() }
                             ) {
                                 Row(
-                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
                                 ) {
                                     Icon(
                                         imageVector = Icons.Default.Check,
                                         contentDescription = null,
                                         tint = Color(0xFF4ADE80),
-                                        modifier = Modifier.size(10.dp)
+                                        modifier = Modifier.size(14.dp)
                                     )
                                     Text(
                                         text = "Complete",
                                         style = MaterialTheme.typography.labelSmall.copy(
                                             fontWeight = FontWeight.SemiBold,
-                                            fontSize = 9.5.sp,
+                                            fontSize = 12.sp,
                                             color = Color(0xFF4ADE80)
                                         )
                                     )

@@ -58,7 +58,7 @@ fun TopNavigationBar(
         IconButton(
             onClick = onMenuClick,
             modifier = Modifier
-                .size(44.dp)
+                .size(48.dp)
                 .testTag("menu_button")
         ) {
             Icon(
@@ -73,6 +73,10 @@ fun TopNavigationBar(
         Surface(
             shape = RoundedCornerShape(20.dp),
             color = MaterialTheme.colorScheme.surfaceVariant,
+            border = androidx.compose.foundation.BorderStroke(
+                1.dp,
+                MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)
+            ),
             modifier = Modifier
                 .clip(RoundedCornerShape(20.dp))
                 .clickable { onPlanClick() }
@@ -113,20 +117,20 @@ fun TopNavigationBar(
         // Right actions: Clear Messages (if messages present) + Incognito toggle
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
+            horizontalArrangement = Arrangement.spacedBy(2.dp)
         ) {
             if (onWorkspaceClick != null) {
                 IconButton(
                     onClick = onWorkspaceClick,
                     modifier = Modifier
-                        .size(44.dp)
+                        .size(48.dp)
                         .testTag("workspace_button")
                 ) {
                     Icon(
                         imageVector = Icons.Outlined.Folder,
                         contentDescription = "Workspace Files",
                         tint = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.85f),
-                        modifier = Modifier.size(23.dp)
+                        modifier = Modifier.size(22.dp)
                     )
                 }
             }
@@ -135,14 +139,14 @@ fun TopNavigationBar(
                 IconButton(
                     onClick = onClearMessagesClick,
                     modifier = Modifier
-                        .size(44.dp)
+                        .size(48.dp)
                         .testTag("clear_messages_button")
                 ) {
                     Icon(
                         imageVector = Icons.Outlined.DeleteSweep,
                         contentDescription = "Clear Chat Messages",
                         tint = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.8f),
-                        modifier = Modifier.size(23.dp)
+                        modifier = Modifier.size(22.dp)
                     )
                 }
             }
@@ -151,7 +155,7 @@ fun TopNavigationBar(
                 IconButton(
                     onClick = onIncognitoClick,
                     modifier = Modifier
-                        .size(44.dp)
+                        .size(48.dp)
                         .testTag("incognito_button")
                 ) {
                     Icon(
@@ -165,6 +169,7 @@ fun TopNavigationBar(
                 if (isIncognito) {
                     Box(
                         modifier = Modifier
+                            .padding(top = 4.dp, end = 4.dp)
                             .size(9.dp)
                             .background(Color(0xFFE11D48), CircleShape)
                             .border(1.5.dp, MaterialTheme.colorScheme.background, CircleShape)

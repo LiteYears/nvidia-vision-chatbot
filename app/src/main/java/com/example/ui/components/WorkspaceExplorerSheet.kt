@@ -27,11 +27,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Article
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.outlined.Archive
-import androidx.compose.material.icons.outlined.Article
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.ContentCopy
@@ -300,7 +301,7 @@ fun WorkspaceExplorerSheet(
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Icon(
-                            imageVector = Icons.Outlined.Article,
+                            imageVector = Icons.AutoMirrored.Outlined.Article,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
                             modifier = Modifier.size(36.dp)
@@ -352,6 +353,7 @@ fun WorkspaceExplorerSheet(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .navigationBarsPadding()
                     .padding(bottom = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -450,7 +452,7 @@ private fun WorkspaceFileRow(
         item.category == FileCategory.DOCUMENT -> Icons.Outlined.Description
         item.category == FileCategory.IMAGE -> Icons.Outlined.Image
         item.category == FileCategory.ARCHIVE -> Icons.Outlined.Archive
-        else -> Icons.Outlined.Article
+        else -> Icons.AutoMirrored.Outlined.Article
     }
 
     val iconColor = when {

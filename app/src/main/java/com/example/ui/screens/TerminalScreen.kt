@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -26,6 +27,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -42,7 +44,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.outlined.CleaningServices
 import androidx.compose.material.icons.outlined.ContentCopy
@@ -79,6 +80,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.TerminalLine
@@ -86,23 +88,23 @@ import com.example.data.model.TerminalLineType
 import com.example.data.model.TerminalSessionState
 import kotlinx.coroutines.launch
 
-// ==========================================
-// MODERN WARFARE TACTICAL PALETTE & HUD THEME
-// ==========================================
-private val WarfareBg = Color(0xFF090C10)
-private val WarfarePanelBg = Color(0xFF10141C)
-private val WarfarePanelSurface = Color(0xFF161C26)
-private val WarfareBorder = Color(0xFF222F3E)
-private val WarfareBorderSubtle = Color(0xFF1A232E)
-private val WarfareTacticalGreen = Color(0xFF00FF88)
-private val WarfareTacticalCyan = Color(0xFF00E5FF)
-private val WarfareTacticalAmber = Color(0xFFF59E0B)
-private val WarfareTacticalRed = Color(0xFFFF3B30)
-private val WarfareAgentPurple = Color(0xFFC084FC)
-private val WarfareAgentPill = Color(0xFF2D164D)
-private val WarfareTextPrimary = Color(0xFFF1F5F9)
-private val WarfareTextSecondary = Color(0xFF94A3B8)
-private val WarfareTextMuted = Color(0xFF64748B)
+// =========================================================================
+// MODERN DEVELOPER TERMINAL PALETTE (Clean, high-contrast, developer-grade)
+// =========================================================================
+private val TermBg = Color(0xFF090D14)
+private val TermSurface = Color(0xFF111722)
+private val TermElevated = Color(0xFF172030)
+private val TermBorder = Color(0xFF222F44)
+private val TermBorderSubtle = Color(0xFF1B2536)
+private val TermGreen = Color(0xFF10B981)
+private val TermCyan = Color(0xFF38BDF8)
+private val TermAmber = Color(0xFFF59E0B)
+private val TermRed = Color(0xFFF87171)
+private val TermPurple = Color(0xFFC084FC)
+private val TermPurplePill = Color(0xFF2A1B40)
+private val TermTextPrimary = Color(0xFFF8FAFC)
+private val TermTextSecondary = Color(0xFF94A3B8)
+private val TermTextMuted = Color(0xFF64748B)
 
 @Composable
 fun TerminalScreen(
@@ -143,7 +145,7 @@ fun TerminalScreen(
         }
     }
 
-    // Auto-scroll to bottom on new output
+    // Auto-scroll smoothly to bottom on new output
     LaunchedEffect(filteredLines.size, state.isRunning, state.isAgentRunning) {
         if (filteredLines.isNotEmpty()) {
             listState.animateScrollToItem(filteredLines.size - 1)
@@ -164,11 +166,10 @@ fun TerminalScreen(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(WarfareBg)
-            .imePadding()
+            .background(TermBg)
     ) {
-        // 1. Modern Warfare Tactical Telemetry & C2 Header Bar
-        TacticalHeaderBar(
+        // 1. Consolidated Terminal Workspace Header (Clean, professional, single row)
+        TerminalHeaderBar(
             isRunning = state.isRunning,
             isAgentRunning = state.isAgentRunning,
             isEnvInitialized = state.isEnvInitialized,
@@ -185,24 +186,24 @@ fun TerminalScreen(
                     }
                 }
                 clipboardManager.setText(AnnotatedString(fullText))
-                Toast.makeText(context, "Tactical buffer exported (${filteredLines.size} lines)", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Terminal buffer copied (${filteredLines.size} lines)", Toast.LENGTH_SHORT).show()
             }
         )
 
-        // 2. Active Agent Warfare Execution HUD Banner (Live Streamed)
+        // 2. Active Agent Live Stream Banner (Clean purple card, visible when agent runs in terminal)
         AnimatedVisibility(
             visible = state.isAgentRunning,
-            enter = fadeIn() + slideInVertically(),
-            exit = fadeOut() + slideOutVertically()
+            enter = fadeIn(tween(200)) + slideInVertically(tween(200)),
+            exit = fadeOut(tween(150)) + slideOutVertically(tween(150))
         ) {
-            TacticalAgentMissionBanner(
+            TerminalAgentBanner(
                 actionDescription = state.currentAgentAction,
                 onViewAgentClick = onViewAgentClick
             )
         }
 
-        // 3. Military Communication Channels / Telemetry Filters
-        TacticalChannelFilterDeck(
+        // 3. Compact Stream Channel Filters ("All", "Shell", "Agent", "Errors")
+        TerminalFilterDeck(
             selectedFilter = selectedFilter,
             onFilterSelected = { selectedFilter = it },
             allCount = state.lines.size,
@@ -211,31 +212,30 @@ fun TerminalScreen(
             errorCount = state.lines.count { it.type == TerminalLineType.STDERR }
         )
 
-        // 4. Quick Combat Directive Chips
-        TacticalDirectivesRow(
+        // 4. Quick Command Directives (neofetch, python3, apt, pip, etc.)
+        TerminalDirectivesBar(
             enabled = !state.isRunning,
             onCommandClick = onSendCommand
         )
 
-        // 5. Tactical Terminal Stream Console
+        // 5. Main Terminal Log Output (Maximizes screen space with high-contrast monospace rendering)
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
-                .background(WarfareBg)
-                .padding(horizontal = 10.dp)
+                .background(TermBg)
+                .padding(horizontal = 12.dp)
         ) {
             LazyColumn(
                 state = listState,
                 modifier = Modifier
                     .fillMaxSize()
                     .testTag("terminal_output_list"),
-                contentPadding = PaddingValues(vertical = 6.dp)
+                contentPadding = PaddingValues(vertical = 8.dp)
             ) {
-                // If clean or newly opened buffer, display military boot banner
                 if (filteredLines.isEmpty()) {
                     item {
-                        TacticalWelcomeBanner(
+                        TerminalWelcomeCard(
                             isInitialized = state.isEnvInitialized,
                             onInitClick = onReinitializeEnv
                         )
@@ -243,7 +243,7 @@ fun TerminalScreen(
                 }
 
                 items(filteredLines, key = { it.id }) { line ->
-                    TacticalLineItem(line = line)
+                    TerminalLineRow(line = line)
                 }
 
                 if (state.isRunning) {
@@ -252,24 +252,25 @@ fun TerminalScreen(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(vertical = 4.dp, horizontal = 4.dp)
-                                .background(WarfarePanelBg, RoundedCornerShape(4.dp))
-                                .border(BorderStroke(1.dp, WarfareTacticalGreen.copy(alpha = 0.3f)), RoundedCornerShape(4.dp))
-                                .padding(horizontal = 8.dp, vertical = 5.dp)
+                                .padding(vertical = 6.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(TermSurface)
+                                .border(BorderStroke(1.dp, TermGreen.copy(alpha = 0.35f)), RoundedCornerShape(6.dp))
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
                         ) {
                             CircularProgressIndicator(
-                                modifier = Modifier.size(12.dp),
+                                modifier = Modifier.size(13.dp),
                                 strokeWidth = 2.dp,
-                                color = WarfareTacticalGreen
+                                color = TermGreen
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "SYS//EXEC: Dispatched to kernel sub-process...",
+                                text = "Running command in Linux container...",
                                 style = TextStyle(
                                     fontFamily = FontFamily.Monospace,
-                                    fontSize = 11.sp,
+                                    fontSize = 11.5.sp,
                                     fontWeight = FontWeight.SemiBold,
-                                    color = WarfareTacticalGreen
+                                    color = TermGreen
                                 )
                             )
                         }
@@ -277,7 +278,7 @@ fun TerminalScreen(
                 }
             }
 
-            // Scroll to bottom HUD pill
+            // Scroll to latest log FAB (appears smoothly when user scrolled up)
             if (isScrolledUp) {
                 SmallFloatingActionButton(
                     onClick = {
@@ -287,26 +288,26 @@ fun TerminalScreen(
                             }
                         }
                     },
-                    containerColor = WarfarePanelSurface,
-                    contentColor = WarfareTacticalCyan,
+                    containerColor = TermElevated,
+                    contentColor = TermCyan,
                     elevation = FloatingActionButtonDefaults.elevation(4.dp),
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
-                        .padding(bottom = 8.dp, end = 4.dp)
-                        .border(1.dp, WarfareTacticalCyan.copy(alpha = 0.4f), RoundedCornerShape(6.dp))
+                        .padding(bottom = 12.dp, end = 6.dp)
+                        .border(1.dp, TermCyan.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
                             imageVector = Icons.Default.ArrowDownward,
                             contentDescription = "Scroll to bottom",
-                            modifier = Modifier.size(12.dp)
+                            modifier = Modifier.size(13.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "LATEST LOGS",
+                            text = "LATEST",
                             style = TextStyle(
                                 fontFamily = FontFamily.Monospace,
                                 fontSize = 10.sp,
@@ -319,42 +320,52 @@ fun TerminalScreen(
             }
         }
 
-        // 6. Tactical Soft-Keys Accessory Deck
-        TacticalKeyDeckBar(
-            onKeyPress = { key ->
-                when (key) {
-                    "UP" -> onHistoryNavigate(-1)
-                    "DOWN" -> onHistoryNavigate(1)
-                    "CLR" -> onClearTerminal()
-                    "TAB" -> onInputChange(state.currentInput + "    ")
-                    "|" -> onInputChange(state.currentInput + " | ")
-                    "/" -> onInputChange(state.currentInput + "/")
-                    "-" -> onInputChange(state.currentInput + "-")
-                    "~" -> onInputChange(state.currentInput + "~")
-                    "&&" -> onInputChange(state.currentInput + " && ")
-                    "ESC" -> onInputChange("")
-                    "CTRL" -> onInputChange(state.currentInput + "^C")
-                    else -> onInputChange(state.currentInput + key)
+        // 6. Bottom Terminal Controls: Accessory Keys + Command Input Dock
+        // Protected with navigationBarsPadding() & imePadding() to prevent system bar and keyboard clipping
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(TermSurface)
+                .navigationBarsPadding()
+                .imePadding()
+        ) {
+            // Tactile Key Deck (ESC, TAB, CTRL+C, ▲, ▼, |, /, -, ~, &&, clear)
+            TerminalKeyDeck(
+                onKeyPress = { key ->
+                    when (key) {
+                        "UP" -> onHistoryNavigate(-1)
+                        "DOWN" -> onHistoryNavigate(1)
+                        "CLR" -> onClearTerminal()
+                        "TAB" -> onInputChange(state.currentInput + "    ")
+                        "|" -> onInputChange(state.currentInput + " | ")
+                        "/" -> onInputChange(state.currentInput + "/")
+                        "-" -> onInputChange(state.currentInput + "-")
+                        "~" -> onInputChange(state.currentInput + "~")
+                        "&&" -> onInputChange(state.currentInput + " && ")
+                        "ESC" -> onInputChange("")
+                        "CTRL+C" -> onInputChange(state.currentInput + "^C")
+                        else -> onInputChange(state.currentInput + key)
+                    }
                 }
-            }
-        )
+            )
 
-        // 7. Tactical Command Input Deck
-        TacticalInputDeck(
-            inputText = state.currentInput,
-            isRunning = state.isRunning,
-            onInputChange = onInputChange,
-            onSend = {
-                if (state.currentInput.isNotBlank()) {
-                    onSendCommand(state.currentInput)
+            // Command Input Deck
+            TerminalInputDock(
+                inputText = state.currentInput,
+                isRunning = state.isRunning,
+                onInputChange = onInputChange,
+                onSend = {
+                    if (state.currentInput.isNotBlank()) {
+                        onSendCommand(state.currentInput)
+                    }
                 }
-            }
-        )
+            )
+        }
     }
 }
 
 @Composable
-private fun TacticalHeaderBar(
+private fun TerminalHeaderBar(
     isRunning: Boolean,
     isAgentRunning: Boolean,
     isEnvInitialized: Boolean,
@@ -364,213 +375,174 @@ private fun TacticalHeaderBar(
     onReinitClick: () -> Unit,
     onCopyClick: () -> Unit
 ) {
-    val infiniteTransition = rememberInfiniteTransition(label = "hud_beacon")
-    val beaconAlpha by infiniteTransition.animateFloat(
+    val infiniteTransition = rememberInfiniteTransition(label = "pulse_transition")
+    val pulseAlpha by infiniteTransition.animateFloat(
         initialValue = 0.4f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(800),
+            animation = tween(700, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
         ),
-        label = "beacon_pulse"
+        label = "pulse_alpha"
     )
 
     Surface(
-        color = WarfarePanelBg,
-        border = BorderStroke(1.dp, WarfareBorder),
+        color = TermSurface,
+        border = BorderStroke(1.dp, TermBorder),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Column(modifier = Modifier.fillMaxWidth()) {
-            // Top HUD Telemetry strip
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            // Left: Icon + Status + Working Directory
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(WarfarePanelSurface)
-                    .padding(horizontal = 10.dp, vertical = 3.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .size(7.dp)
-                            .clip(CircleShape)
-                            .background(
-                                when {
-                                    isAgentRunning -> WarfareAgentPurple
-                                    isInitializing -> WarfareTacticalAmber
-                                    isRunning -> WarfareTacticalGreen
-                                    isEnvInitialized -> WarfareTacticalGreen
-                                    else -> WarfareTacticalRed
-                                }
-                            )
-                            .alpha(if (isAgentRunning || isRunning) beaconAlpha else 1f)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = when {
-                            isAgentRunning -> "AGENT OPS // AUTONOMOUS LINK"
-                            isInitializing -> "SYS//BOOTING: INITIALIZING PROOT"
-                            isRunning -> "C2//BUSY: EXEC RUNNING"
-                            isEnvInitialized -> "NET: SECURE // UBUNTU 22.04 LTS"
-                            else -> "NET: OFFLINE // ENVIRONMENT ERROR"
-                        },
-                        style = TextStyle(
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 9.5.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = when {
-                                isAgentRunning -> WarfareAgentPurple
-                                isInitializing || isRunning -> WarfareTacticalAmber
-                                isEnvInitialized -> WarfareTacticalGreen
-                                else -> WarfareTacticalRed
-                            },
-                            letterSpacing = 0.5.sp
-                        )
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(TermElevated)
+                        .border(BorderStroke(1.dp, TermBorder), RoundedCornerShape(8.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Terminal,
+                        contentDescription = "Terminal Workspace",
+                        tint = if (isAgentRunning) TermPurple else TermGreen,
+                        modifier = Modifier.size(18.dp)
                     )
                 }
 
-                Text(
-                    text = "CALLSIGN: TF-AI // PROOT",
-                    style = TextStyle(
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 9.sp,
-                        color = WarfareTextMuted,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                )
+                Spacer(modifier = Modifier.width(10.dp))
+
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(7.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    when {
+                                        isAgentRunning -> TermPurple
+                                        isInitializing -> TermAmber
+                                        isRunning -> TermGreen
+                                        isEnvInitialized -> TermGreen
+                                        else -> TermRed
+                                    }
+                                )
+                                .alpha(if (isAgentRunning || isRunning || isInitializing) pulseAlpha else 1f)
+                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text(
+                            text = when {
+                                isAgentRunning -> "Agent Active • Ubuntu 22.04"
+                                isInitializing -> "Booting PRoot container..."
+                                isRunning -> "Command Running..."
+                                isEnvInitialized -> "Ubuntu 22.04 LTS Ready"
+                                else -> "Container Offline"
+                            },
+                            style = TextStyle(
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = when {
+                                    isAgentRunning -> TermPurple
+                                    isInitializing || isRunning -> TermAmber
+                                    isEnvInitialized -> TermTextPrimary
+                                    else -> TermRed
+                                }
+                            ),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(top = 1.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Folder,
+                            contentDescription = null,
+                            tint = TermTextMuted,
+                            modifier = Modifier.size(11.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = workingDir,
+                            style = TextStyle(
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp,
+                                color = TermTextSecondary
+                            ),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
             }
 
-            // Main command bar row
+            // Right: Action buttons (Clear, Copy, Reinit) with standard 40dp minimum touch target
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.weight(1f)
+                // Copy Buffer
+                IconButton(
+                    onClick = onCopyClick,
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(TermElevated)
+                        .border(BorderStroke(1.dp, TermBorder), RoundedCornerShape(6.dp))
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(28.dp)
-                            .background(WarfarePanelSurface, RoundedCornerShape(4.dp))
-                            .border(BorderStroke(1.dp, WarfareBorder), RoundedCornerShape(4.dp)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.Terminal,
-                            contentDescription = "Tactical Terminal",
-                            tint = if (isAgentRunning) WarfareAgentPurple else WarfareTacticalGreen,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Column {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = "TERMINAL // ROOT SHELL",
-                                style = TextStyle(
-                                    fontFamily = FontFamily.Monospace,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 12.sp,
-                                    color = WarfareTextPrimary,
-                                    letterSpacing = 0.5.sp
-                                )
-                            )
-                            if (isAgentRunning) {
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(3.dp))
-                                        .background(WarfareAgentPill)
-                                        .border(BorderStroke(0.5.dp, WarfareAgentPurple.copy(alpha = 0.5f)), RoundedCornerShape(3.dp))
-                                        .padding(horizontal = 4.dp, vertical = 1.dp)
-                                ) {
-                                    Text(
-                                        text = "LIVE AGENT",
-                                        style = TextStyle(
-                                            fontFamily = FontFamily.Monospace,
-                                            fontSize = 8.5.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = WarfareAgentPurple
-                                        )
-                                    )
-                                }
-                            }
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Outlined.Folder,
-                                contentDescription = null,
-                                tint = WarfareTextMuted,
-                                modifier = Modifier.size(10.dp)
-                            )
-                            Spacer(modifier = Modifier.width(3.dp))
-                            Text(
-                                text = workingDir,
-                                style = TextStyle(
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 9.5.sp,
-                                    color = WarfareTextSecondary
-                                ),
-                                maxLines = 1
-                            )
-                        }
-                    }
+                    Icon(
+                        imageVector = Icons.Outlined.ContentCopy,
+                        contentDescription = "Copy Terminal Logs",
+                        tint = TermTextSecondary,
+                        modifier = Modifier.size(15.dp)
+                    )
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    // Reinit action
-                    IconButton(
-                        onClick = onReinitClick,
-                        modifier = Modifier
-                            .size(30.dp)
-                            .background(WarfarePanelSurface, RoundedCornerShape(4.dp))
-                            .border(BorderStroke(1.dp, WarfareBorder), RoundedCornerShape(4.dp)),
-                        enabled = !isRunning && !isInitializing
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.Refresh,
-                            contentDescription = "Reboot Environment",
-                            tint = if (isInitializing) WarfareTacticalAmber else WarfareTextSecondary,
-                            modifier = Modifier.size(14.dp)
-                        )
-                    }
+                // Clear Buffer
+                IconButton(
+                    onClick = onClearClick,
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(TermElevated)
+                        .border(BorderStroke(1.dp, TermBorder), RoundedCornerShape(6.dp))
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.CleaningServices,
+                        contentDescription = "Clear Terminal Screen",
+                        tint = TermTextSecondary,
+                        modifier = Modifier.size(15.dp)
+                    )
+                }
 
-                    // Copy action
-                    IconButton(
-                        onClick = onCopyClick,
-                        modifier = Modifier
-                            .size(30.dp)
-                            .background(WarfarePanelSurface, RoundedCornerShape(4.dp))
-                            .border(BorderStroke(1.dp, WarfareBorder), RoundedCornerShape(4.dp))
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.ContentCopy,
-                            contentDescription = "Copy Tactical Buffer",
-                            tint = WarfareTextSecondary,
-                            modifier = Modifier.size(14.dp)
-                        )
-                    }
-
-                    // Clear action
-                    IconButton(
-                        onClick = onClearClick,
-                        modifier = Modifier
-                            .size(30.dp)
-                            .background(WarfarePanelSurface, RoundedCornerShape(4.dp))
-                            .border(BorderStroke(1.dp, WarfareBorder), RoundedCornerShape(4.dp))
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.CleaningServices,
-                            contentDescription = "Purge Buffer",
-                            tint = WarfareTextSecondary,
-                            modifier = Modifier.size(14.dp)
-                        )
-                    }
+                // Re-initialize / Restart
+                IconButton(
+                    onClick = onReinitClick,
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(TermElevated)
+                        .border(BorderStroke(1.dp, TermBorder), RoundedCornerShape(6.dp)),
+                    enabled = !isRunning && !isInitializing
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Refresh,
+                        contentDescription = "Restart PRoot Environment",
+                        tint = if (isInitializing) TermAmber else TermTextSecondary,
+                        modifier = Modifier.size(15.dp)
+                    )
                 }
             }
         }
@@ -578,19 +550,19 @@ private fun TacticalHeaderBar(
 }
 
 @Composable
-private fun TacticalAgentMissionBanner(
+private fun TerminalAgentBanner(
     actionDescription: String,
     onViewAgentClick: (() -> Unit)?
 ) {
     Surface(
-        color = WarfarePanelBg,
-        border = BorderStroke(1.dp, WarfareAgentPurple.copy(alpha = 0.6f)),
+        color = TermPurplePill,
+        border = BorderStroke(1.dp, TermPurple.copy(alpha = 0.5f)),
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 10.dp, vertical = 6.dp),
+                .padding(horizontal = 12.dp, vertical = 7.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
@@ -599,41 +571,42 @@ private fun TacticalAgentMissionBanner(
                 modifier = Modifier.weight(1f)
             ) {
                 CircularProgressIndicator(
-                    modifier = Modifier.size(12.dp),
+                    modifier = Modifier.size(13.dp),
                     strokeWidth = 2.dp,
-                    color = WarfareAgentPurple
+                    color = TermPurple
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Column {
                     Text(
-                        text = "▶ AUTONOMOUS AGENT ACTIVE IN TERMINAL",
+                        text = "AUTONOMOUS AGENT ACTIVE",
                         style = TextStyle(
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
                             fontSize = 10.5.sp,
-                            color = WarfareAgentPurple,
+                            color = TermPurple,
                             letterSpacing = 0.5.sp
                         )
                     )
                     Text(
-                        text = actionDescription.ifBlank { "Executing autonomous plan sequence..." },
+                        text = actionDescription.ifBlank { "Executing task step..." },
                         style = TextStyle(
                             fontFamily = FontFamily.Monospace,
-                            fontSize = 9.5.sp,
-                            color = WarfareTextPrimary
+                            fontSize = 10.sp,
+                            color = TermTextPrimary
                         ),
-                        maxLines = 1
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
 
             if (onViewAgentClick != null) {
                 Surface(
-                    color = WarfareAgentPill,
-                    shape = RoundedCornerShape(4.dp),
-                    border = BorderStroke(1.dp, WarfareAgentPurple.copy(alpha = 0.7f)),
+                    color = TermElevated,
+                    shape = RoundedCornerShape(6.dp),
+                    border = BorderStroke(1.dp, TermPurple.copy(alpha = 0.7f)),
                     modifier = Modifier
-                        .clip(RoundedCornerShape(4.dp))
+                        .clip(RoundedCornerShape(6.dp))
                         .clickable { onViewAgentClick() }
                 ) {
                     Row(
@@ -643,17 +616,17 @@ private fun TacticalAgentMissionBanner(
                         Icon(
                             imageVector = Icons.Default.SmartToy,
                             contentDescription = "View Agent Feed",
-                            tint = WarfareAgentPurple,
-                            modifier = Modifier.size(11.dp)
+                            tint = TermPurple,
+                            modifier = Modifier.size(12.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "AGENT FEED ❯",
+                            text = "Agent Feed ❯",
                             style = TextStyle(
                                 fontFamily = FontFamily.Monospace,
-                                fontSize = 9.5.sp,
+                                fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = WarfareAgentPurple
+                                color = TermPurple
                             )
                         )
                     }
@@ -664,7 +637,7 @@ private fun TacticalAgentMissionBanner(
 }
 
 @Composable
-private fun TacticalChannelFilterDeck(
+private fun TerminalFilterDeck(
     selectedFilter: String,
     onFilterSelected: (String) -> Unit,
     allCount: Int,
@@ -674,73 +647,66 @@ private fun TacticalChannelFilterDeck(
 ) {
     val filters = listOf(
         "All" to allCount,
-        "Agent" to agentCount,
         "Shell" to shellCount,
+        "Agent" to agentCount,
         "Errors" to errorCount
     )
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(WarfarePanelBg)
-            .border(BorderStroke(1.dp, WarfareBorderSubtle))
-            .padding(horizontal = 8.dp, vertical = 3.dp),
+            .background(TermSurface)
+            .border(BorderStroke(1.dp, TermBorderSubtle))
+            .padding(horizontal = 10.dp, vertical = 5.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        filters.forEachIndexed { index, (name, count) ->
+        filters.forEach { (name, count) ->
             val isSelected = selectedFilter == name
-            val channelCode = "CH-0${index + 1}"
+            val activeColor = when (name) {
+                "Agent" -> TermPurple
+                "Errors" -> TermRed
+                else -> TermCyan
+            }
 
             Surface(
-                color = if (isSelected) WarfarePanelSurface else Color.Transparent,
-                shape = RoundedCornerShape(4.dp),
+                color = if (isSelected) TermElevated else Color.Transparent,
+                shape = RoundedCornerShape(6.dp),
                 border = BorderStroke(
                     width = 1.dp,
-                    color = if (isSelected) {
-                        when (name) {
-                            "Agent" -> WarfareAgentPurple
-                            "Errors" -> WarfareTacticalRed
-                            else -> WarfareTacticalCyan
-                        }
-                    } else WarfareBorderSubtle
+                    color = if (isSelected) activeColor else TermBorderSubtle
                 ),
                 modifier = Modifier
-                    .clip(RoundedCornerShape(4.dp))
+                    .clip(RoundedCornerShape(6.dp))
                     .clickable { onFilterSelected(name) }
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "$channelCode $name",
+                        text = name,
                         style = TextStyle(
                             fontFamily = FontFamily.Monospace,
-                            fontSize = 10.sp,
+                            fontSize = 10.5.sp,
                             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                            color = when {
-                                name == "Agent" && isSelected -> WarfareAgentPurple
-                                name == "Errors" && count > 0 -> WarfareTacticalRed
-                                isSelected -> WarfareTacticalCyan
-                                else -> WarfareTextMuted
-                            }
+                            color = if (isSelected) activeColor else TermTextSecondary
                         )
                     )
-                    Spacer(modifier = Modifier.width(4.dp))
+                    Spacer(modifier = Modifier.width(5.dp))
                     Box(
                         modifier = Modifier
                             .background(
-                                if (isSelected) WarfareBorder else WarfarePanelBg,
-                                RoundedCornerShape(3.dp)
+                                if (isSelected) activeColor.copy(alpha = 0.2f) else TermElevated,
+                                RoundedCornerShape(4.dp)
                             )
-                            .padding(horizontal = 3.dp, vertical = 1.dp)
+                            .padding(horizontal = 4.dp, vertical = 1.dp)
                     ) {
                         Text(
                             text = "$count",
                             style = TextStyle(
                                 fontFamily = FontFamily.Monospace,
-                                fontSize = 8.5.sp,
-                                color = if (isSelected) WarfareTextPrimary else WarfareTextMuted,
+                                fontSize = 9.sp,
+                                color = if (isSelected) activeColor else TermTextMuted,
                                 fontWeight = FontWeight.Bold
                             )
                         )
@@ -752,17 +718,15 @@ private fun TacticalChannelFilterDeck(
 }
 
 @Composable
-private fun TacticalDirectivesRow(
+private fun TerminalDirectivesBar(
     enabled: Boolean,
     onCommandClick: (String) -> Unit
 ) {
-    val quickDirectives = listOf(
+    val directives = listOf(
         "neofetch",
-        "./start-ubuntu22.sh",
-        "apt update",
-        "pkg update -y",
-        "pip list",
         "python3 --version",
+        "pip list",
+        "apt update",
         "ls -la",
         "cat requirements.txt",
         "uname -a",
@@ -774,29 +738,29 @@ private fun TacticalDirectivesRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(WarfarePanelBg)
+            .background(TermSurface)
             .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 8.dp, vertical = 3.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp)
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(5.dp)
     ) {
-        quickDirectives.forEach { cmd ->
+        directives.forEach { cmd ->
             Surface(
-                color = WarfarePanelSurface,
-                shape = RoundedCornerShape(4.dp),
-                border = BorderStroke(1.dp, WarfareBorder),
+                color = TermElevated,
+                shape = RoundedCornerShape(5.dp),
+                border = BorderStroke(1.dp, TermBorder),
                 modifier = Modifier
-                    .clip(RoundedCornerShape(4.dp))
+                    .clip(RoundedCornerShape(5.dp))
                     .clickable(enabled = enabled) { onCommandClick(cmd) }
             ) {
                 Text(
                     text = "❯ $cmd",
                     style = TextStyle(
                         fontFamily = FontFamily.Monospace,
-                        fontSize = 10.sp,
-                        color = WarfareTacticalCyan,
+                        fontSize = 10.5.sp,
+                        color = TermCyan,
                         fontWeight = FontWeight.SemiBold
                     ),
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                 )
             }
         }
@@ -804,29 +768,29 @@ private fun TacticalDirectivesRow(
 }
 
 @Composable
-private fun TacticalLineItem(line: TerminalLine) {
+private fun TerminalLineRow(line: TerminalLine) {
     when (line.type) {
         TerminalLineType.AGENT_COMMAND -> {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 2.dp),
+                    .padding(vertical = 3.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(3.dp))
-                        .background(WarfareAgentPill)
-                        .border(BorderStroke(0.5.dp, WarfareAgentPurple.copy(alpha = 0.5f)), RoundedCornerShape(3.dp))
-                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(TermPurplePill)
+                        .border(BorderStroke(0.5.dp, TermPurple.copy(alpha = 0.5f)), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 5.dp, vertical = 1.5.dp)
                 ) {
                     Text(
                         text = "AGENT",
                         style = TextStyle(
                             fontFamily = FontFamily.Monospace,
-                            fontSize = 8.5.sp,
+                            fontSize = 9.sp,
                             fontWeight = FontWeight.Bold,
-                            color = WarfareAgentPurple
+                            color = TermPurple
                         )
                     )
                 }
@@ -835,9 +799,9 @@ private fun TacticalLineItem(line: TerminalLine) {
                     text = line.text,
                     style = TextStyle(
                         fontFamily = FontFamily.Monospace,
-                        fontSize = 11.5.sp,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
-                        color = WarfareAgentPurple
+                        color = TermPurple
                     )
                 )
             }
@@ -846,15 +810,16 @@ private fun TacticalLineItem(line: TerminalLine) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 2.dp)
+                    .padding(vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
                     text = line.text,
                     style = TextStyle(
                         fontFamily = FontFamily.Monospace,
-                        fontSize = 11.sp,
+                        fontSize = 11.5.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = WarfareTacticalCyan
+                        color = TermCyan
                     )
                 )
             }
@@ -864,9 +829,9 @@ private fun TacticalLineItem(line: TerminalLine) {
                 text = line.text,
                 style = TextStyle(
                     fontFamily = FontFamily.Monospace,
-                    fontSize = 10.5.sp,
+                    fontSize = 11.sp,
                     fontStyle = FontStyle.Italic,
-                    color = WarfareAgentPurple.copy(alpha = 0.9f)
+                    color = TermPurple.copy(alpha = 0.9f)
                 ),
                 modifier = Modifier.padding(vertical = 1.dp)
             )
@@ -876,8 +841,8 @@ private fun TacticalLineItem(line: TerminalLine) {
                 text = line.text,
                 style = TextStyle(
                     fontFamily = FontFamily.Monospace,
-                    fontSize = 11.5.sp,
-                    color = WarfareTextPrimary
+                    fontSize = 12.sp,
+                    color = TermTextPrimary
                 ),
                 modifier = Modifier.padding(vertical = 0.5.dp)
             )
@@ -886,24 +851,25 @@ private fun TacticalLineItem(line: TerminalLine) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 2.dp)
+                    .padding(vertical = 3.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
                     text = "root@localhost:~# ",
                     style = TextStyle(
                         fontFamily = FontFamily.Monospace,
-                        fontSize = 11.5.sp,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
-                        color = WarfareTacticalGreen
+                        color = TermGreen
                     )
                 )
                 Text(
                     text = line.text,
                     style = TextStyle(
                         fontFamily = FontFamily.Monospace,
-                        fontSize = 11.5.sp,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = WarfareTacticalCyan
+                        color = TermCyan
                     )
                 )
             }
@@ -913,8 +879,8 @@ private fun TacticalLineItem(line: TerminalLine) {
                 text = line.text,
                 style = TextStyle(
                     fontFamily = FontFamily.Monospace,
-                    fontSize = 11.5.sp,
-                    color = WarfareTextPrimary
+                    fontSize = 12.sp,
+                    color = TermTextPrimary
                 ),
                 modifier = Modifier.padding(vertical = 0.5.dp)
             )
@@ -924,14 +890,14 @@ private fun TacticalLineItem(line: TerminalLine) {
                 text = line.text,
                 style = TextStyle(
                     fontFamily = FontFamily.Monospace,
-                    fontSize = 11.5.sp,
-                    color = WarfareTacticalRed,
+                    fontSize = 12.sp,
+                    color = TermRed,
                     fontWeight = FontWeight.Medium
                 ),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(WarfareTacticalRed.copy(alpha = 0.08f), RoundedCornerShape(2.dp))
-                    .padding(horizontal = 4.dp, vertical = 1.dp)
+                    .background(TermRed.copy(alpha = 0.1f), RoundedCornerShape(3.dp))
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
             )
         }
         TerminalLineType.SYSTEM_INFO -> {
@@ -939,30 +905,30 @@ private fun TacticalLineItem(line: TerminalLine) {
                 text = line.text,
                 style = TextStyle(
                     fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
-                    color = WarfareTacticalAmber
+                    fontSize = 11.5.sp,
+                    color = TermAmber
                 ),
                 modifier = Modifier.padding(vertical = 1.dp)
             )
         }
         TerminalLineType.BANNER -> {
             Surface(
-                color = WarfarePanelBg,
-                shape = RoundedCornerShape(4.dp),
-                border = BorderStroke(1.dp, if (line.isAgent) WarfareAgentPurple.copy(alpha = 0.6f) else WarfareTacticalGreen.copy(alpha = 0.5f)),
+                color = TermSurface,
+                shape = RoundedCornerShape(6.dp),
+                border = BorderStroke(1.dp, if (line.isAgent) TermPurple.copy(alpha = 0.5f) else TermGreen.copy(alpha = 0.4f)),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 3.dp)
+                    .padding(vertical = 4.dp)
             ) {
                 Text(
                     text = line.text,
                     style = TextStyle(
                         fontFamily = FontFamily.Monospace,
-                        fontSize = 10.5.sp,
+                        fontSize = 11.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = if (line.isAgent) WarfareAgentPurple else WarfareTacticalGreen
+                        color = if (line.isAgent) TermPurple else TermGreen
                     ),
-                    modifier = Modifier.padding(8.dp)
+                    modifier = Modifier.padding(10.dp)
                 )
             }
         }
@@ -970,80 +936,80 @@ private fun TacticalLineItem(line: TerminalLine) {
 }
 
 @Composable
-private fun TacticalWelcomeBanner(
+private fun TerminalWelcomeCard(
     isInitialized: Boolean,
     onInitClick: () -> Unit
 ) {
     Surface(
-        color = WarfarePanelBg,
-        shape = RoundedCornerShape(6.dp),
-        border = BorderStroke(1.dp, WarfareBorder),
+        color = TermSurface,
+        shape = RoundedCornerShape(8.dp),
+        border = BorderStroke(1.dp, TermBorder),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 6.dp)
+            .padding(vertical = 8.dp)
     ) {
-        Column(modifier = Modifier.padding(10.dp)) {
+        Column(modifier = Modifier.padding(12.dp)) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
-                    text = "┌ [ C2 // TACTICAL LINUX TERMINAL ]",
+                    text = "UBUNTU 22.04 LTS TERMINAL",
                     style = TextStyle(
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 11.5.sp,
-                        color = WarfareTacticalGreen,
+                        fontSize = 12.sp,
+                        color = TermGreen,
                         letterSpacing = 0.5.sp
                     )
                 )
                 Text(
-                    text = "UBUNTU 22.04 LTS",
-                    style = TextStyle(
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 9.5.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = WarfareTextMuted
-                    )
-                )
-            }
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "Autonomous Agentic AI Environment with PRoot-Termux sandboxed container.",
-                style = TextStyle(
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 10.sp,
-                    color = WarfareTextSecondary
-                )
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "• DIRECT OPS: Agent tool execution (bash, Python scripts, file writes) streams live.\n" +
-                    "• WARFARE DIRECTIVES: Run apt, pip, python3, bash scripts, and inspect system telemetry.\n" +
-                    "• INTEGRATED C2: Output is piped into autonomous task monitoring in real time.",
-                style = TextStyle(
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 9.5.sp,
-                    color = WarfareTextMuted
-                )
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(6.dp)
-                        .clip(CircleShape)
-                        .background(if (isInitialized) WarfareTacticalGreen else WarfareTacticalAmber)
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = if (isInitialized) "SYSTEM STATE: ONLINE & READY" else "SYSTEM STATE: INITIALIZING...",
+                    text = "PRoot-Termux Engine",
                     style = TextStyle(
                         fontFamily = FontFamily.Monospace,
                         fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = TermTextMuted
+                    )
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "Autonomous engineering environment with live rootless Linux subsystem on Android.",
+                style = TextStyle(
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    color = TermTextSecondary
+                )
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "• DIRECT SHELL: Run standard Linux commands (python3, pip, apt, bash scripts).\n" +
+                    "• LIVE AGENT: Autonomous AI planning & execution output streams directly here.\n" +
+                    "• WORKSPACE: Files created or modified in ~/workspace persist across sessions.",
+                style = TextStyle(
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.5.sp,
+                    color = TermTextMuted
+                )
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(7.dp)
+                        .clip(CircleShape)
+                        .background(if (isInitialized) TermGreen else TermAmber)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = if (isInitialized) "SYSTEM STATE: READY" else "SYSTEM STATE: INITIALIZING CONTAINER...",
+                    style = TextStyle(
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.5.sp,
                         fontWeight = FontWeight.Bold,
-                        color = if (isInitialized) WarfareTacticalGreen else WarfareTacticalAmber,
+                        color = if (isInitialized) TermGreen else TermAmber,
                         letterSpacing = 0.5.sp
                     )
                 )
@@ -1053,50 +1019,51 @@ private fun TacticalWelcomeBanner(
 }
 
 @Composable
-private fun TacticalKeyDeckBar(
+private fun TerminalKeyDeck(
     onKeyPress: (String) -> Unit
 ) {
-    val tacticalKeys = listOf("ESC", "TAB", "CTRL", "ALT", "-", "/", "|", "~", "&&", "UP", "DOWN", "CLR")
+    val keys = listOf("ESC", "TAB", "CTRL+C", "UP", "DOWN", "|", "/", "-", "~", "&&", "CLR")
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(WarfarePanelBg)
-            .border(BorderStroke(1.dp, WarfareBorder))
+            .background(TermSurface)
+            .border(BorderStroke(1.dp, TermBorderSubtle))
             .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 4.dp, vertical = 3.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp)
+            .padding(horizontal = 6.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(5.dp)
     ) {
-        tacticalKeys.forEach { key ->
+        keys.forEach { key ->
             val label = when (key) {
                 "UP" -> "▲"
                 "DOWN" -> "▼"
+                "CLR" -> "CLEAR"
                 else -> key
             }
 
             Surface(
-                color = WarfarePanelSurface,
-                shape = RoundedCornerShape(4.dp),
-                border = BorderStroke(1.dp, WarfareBorder),
+                color = TermElevated,
+                shape = RoundedCornerShape(6.dp),
+                border = BorderStroke(1.dp, TermBorder),
                 modifier = Modifier
-                    .clip(RoundedCornerShape(4.dp))
+                    .clip(RoundedCornerShape(6.dp))
                     .clickable { onKeyPress(key) }
             ) {
                 Text(
                     text = label,
                     style = TextStyle(
                         fontFamily = FontFamily.Monospace,
-                        fontSize = 10.5.sp,
+                        fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         color = when (key) {
-                            "UP", "DOWN" -> WarfareTacticalGreen
-                            "CLR" -> WarfareTacticalRed
-                            "|" -> WarfareTacticalAmber
-                            "ESC", "CTRL" -> WarfareTacticalCyan
-                            else -> WarfareTextPrimary
+                            "UP", "DOWN" -> TermGreen
+                            "CLR" -> TermRed
+                            "|" -> TermAmber
+                            "ESC", "CTRL+C" -> TermCyan
+                            else -> TermTextPrimary
                         }
                     ),
-                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                 )
             }
         }
@@ -1104,30 +1071,30 @@ private fun TacticalKeyDeckBar(
 }
 
 @Composable
-private fun TacticalInputDeck(
+private fun TerminalInputDock(
     inputText: String,
     isRunning: Boolean,
     onInputChange: (String) -> Unit,
     onSend: () -> Unit
 ) {
     Surface(
-        color = WarfareBg,
-        border = BorderStroke(1.dp, WarfareBorder),
+        color = TermBg,
+        border = BorderStroke(1.dp, TermBorder),
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 6.dp),
+                .padding(horizontal = 10.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
                 text = "❯ ",
                 style = TextStyle(
                     fontFamily = FontFamily.Monospace,
-                    fontSize = 13.sp,
+                    fontSize = 14.sp,
                     fontWeight = FontWeight.Bold,
-                    color = WarfareTacticalGreen
+                    color = TermGreen
                 )
             )
 
@@ -1136,10 +1103,10 @@ private fun TacticalInputDeck(
                 onValueChange = onInputChange,
                 textStyle = TextStyle(
                     fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp,
-                    color = WarfareTextPrimary
+                    fontSize = 13.sp,
+                    color = TermTextPrimary
                 ),
-                cursorBrush = SolidColor(WarfareTacticalGreen),
+                cursorBrush = SolidColor(TermGreen),
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                 keyboardActions = KeyboardActions(onSend = { onSend() }),
@@ -1149,11 +1116,11 @@ private fun TacticalInputDeck(
                 decorationBox = { innerTextField ->
                     if (inputText.isEmpty()) {
                         Text(
-                            text = "enter tactical directive (e.g. neofetch, apt update)...",
+                            text = "enter command (e.g. neofetch, python3)...",
                             style = TextStyle(
                                 fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp,
-                                color = WarfareTextMuted
+                                fontSize = 12.sp,
+                                color = TermTextMuted
                             )
                         )
                     }
@@ -1161,29 +1128,31 @@ private fun TacticalInputDeck(
                 }
             )
 
+            Spacer(modifier = Modifier.width(6.dp))
+
             IconButton(
                 onClick = onSend,
                 enabled = inputText.isNotBlank() && !isRunning,
                 modifier = Modifier
-                    .size(32.dp)
+                    .size(36.dp)
+                    .clip(RoundedCornerShape(6.dp))
                     .background(
-                        if (inputText.isNotBlank() && !isRunning) WarfareTacticalGreen.copy(alpha = 0.2f) else Color.Transparent,
-                        RoundedCornerShape(4.dp)
+                        if (inputText.isNotBlank() && !isRunning) TermGreen.copy(alpha = 0.2f) else Color.Transparent
                     )
                     .border(
                         BorderStroke(
                             1.dp,
-                            if (inputText.isNotBlank() && !isRunning) WarfareTacticalGreen else WarfareBorder
+                            if (inputText.isNotBlank() && !isRunning) TermGreen else TermBorder
                         ),
-                        RoundedCornerShape(4.dp)
+                        RoundedCornerShape(6.dp)
                     )
                     .testTag("terminal_send_button")
             ) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.Send,
                     contentDescription = "Execute Command",
-                    tint = if (inputText.isNotBlank() && !isRunning) WarfareTacticalGreen else WarfareTextMuted,
-                    modifier = Modifier.size(15.dp)
+                    tint = if (inputText.isNotBlank() && !isRunning) TermGreen else TermTextMuted,
+                    modifier = Modifier.size(16.dp)
                 )
             }
         }

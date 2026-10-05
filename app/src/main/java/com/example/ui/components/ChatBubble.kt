@@ -91,8 +91,12 @@ fun ChatBubble(
                     bottomEnd = 4.dp
                 ),
                 color = MaterialTheme.colorScheme.surfaceVariant,
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
+                ),
                 modifier = Modifier
-                    .widthIn(max = 290.dp)
+                    .widthIn(max = 330.dp)
                     .testTag("user_message_bubble")
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {

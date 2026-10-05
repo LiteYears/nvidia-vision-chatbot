@@ -32,9 +32,6 @@ class SettingsManager(context: Context) {
         const val DEFAULT_TOP_P = 0.95f
         const val DEFAULT_MAX_TOKENS = 4096
 
-        // Default validated active NVIDIA API key
-        private const val DEFAULT_FALLBACK_KEY = "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"
-
         fun sanitizeKey(key: String): String {
             return key.trim().trim('.', ',', ';', ':', '"', '\'', '`', ' ')
         }
@@ -66,7 +63,7 @@ class SettingsManager(context: Context) {
             return envKey
         }
 
-        return sanitizeKey(DEFAULT_FALLBACK_KEY)
+        return ""
     }
 
     fun getCustomApiKey(): String = sanitizeKey(prefs.getString(KEY_CUSTOM_API_KEY, "") ?: "")
