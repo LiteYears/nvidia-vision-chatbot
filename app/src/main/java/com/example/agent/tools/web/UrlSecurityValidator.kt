@@ -24,13 +24,42 @@ object UrlSecurityValidator {
             )
         }
 
+        val colonSlashIndex = trimmed.indexOf("://")
+        if (colonSlashIndex != -1) {
+            val scheme = trimmed.substring(0, colonSlashIndex).lowercase()
+            if (scheme != "http" && scheme != "https") {
+                return Result.failure(
+                    SecurityException("Access denied: URL scheme '$scheme' is not permitted.")
+                )
+            }
+        } else if (trimmed.startsWith("file:", ignoreCase = true) ||
+            trimmed.startsWith("content:", ignoreCase = true) ||
+            trimmed.startsWith("javascript:", ignoreCase = true) ||
+            trimmed.startsWith("data:", ignoreCase = true)) {
+            val scheme = trimmed.substringBefore(':').lowercase()
+            return Result.failure(
+                SecurityException("Access denied: URL scheme '$scheme' is not permitted.")
+            )
+        }
+
         // Auto-normalize URLs without scheme (e.g. 'bbc.com', 'news.google.com')
         val normalized = if (trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true)) {
             trimmed
-        } else if (trimmed.contains("://")) {
-            trimmed
         } else {
             "https://$trimmed"
+        }
+
+        val parsedUri = try {
+            URI(normalized)
+        } catch (e: Exception) {
+            return Result.failure(IllegalArgumentException("Invalid URL syntax: '$normalized'"))
+        }
+
+        val host = parsedUri.host ?: ""
+        if (isPrivateOrLoopbackIp(host)) {
+            return Result.failure(
+                SecurityException("Access denied: Access to local/private network address '$host' is not permitted.")
+            )
         }
 
         return Result.success(normalized)
@@ -41,6 +70,33 @@ object UrlSecurityValidator {
      * or link-local address.
      */
     fun isPrivateOrLoopbackIp(host: String): Boolean {
+        val lowerHost = host.lowercase().trim()
+        if (lowerHost.isEmpty()) return false
+
+        if (lowerHost == "localhost" || lowerHost.endsWith(".localhost") ||
+            lowerHost.endsWith(".local") || lowerHost.endsWith(".internal") || lowerHost.endsWith(".lan")) {
+            return true
+        }
+
+        if (lowerHost == "127.0.0.1" || lowerHost.startsWith("127.") || lowerHost == "::1" || lowerHost == "0.0.0.0") {
+            return true
+        }
+
+        // Private / local IPv4 ranges
+        if (lowerHost.startsWith("10.") || lowerHost.startsWith("192.168.") || lowerHost.startsWith("169.254.")) {
+            return true
+        }
+
+        if (lowerHost.startsWith("172.")) {
+            val parts = lowerHost.split(".")
+            if (parts.size >= 2) {
+                val second = parts[1].toIntOrNull()
+                if (second != null && second in 16..31) {
+                    return true
+                }
+            }
+        }
+
         return false
     }
 
@@ -48,6 +104,6 @@ object UrlSecurityValidator {
      * Optional DNS resolution check to verify that resolved IP is not private/loopback.
      */
     fun isResolvedAddressPrivate(host: String): Boolean {
-        return false
+        return isPrivateOrLoopbackIp(host)
     }
 }

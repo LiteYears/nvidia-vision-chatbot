@@ -114,6 +114,22 @@ class RunCommandTool(
             else -> cleanWorkingDir
         }
 
+        // Check if requested working directory exists as a file rather than directory
+        val isFile = when {
+            File(strippedDir).isFile -> true
+            File(activeWorkingDir, strippedDir).isFile -> true
+            File(workspaceRoot, strippedDir).isFile -> true
+            File(workspaceRoot, strippedDir.removePrefix("workspace/")).isFile -> true
+            else -> false
+        }
+        if (isFile) {
+            return ToolResult.failure(
+                callId = callId,
+                toolName = definition.name,
+                error = "Working directory is not a directory: '$workingDirArg'"
+            )
+        }
+
         val resolvedWorkingDir: File = when {
             strippedDir.isEmpty() || strippedDir == "." || strippedDir == "./" -> {
                 if (activeWorkingDir.exists() && activeWorkingDir.isDirectory) activeWorkingDir else workspaceRoot
@@ -139,15 +155,11 @@ class RunCommandTool(
                 File(workspaceRoot, strippedDir.removePrefix("workspace/")).canonicalFile
             }
             else -> {
-                val cand = File(strippedDir)
-                if (cand.isAbsolute) {
-                    cand.mkdirs()
-                    if (cand.isDirectory) cand.canonicalFile else workspaceRoot
-                } else {
-                    val inDir = File(workspaceRoot, strippedDir)
-                    inDir.mkdirs()
-                    if (inDir.isDirectory) inDir.canonicalFile else workspaceRoot
-                }
+                return ToolResult.failure(
+                    callId = callId,
+                    toolName = definition.name,
+                    error = "Working directory does not exist: '$workingDirArg'"
+                )
             }
         }
 

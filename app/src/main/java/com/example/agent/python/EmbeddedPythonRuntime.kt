@@ -2593,8 +2593,10 @@ class PythonInterpreter(
 
             val targetFile = try {
                 workspaceManager.resolvePath(pathArg)
-            } catch (_: Exception) {
-                File(pathArg)
+            } catch (e: SecurityException) {
+                throw PythonRuntimeException("PermissionError", "[Errno 13] Permission denied: '$pathArg' (workspace isolation violation)", 1)
+            } catch (e: Exception) {
+                throw PythonRuntimeException("PermissionError", "[Errno 13] Permission denied: '$pathArg': ${e.message}", 1)
             }
 
             SandboxedFile(targetFile, mode)
