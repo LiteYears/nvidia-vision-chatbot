@@ -35,6 +35,7 @@ import com.example.data.model.AppMode
 fun ModeSelectorTabs(
     currentMode: AppMode,
     onModeChange: (AppMode) -> Unit,
+    showTerminal: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     Surface(
@@ -71,13 +72,15 @@ fun ModeSelectorTabs(
                 modifier = Modifier.weight(1f)
             )
 
-            ModeTabItem(
-                title = "Terminal",
-                icon = Icons.Outlined.Terminal,
-                isSelected = currentMode == AppMode.TERMINAL,
-                onClick = { onModeChange(AppMode.TERMINAL) },
-                modifier = Modifier.weight(1f)
-            )
+            if (showTerminal) {
+                ModeTabItem(
+                    title = "Terminal",
+                    icon = Icons.Outlined.Terminal,
+                    isSelected = currentMode == AppMode.TERMINAL,
+                    onClick = { onModeChange(AppMode.TERMINAL) },
+                    modifier = Modifier.weight(1f)
+                )
+            }
         }
     }
 }

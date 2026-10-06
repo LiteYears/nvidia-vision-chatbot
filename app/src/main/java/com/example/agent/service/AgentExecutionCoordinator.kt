@@ -59,6 +59,24 @@ object AgentExecutionCoordinator {
         }
     }
 
+    fun clearSessionIf(sessionId: String) {
+        if (_activeSession.value?.id == sessionId) {
+            _activeSession.value = null
+            _isRunning.value = false
+            _currentStatus.value = AgentTaskStatus.INITIALIZING
+            _currentActionDescription.value = ""
+            _errorMessage.value = null
+        }
+    }
+
+    fun clearActiveSession() {
+        _activeSession.value = null
+        _isRunning.value = false
+        _currentStatus.value = AgentTaskStatus.INITIALIZING
+        _currentActionDescription.value = ""
+        _errorMessage.value = null
+    }
+
     fun startSession(
         context: Context,
         session: AgentSession,
@@ -187,7 +205,7 @@ object AgentExecutionCoordinator {
 
     fun addReflection(sessionId: String, thought: String, timestamp: Long = System.currentTimeMillis()) {
         val cleanThought = thought.trim()
-        if (cleanThought.isBlank()) return
+        if (cleanThought.isBlank() || cleanThought.equals("null", ignoreCase = true)) return
         _activeSession.update { current ->
             if (current?.id == sessionId) {
                 if (current.reflections.lastOrNull()?.thought == cleanThought) return@update current
@@ -396,15 +414,26 @@ object AgentExecutionCoordinator {
             )
         )
 
+        val safeContent = if (finalAssistantMessage.content.trim().equals("null", ignoreCase = true) || finalAssistantMessage.content.isBlank()) {
+            "Task concluded. Artifacts and outputs are saved in the workspace."
+        } else {
+            finalAssistantMessage.content
+        }
+        val safeAssistantMessage = if (safeContent != finalAssistantMessage.content) {
+            finalAssistantMessage.copy(content = safeContent)
+        } else {
+            finalAssistantMessage
+        }
+
         _activeSession.update { current ->
             if (current?.id == sessionId) {
-                val exists = current.messages.any { it.id == finalAssistantMessage.id }
+                val exists = current.messages.any { it.id == safeAssistantMessage.id }
                 val updatedMessages = if (exists) {
                     current.messages.map { msg ->
-                        if (msg.id == finalAssistantMessage.id) finalAssistantMessage else msg
+                        if (msg.id == safeAssistantMessage.id) safeAssistantMessage else msg
                     }
                 } else {
-                    current.messages + finalAssistantMessage
+                    current.messages + safeAssistantMessage
                 }
                 val finalSteps = updatedSteps ?: current.steps.map { it.copy(status = AgentTaskStatus.COMPLETED) }
                 current.copy(

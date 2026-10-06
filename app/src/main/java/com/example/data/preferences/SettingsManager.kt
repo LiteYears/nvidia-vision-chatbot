@@ -23,6 +23,7 @@ class SettingsManager(context: Context) {
         private const val KEY_ALWAYS_ALLOW_ALL_COMMANDS = "always_allow_all_commands"
         private const val KEY_COMMAND_PERMISSION_POLICY = "command_permission_policy"
         private const val KEY_ALWAYS_ALLOWED_COMMANDS = "always_allowed_commands"
+        private const val KEY_SHOW_TERMINAL = "show_terminal"
 
         const val DEFAULT_USER_NAME = ""
         const val DEFAULT_MODEL = "meta/llama-3.2-11b-vision-instruct"
@@ -185,5 +186,16 @@ class SettingsManager(context: Context) {
 
     fun clearAlwaysAllowedCommands() {
         prefs.edit().remove(KEY_ALWAYS_ALLOWED_COMMANDS).apply()
+    }
+
+    /**
+     * Controls whether the developer/advanced Terminal is exposed in the UI.
+     * OFF by default to keep the primary experience focused and smartphone-first.
+     */
+    fun isShowTerminal(): Boolean =
+        prefs.getBoolean(KEY_SHOW_TERMINAL, false)
+
+    fun setShowTerminal(show: Boolean) {
+        prefs.edit().putBoolean(KEY_SHOW_TERMINAL, show).apply()
     }
 }

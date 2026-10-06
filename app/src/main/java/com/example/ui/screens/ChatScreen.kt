@@ -77,6 +77,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.example.ui.components.AboutDeveloperDialog
+import com.example.ui.components.AdvancedSettingsDialog
 import com.example.ui.components.AgentGoalWelcomeView
 import com.example.ui.components.AgentReflectionCard
 import com.example.ui.components.AgentTaskStateCard
@@ -169,6 +170,7 @@ fun ChatScreen(
 
     // Clear messages confirmation dialog state
     var showClearDialog by remember { mutableStateOf(false) }
+    var showAdvancedDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(uiState.attachedDocument) {
         val doc = uiState.attachedDocument
@@ -373,6 +375,11 @@ fun ChatScreen(
                     scope.launch { drawerState.close() }
                     viewModel.setWorkspaceSheetOpen(true)
                 },
+                onOpenAdvancedClick = {
+                    scope.launch { drawerState.close() }
+                    showAdvancedDialog = true
+                },
+                isTerminalVisible = uiState.isTerminalVisible,
                 currentMode = uiState.currentMode,
                 onModeChange = { mode ->
                     viewModel.setAppMode(mode)
@@ -453,7 +460,8 @@ fun ChatScreen(
                     // Mode Selector Tabs (Chat Mode vs Agent Mode)
                     ModeSelectorTabs(
                         currentMode = uiState.currentMode,
-                        onModeChange = viewModel::setAppMode
+                        onModeChange = viewModel::setAppMode,
+                        showTerminal = uiState.isTerminalVisible
                     )
                 }
             },
@@ -888,6 +896,13 @@ fun ChatScreen(
         onReadFile = { relPath -> viewModel.readWorkspaceFile(relPath) },
         onExportZip = { ctx -> viewModel.exportWorkspaceZip(ctx) },
         onRefresh = { viewModel.setWorkspaceSheetOpen(true) }
+    )
+
+    AdvancedSettingsDialog(
+        isOpen = showAdvancedDialog,
+        showTerminal = uiState.isTerminalVisible,
+        onToggleShowTerminal = viewModel::setShowTerminal,
+        onDismiss = { showAdvancedDialog = false }
     )
 }
 

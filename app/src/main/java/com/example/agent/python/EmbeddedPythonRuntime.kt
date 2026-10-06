@@ -2148,6 +2148,70 @@ class PythonInterpreter(
                 else -> throw PythonRuntimeException("AttributeError", "'datetime.time' object has no attribute '$name'", line)
             }
         }
+        if (obj is PyZipFile) {
+            return when (name) {
+                "write" -> PyBuiltinFunc("write") { args, kwargs ->
+                    val fn = args.firstOrNull()?.toString() ?: ""
+                    val arc = (args.getOrNull(1) ?: kwargs["arcname"])?.toString()
+                    obj.write(fn, arc)
+                    null
+                }
+                "writestr" -> PyBuiltinFunc("writestr") { args, _ ->
+                    val arc = args.firstOrNull()?.toString() ?: ""
+                    val data = args.getOrNull(1)
+                    obj.writestr(arc, data)
+                    null
+                }
+                "namelist" -> PyBuiltinFunc("namelist") { _, _ -> obj.namelist().toMutableList() }
+                "read" -> PyBuiltinFunc("read") { args, _ -> obj.read(args.firstOrNull()?.toString() ?: "") }
+                "close" -> PyBuiltinFunc("close") { _, _ -> obj.close(); null }
+                "__enter__" -> PyBuiltinFunc("__enter__") { _, _ -> obj }
+                "__exit__" -> PyBuiltinFunc("__exit__") { _, _ -> obj.close(); null }
+                else -> throw PythonRuntimeException("AttributeError", "'ZipFile' object has no attribute '$name'", line)
+            }
+        }
+        if (obj is PyDocxDocument) {
+            return when (name) {
+                "add_heading" -> PyBuiltinFunc("add_heading") { args, kwargs ->
+                    val txt = args.firstOrNull()?.toString() ?: kwargs["text"]?.toString() ?: ""
+                    val lvl = ((args.getOrNull(1) ?: kwargs["level"]) as? Number)?.toInt() ?: 1
+                    obj.add_heading(txt, lvl)
+                }
+                "add_paragraph" -> PyBuiltinFunc("add_paragraph") { args, kwargs ->
+                    val txt = args.firstOrNull()?.toString() ?: kwargs["text"]?.toString() ?: ""
+                    val style = (args.getOrNull(1) ?: kwargs["style"])?.toString()
+                    obj.add_paragraph(txt, style)
+                }
+                "save" -> PyBuiltinFunc("save") { args, kwargs ->
+                    val path = args.firstOrNull()?.toString() ?: kwargs["path"]?.toString() ?: "document.docx"
+                    obj.save(path)
+                    null
+                }
+                "paragraphs" -> obj.paragraphs.toMutableList()
+                else -> throw PythonRuntimeException("AttributeError", "'Document' object has no attribute '$name'", line)
+            }
+        }
+        if (obj is PyDocxParagraph) {
+            return when (name) {
+                "text" -> obj.text
+                "add_run" -> PyBuiltinFunc("add_run") { args, _ ->
+                    val t = args.firstOrNull()?.toString() ?: ""
+                    obj.add_run(t)
+                }
+                "alignment" -> null
+                else -> throw PythonRuntimeException("AttributeError", "'Paragraph' object has no attribute '$name'", line)
+            }
+        }
+        if (obj is PyDocxRun) {
+            return when (name) {
+                "bold" -> obj.bold
+                "italic" -> obj.italic
+                "text" -> obj.text
+                "font" -> obj
+                "color" -> obj
+                else -> null
+            }
+        }
         if (obj is PyTimeDelta) {
             return when (name) {
                 "days" -> obj.days
@@ -3793,6 +3857,64 @@ class PythonInterpreter(
                 )
                 PyModule("socket", members)
             }
+            "zipfile" -> {
+                val members = mapOf<String, Any?>(
+                    "ZIP_STORED" to 0L,
+                    "ZIP_DEFLATED" to 8L,
+                    "is_zipfile" to PyBuiltinFunc("is_zipfile") { args, _ ->
+                        val fn = args.firstOrNull()?.toString() ?: ""
+                        val f = try { if (File(fn).isAbsolute) File(fn) else workspaceManager.resolvePath(fn) } catch (_: Exception) { File(fn) }
+                        if (f.exists() && f.length() >= 4) {
+                            try {
+                                val b = f.inputStream().use { it.readNBytes(4) }
+                                b.size == 4 && b[0] == 0x50.toByte() && b[1] == 0x4B.toByte()
+                            } catch (_: Exception) { false }
+                        } else false
+                    },
+                    "ZipFile" to PyBuiltinFunc("ZipFile") { args, kwargs ->
+                        val fileArg = args.firstOrNull()?.toString() ?: kwargs["file"]?.toString() ?: "archive.zip"
+                        val modeArg = (args.getOrNull(1) ?: kwargs["mode"])?.toString() ?: "r"
+                        val f = try { if (File(fileArg).isAbsolute) File(fileArg) else workspaceManager.resolvePath(fileArg) } catch (_: Exception) { File(fileArg) }
+                        PyZipFile(f, modeArg, workspaceManager)
+                    }
+                )
+                PyModule("zipfile", members)
+            }
+            "docx" -> {
+                val members = mutableMapOf<String, Any?>(
+                    "Document" to PyBuiltinFunc("Document") { _, _ -> PyDocxDocument(workspaceManager) },
+                    "shared" to resolveModule("docx.shared", line),
+                    "enum" to PyModule("docx.enum", mapOf("text" to resolveModule("docx.enum.text", line))),
+                    "oxml" to PyModule("docx.oxml", emptyMap())
+                )
+                PyModule("docx", members)
+            }
+            "docx.shared" -> {
+                val members = mapOf<String, Any?>(
+                    "Inches" to PyBuiltinFunc("Inches") { args, _ -> (args.firstOrNull() as? Number)?.toDouble() ?: 1.0 },
+                    "Pt" to PyBuiltinFunc("Pt") { args, _ -> (args.firstOrNull() as? Number)?.toDouble() ?: 12.0 },
+                    "RGBColor" to PyBuiltinFunc("RGBColor") { args, _ ->
+                        val r = (args.getOrNull(0) as? Number)?.toInt() ?: 0
+                        val g = (args.getOrNull(1) as? Number)?.toInt() ?: 0
+                        val b = (args.getOrNull(2) as? Number)?.toInt() ?: 0
+                        String.format(Locale.US, "%02X%02X%02X", r, g, b)
+                    }
+                )
+                PyModule("docx.shared", members)
+            }
+            "docx.enum.text" -> {
+                val alignMembers = mapOf<String, Any?>(
+                    "LEFT" to 0L,
+                    "CENTER" to 1L,
+                    "RIGHT" to 2L,
+                    "JUSTIFY" to 3L
+                )
+                val members = mapOf<String, Any?>(
+                    "WD_ALIGN_PARAGRAPH" to PyModule("WD_ALIGN_PARAGRAPH", alignMembers),
+                    "WD_PARAGRAPH_ALIGNMENT" to PyModule("WD_PARAGRAPH_ALIGNMENT", alignMembers)
+                )
+                PyModule("docx.enum.text", members)
+            }
             else -> {
                 // Workspace module resolution
                 val cleanSub = module.replace('.', '/')
@@ -4600,4 +4722,210 @@ class SandboxedFile(
             throw PythonRuntimeException("ValueError", "I/O operation on closed file.", 1)
         }
     }
+}
+
+class PyZipFile(
+    val file: File,
+    val mode: String = "r",
+    val workspaceManager: AgentWorkspaceManager
+) {
+    private var zipOut: java.util.zip.ZipOutputStream? = null
+    private val writtenEntries = mutableListOf<String>()
+
+    init {
+        if (mode.contains("w") || mode.contains("a")) {
+            file.parentFile?.mkdirs()
+            zipOut = java.util.zip.ZipOutputStream(java.io.FileOutputStream(file))
+        }
+    }
+
+    fun write(filename: String, arcname: String? = null) {
+        val srcFile = try {
+            if (File(filename).isAbsolute) File(filename) else workspaceManager.resolvePath(filename)
+        } catch (_: Exception) { File(filename) }
+        val targetName = (arcname ?: srcFile.name).replace('\\', '/')
+        if (srcFile.exists() && srcFile.isFile && zipOut != null) {
+            val entry = java.util.zip.ZipEntry(targetName)
+            zipOut!!.putNextEntry(entry)
+            srcFile.inputStream().use { it.copyTo(zipOut!!) }
+            zipOut!!.closeEntry()
+            writtenEntries.add(targetName)
+        }
+    }
+
+    fun writestr(arcname: String, data: Any?) {
+        val targetName = arcname.replace('\\', '/')
+        val bytes = when (data) {
+            is ByteArray -> data
+            is String -> data.toByteArray(Charsets.UTF_8)
+            else -> data?.toString()?.toByteArray(Charsets.UTF_8) ?: ByteArray(0)
+        }
+        if (zipOut != null) {
+            val entry = java.util.zip.ZipEntry(targetName)
+            zipOut!!.putNextEntry(entry)
+            zipOut!!.write(bytes)
+            zipOut!!.closeEntry()
+            writtenEntries.add(targetName)
+        }
+    }
+
+    fun namelist(): List<String> {
+        if (file.exists() && file.isFile) {
+            val list = mutableListOf<String>()
+            try {
+                java.util.zip.ZipFile(file).use { zf ->
+                    val en = zf.entries()
+                    while (en.hasMoreElements()) {
+                        list.add(en.nextElement().name)
+                    }
+                }
+            } catch (_: Exception) {}
+            return list
+        }
+        return writtenEntries
+    }
+
+    fun read(name: String): String {
+        if (file.exists() && file.isFile) {
+            try {
+                java.util.zip.ZipFile(file).use { zf ->
+                    val entry = zf.getEntry(name)
+                    if (entry != null) {
+                        return zf.getInputStream(entry).bufferedReader().readText()
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+        return ""
+    }
+
+    fun close() {
+        zipOut?.flush()
+        zipOut?.close()
+        zipOut = null
+    }
+}
+
+class PyDocxDocument(val workspaceManager: AgentWorkspaceManager) {
+    val paragraphs = mutableListOf<PyDocxParagraph>()
+
+    fun add_heading(text: String, level: Int = 1): PyDocxParagraph {
+        val p = PyDocxParagraph(text = text, isHeading = true, headingLevel = level)
+        paragraphs.add(p)
+        return p
+    }
+
+    fun add_paragraph(text: String = "", style: String? = null): PyDocxParagraph {
+        val p = PyDocxParagraph(text = text, isHeading = false, style = style)
+        paragraphs.add(p)
+        return p
+    }
+
+    fun save(path: String) {
+        val targetFile = try {
+            if (File(path).isAbsolute) File(path) else workspaceManager.resolvePath(path)
+        } catch (_: Exception) { File(path) }
+        targetFile.parentFile?.mkdirs()
+
+        java.util.zip.ZipOutputStream(java.io.FileOutputStream(targetFile)).use { zos ->
+            // [Content_Types].xml
+            zos.putNextEntry(java.util.zip.ZipEntry("[Content_Types].xml"))
+            zos.write("""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+</Types>""".toByteArray(Charsets.UTF_8))
+            zos.closeEntry()
+
+            // _rels/.rels
+            zos.putNextEntry(java.util.zip.ZipEntry("_rels/.rels"))
+            zos.write("""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>""".toByteArray(Charsets.UTF_8))
+            zos.closeEntry()
+
+            // word/_rels/document.xml.rels
+            zos.putNextEntry(java.util.zip.ZipEntry("word/_rels/document.xml.rels"))
+            zos.write("""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>""".toByteArray(Charsets.UTF_8))
+            zos.closeEntry()
+
+            // word/styles.xml
+            zos.putNextEntry(java.util.zip.ZipEntry("word/styles.xml"))
+            zos.write("""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+    <w:name w:val="Normal"/>
+    <w:rPr>
+      <w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/>
+      <w:sz w:val="22"/>
+    </w:rPr>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="Heading1">
+    <w:name w:val="heading 1"/>
+    <w:pPr><w:spacing w:before="240" w:after="120"/></w:pPr>
+    <w:rPr><w:b/><w:sz w:val="32"/><w:color w:val="2E74B5"/></w:rPr>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="Heading2">
+    <w:name w:val="heading 2"/>
+    <w:pPr><w:spacing w:before="180" w:after="80"/></w:pPr>
+    <w:rPr><w:b/><w:sz w:val="26"/><w:color w:val="2E74B5"/></w:rPr>
+  </w:style>
+</w:styles>""".toByteArray(Charsets.UTF_8))
+            zos.closeEntry()
+
+            // word/document.xml
+            val docXml = buildString {
+                append("""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>""")
+                append("""<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">""")
+                append("<w:body>")
+                for (p in paragraphs) {
+                    append("<w:p>")
+                    if (p.isHeading) {
+                        append("<w:pPr><w:pStyle w:val=\"Heading${p.headingLevel}\"/></w:pPr>")
+                    }
+                    val escText = p.text
+                        .replace("&", "&amp;")
+                        .replace("<", "&lt;")
+                        .replace(">", "&gt;")
+                        .replace("\"", "&quot;")
+                        .replace("'", "&apos;")
+                    append("<w:r><w:t xml:space=\"preserve\">$escText</w:t></w:r>")
+                    append("</w:p>")
+                }
+                append("<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/></w:sectPr>")
+                append("</w:body></w:document>")
+            }
+            zos.putNextEntry(java.util.zip.ZipEntry("word/document.xml"))
+            zos.write(docXml.toByteArray(Charsets.UTF_8))
+            zos.closeEntry()
+        }
+    }
+}
+
+class PyDocxParagraph(
+    var text: String = "",
+    val isHeading: Boolean = false,
+    val headingLevel: Int = 1,
+    var style: String? = null
+) {
+    val runs = mutableListOf<PyDocxRun>()
+
+    fun add_run(runText: String = ""): PyDocxRun {
+        text += runText
+        val r = PyDocxRun(runText)
+        runs.add(r)
+        return r
+    }
+}
+
+class PyDocxRun(var text: String = "") {
+    var bold: Boolean = false
+    var italic: Boolean = false
+    var font: Any? = null
 }

@@ -4,7 +4,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Handles JSON serialization and deserialization of Subtasks for Room persistence.
+ * Handles JSON serialization and deserialization of Subtasks and Task Context for Room persistence.
  */
 object TaskPlanJsonAdapter {
 
@@ -19,6 +19,14 @@ object TaskPlanJsonAdapter {
             obj.put("orderIndex", subtask.orderIndex)
             obj.put("retryCount", subtask.retryCount)
             obj.put("updatedAt", subtask.updatedAt)
+            obj.put("verificationCriteria", subtask.verificationCriteria ?: JSONObject.NULL)
+            obj.put("verificationResult", subtask.verificationResult ?: JSONObject.NULL)
+            obj.put("failureReason", subtask.failureReason ?: JSONObject.NULL)
+            if (subtask.actions.isNotEmpty()) {
+                val actArray = JSONArray()
+                subtask.actions.forEach { actArray.put(it) }
+                obj.put("actions", actArray)
+            }
             array.put(obj)
         }
         return array.toString()
@@ -43,6 +51,16 @@ object TaskPlanJsonAdapter {
                 val orderIndex = obj.optInt("orderIndex", i)
                 val retryCount = obj.optInt("retryCount", 0)
                 val updatedAt = obj.optLong("updatedAt", System.currentTimeMillis())
+                val verificationCriteria = if (obj.isNull("verificationCriteria") || !obj.has("verificationCriteria")) null else obj.getString("verificationCriteria")
+                val verificationResult = if (obj.isNull("verificationResult") || !obj.has("verificationResult")) null else obj.getString("verificationResult")
+                val failureReason = if (obj.isNull("failureReason") || !obj.has("failureReason")) null else obj.getString("failureReason")
+                val actionsList = mutableListOf<String>()
+                if (obj.has("actions") && !obj.isNull("actions")) {
+                    val actArray = obj.getJSONArray("actions")
+                    for (a in 0 until actArray.length()) {
+                        actionsList.add(actArray.getString(a))
+                    }
+                }
 
                 list.add(
                     Subtask(
@@ -52,7 +70,11 @@ object TaskPlanJsonAdapter {
                         result = result,
                         orderIndex = orderIndex,
                         retryCount = retryCount,
-                        updatedAt = updatedAt
+                        updatedAt = updatedAt,
+                        verificationCriteria = verificationCriteria,
+                        verificationResult = verificationResult,
+                        failureReason = failureReason,
+                        actions = actionsList
                     )
                 )
             }

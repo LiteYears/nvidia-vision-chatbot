@@ -340,12 +340,81 @@ class NvidiaApiClient(
                 if (choices != null && choices.length() > 0) {
                     val firstChoice = choices.getJSONObject(0)
                     val messageObj = firstChoice.optJSONObject("message")
-                    val textContent = messageObj?.optString("content", "") ?: ""
-                    val reply = if (textContent.isNotBlank()) {
-                        textContent
-                    } else {
-                        messageObj?.optString("reasoning_content")?.takeIf { it.isNotBlank() }
-                            ?: firstChoice.optString("text", "No response generated.")
+
+                    // 1. Check for native tool_calls (OpenAI function/tool calling format)
+                    val toolCallsArray = messageObj?.optJSONArray("tool_calls")
+                    val nativeToolCallBlock = if (toolCallsArray != null && toolCallsArray.length() > 0) {
+                        buildString {
+                            for (tIdx in 0 until toolCallsArray.length()) {
+                                val tObj = toolCallsArray.optJSONObject(tIdx) ?: continue
+                                val funcObj = tObj.optJSONObject("function") ?: continue
+                                val name = funcObj.optString("name", "").trim()
+                                val argsRaw = funcObj.optString("arguments", "").trim()
+                                if (name.isNotBlank()) {
+                                    appendLine("```tool_call")
+                                    val toolCallJson = JSONObject()
+                                    toolCallJson.put("tool", name)
+                                    try {
+                                        if (argsRaw.startsWith("{")) {
+                                            toolCallJson.put("arguments", JSONObject(argsRaw))
+                                        } else {
+                                            toolCallJson.put("arguments", argsRaw)
+                                        }
+                                    } catch (_: Exception) {
+                                        toolCallJson.put("arguments", argsRaw)
+                                    }
+                                    appendLine(toolCallJson.toString())
+                                    appendLine("```")
+                                }
+                            }
+                        }.trim()
+                    } else ""
+
+                    // 2. Extract content safely (ignoring literal "null" from JSONObject.NULL)
+                    val textContent = if (messageObj != null && !messageObj.isNull("content")) {
+                        val raw = messageObj.optString("content", "")
+                        if (raw.equals("null", ignoreCase = true)) "" else raw.trim()
+                    } else ""
+
+                    // 3. Extract reasoning/thought content (DeepSeek R1, Nemotron, Qwen etc.)
+                    val reasoningContent = if (messageObj != null) {
+                        val r1 = if (!messageObj.isNull("reasoning_content")) messageObj.optString("reasoning_content", "") else ""
+                        val r2 = if (!messageObj.isNull("reasoning")) messageObj.optString("reasoning", "") else ""
+                        when {
+                            r1.isNotBlank() && !r1.equals("null", ignoreCase = true) -> r1.trim()
+                            r2.isNotBlank() && !r2.equals("null", ignoreCase = true) -> r2.trim()
+                            else -> ""
+                        }
+                    } else ""
+
+                    val legacyText = if (!firstChoice.isNull("text")) {
+                        val raw = firstChoice.optString("text", "")
+                        if (raw.equals("null", ignoreCase = true)) "" else raw.trim()
+                    } else ""
+
+                    val reply = when {
+                        // If model called tools natively, output tool call (with reasoning/text prefix if available)
+                        nativeToolCallBlock.isNotBlank() -> {
+                            val prefix = if (textContent.isNotBlank()) textContent else reasoningContent
+                            if (prefix.isNotBlank()) "$prefix\n\n$nativeToolCallBlock" else nativeToolCallBlock
+                        }
+                        // Standard text response
+                        textContent.isNotBlank() -> {
+                            if (reasoningContent.isNotBlank() && !textContent.contains(reasoningContent.take(40))) {
+                                "<thought>\n$reasoningContent\n</thought>\n\n$textContent"
+                            } else {
+                                textContent
+                            }
+                        }
+                        // Reasoning only (e.g. reasoning model that put solution in thoughts)
+                        reasoningContent.isNotBlank() -> reasoningContent
+                        legacyText.isNotBlank() -> legacyText
+                        else -> {
+                            Log.w(TAG, "Empty content, reasoning, and tool_calls received from $resolvedModel")
+                            return Result.failure(
+                                NvidiaApiException(200, "Empty response generated by $resolvedModel. Please retry.")
+                            )
+                        }
                     }
                     Log.d(TAG, "Received successful response (${reply.length} chars) from $resolvedModel")
                     Result.success(reply)

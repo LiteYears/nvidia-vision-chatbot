@@ -76,6 +76,8 @@ fun ChatDrawerContent(
     onOpenAboutClick: () -> Unit = {},
     onOpenParametersClick: () -> Unit = {},
     onOpenWorkspaceClick: () -> Unit = {},
+    onOpenAdvancedClick: () -> Unit = {},
+    isTerminalVisible: Boolean = false,
     currentMode: AppMode = AppMode.CHAT,
     onModeChange: (AppMode) -> Unit = {},
     agentSessions: List<AgentSession> = emptyList(),
@@ -266,34 +268,36 @@ fun ChatDrawerContent(
                         }
                     }
 
-                    Surface(
-                        shape = RoundedCornerShape(9.dp),
-                        color = if (isTerminalMode) MaterialTheme.colorScheme.surface else Color.Transparent,
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(9.dp))
-                            .clickable { onModeChange(AppMode.TERMINAL) }
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(vertical = 6.dp),
-                            horizontalArrangement = Arrangement.Center,
-                            verticalAlignment = Alignment.CenterVertically
+                    if (isTerminalVisible) {
+                        Surface(
+                            shape = RoundedCornerShape(9.dp),
+                            color = if (isTerminalMode) MaterialTheme.colorScheme.surface else Color.Transparent,
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(9.dp))
+                                .clickable { onModeChange(AppMode.TERMINAL) }
                         ) {
-                            Icon(
-                                imageVector = Icons.Outlined.Terminal,
-                                contentDescription = null,
-                                tint = if (isTerminalMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = "Terminal",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontWeight = if (isTerminalMode) FontWeight.SemiBold else FontWeight.Normal,
-                                    fontSize = 11.sp,
-                                    color = if (isTerminalMode) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+                            Row(
+                                modifier = Modifier.padding(vertical = 6.dp),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.Terminal,
+                                    contentDescription = null,
+                                    tint = if (isTerminalMode) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                    modifier = Modifier.size(14.dp)
                                 )
-                            )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "Terminal",
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontWeight = if (isTerminalMode) FontWeight.SemiBold else FontWeight.Normal,
+                                        fontSize = 11.sp,
+                                        color = if (isTerminalMode) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                )
+                            }
                         }
                     }
                 }
@@ -611,6 +615,32 @@ fun ChatDrawerContent(
                         )
                         Text(
                             text = "Model Hyperparameters",
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                fontWeight = FontWeight.Medium,
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        )
+                    }
+
+                    // Advanced & Terminal Settings
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { onOpenAdvancedClick() }
+                            .padding(horizontal = 10.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Security,
+                            contentDescription = "Advanced",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
+                            modifier = Modifier.size(17.dp)
+                        )
+                        Text(
+                            text = "Advanced Settings",
                             style = MaterialTheme.typography.bodyMedium.copy(
                                 fontWeight = FontWeight.Medium,
                                 fontSize = 13.sp,

@@ -104,7 +104,8 @@ data class ChatUiState(
     val isAgentLoading: Boolean = false,
     val agentErrorMessage: String? = null,
     val lastUploadedZip: UploadedZipInfo? = null,
-    val isWorkspaceSheetOpen: Boolean = false
+    val isWorkspaceSheetOpen: Boolean = false,
+    val isTerminalVisible: Boolean = false
 )
 
 data class UploadedZipInfo(
@@ -120,7 +121,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val settingsManager = SettingsManager(application)
     private val apiClient = NvidiaApiClient { settingsManager.getEffectiveApiKey() }
     private val repository = ChatRepository(database.chatDao(), settingsManager, apiClient)
-    private val agentPlanRepository = AgentPlanRepository(database.agentPlanDao())
+    private val agentPlanRepository = AgentPlanRepository(database.agentPlanDao(), database.chatDao())
     private val taskPlanner = TaskPlanner()
     private val workspaceManager = AgentWorkspaceManager.init(File(application.filesDir, "agent_workspaces"))
     private val toolRegistry = ToolRegistry.defaultRegistry(workspaceManager)
@@ -154,7 +155,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             systemPrompt = settingsManager.getSystemPrompt(),
             temperature = settingsManager.getTemperature(),
             topP = settingsManager.getTopP(),
-            maxTokens = settingsManager.getMaxTokens()
+            maxTokens = settingsManager.getMaxTokens(),
+            isTerminalVisible = settingsManager.isShowTerminal()
         )
     )
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
@@ -204,30 +206,37 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Load persisted Agent sessions and task plans
+        // Observe persisted Agent sessions reactively from Room database (single source of truth)
         viewModelScope.launch {
-            try {
-                val savedSessions = agentPlanRepository.getAllAgentSessions()
-                if (savedSessions.isNotEmpty()) {
-                    _uiState.update { it.copy(agentSessions = savedSessions) }
+            agentPlanRepository.observeAllAgentSessions().collectLatest { sessions ->
+                _uiState.update { state ->
+                    val currentId = state.currentAgentSession?.id
+                    val updatedCurrent = if (currentId != null) {
+                        sessions.find { it.id == currentId }
+                    } else {
+                        state.currentAgentSession
+                    }
+                    state.copy(
+                        agentSessions = sessions,
+                        currentAgentSession = updatedCurrent
+                    )
                 }
-            } catch (_: Exception) {
             }
         }
 
-        // Observe Foreground Service active agent session across backgrounding & app switching
+        // Observe Foreground Service active agent session updates (for live progress of running task)
         viewModelScope.launch {
             AgentExecutionCoordinator.activeSession.collectLatest { active ->
                 if (active != null) {
                     _uiState.update { state ->
-                        val updatedSessions = if (state.agentSessions.any { it.id == active.id }) {
-                            state.agentSessions.map { if (it.id == active.id) active else it }
-                        } else {
-                            listOf(active) + state.agentSessions
-                        }
+                        // Never resurrect deleted sessions
+                        val sessionExists = state.agentSessions.any { it.id == active.id }
+                        if (!sessionExists) return@update state
+
+                        val updatedSessions = state.agentSessions.map { if (it.id == active.id) active else it }
                         val isSameCurrent = state.currentAgentSession?.id == active.id
                         state.copy(
-                            currentAgentSession = if (isSameCurrent || state.currentAgentSession == null) active else state.currentAgentSession,
+                            currentAgentSession = if (isSameCurrent) active else state.currentAgentSession,
                             agentSessions = updatedSessions
                         )
                     }
@@ -1170,14 +1179,29 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private var isCreatingTask = false
+
+    fun setShowTerminal(enabled: Boolean) {
+        settingsManager.setShowTerminal(enabled)
+        _uiState.update { it.copy(isTerminalVisible = enabled) }
+        if (!enabled && _uiState.value.currentMode == AppMode.TERMINAL) {
+            setAppMode(AppMode.CHAT)
+        }
+    }
+
     fun deleteAgentSession(sessionId: String) {
         if (AgentExecutionCoordinator.activeSession.value?.id == sessionId) {
             AgentExecutionCoordinator.stopExecution(getApplication())
         }
+        AgentExecutionCoordinator.clearSessionIf(sessionId)
         workspaceManager.deleteWorkspace(sessionId)
         _uiState.update { state ->
             val updatedSessions = state.agentSessions.filterNot { it.id == sessionId }
-            val newCurrent = if (state.currentAgentSession?.id == sessionId) null else state.currentAgentSession
+            val newCurrent = if (state.currentAgentSession?.id == sessionId) {
+                updatedSessions.firstOrNull()
+            } else {
+                state.currentAgentSession
+            }
             state.copy(
                 agentSessions = updatedSessions,
                 currentAgentSession = newCurrent
@@ -1263,92 +1287,91 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun createAgentSession(goal: String) {
         val trimmedGoal = goal.trim()
-        if (trimmedGoal.isBlank()) return
+        if (trimmedGoal.isBlank() || isCreatingTask) return
+        isCreatingTask = true
 
-        val state = _uiState.value
-        val sessionId = UUID.randomUUID().toString()
-        val now = System.currentTimeMillis()
+        try {
+            val state = _uiState.value
+            val sessionId = UUID.randomUUID().toString()
+            val now = System.currentTimeMillis()
 
-        val initialSteps = listOf(
-            AgentStep(
-                title = "Goal Intake & Verification",
-                description = "Parse objective and establish session parameters",
-                status = AgentTaskStatus.COMPLETED,
-                timestamp = now
-            ),
-            AgentStep(
-                title = "Task Decomposition & Roadmap",
-                description = "Formulate milestones and execution strategy",
-                status = AgentTaskStatus.IN_PROGRESS,
-                timestamp = now
-            ),
-            AgentStep(
-                title = "Execution Synthesis",
-                description = "Synthesize actionable deliverables for goal",
-                status = AgentTaskStatus.INITIALIZING,
-                timestamp = now
-            )
-        )
+            val initialPlan = taskPlanner.createInitialPlan(sessionId, trimmedGoal, MAX_AUTONOMOUS_TOOL_STEPS)
 
-        val userGoalMessage = ChatMessage(
-            id = UUID.randomUUID().toString(),
-            conversationId = sessionId,
-            role = MessageRole.USER,
-            content = trimmedGoal,
-            modelUsed = state.selectedModel,
-            timestamp = now
-        )
-
-        val assistantMessageId = UUID.randomUUID().toString()
-        val streamingAssistantMessage = ChatMessage(
-            id = assistantMessageId,
-            conversationId = sessionId,
-            role = MessageRole.ASSISTANT,
-            content = "",
-            modelUsed = state.selectedModel,
-            isStreaming = true,
-            timestamp = now + 1
-        )
-
-        val initialPlan = taskPlanner.createInitialPlan(sessionId, trimmedGoal, MAX_AUTONOMOUS_TOOL_STEPS)
-
-        val newSession = AgentSession(
-            id = sessionId,
-            goal = trimmedGoal,
-            status = AgentTaskStatus.IN_PROGRESS,
-            createdAt = now,
-            updatedAt = now,
-            modelUsed = state.selectedModel,
-            steps = initialSteps,
-            plan = initialPlan,
-            messages = listOf(userGoalMessage, streamingAssistantMessage)
-        )
-
-        _uiState.update {
-            it.copy(
-                currentAgentSession = newSession,
-                agentSessions = listOf(newSession) + it.agentSessions.filterNot { s -> s.id == sessionId },
-                agentInputText = "",
-                isAgentLoading = true,
-                agentErrorMessage = null
-            )
-        }
-
-        viewModelScope.launch {
-            try {
-                agentPlanRepository.saveAgentSession(newSession)
-                agentPlanRepository.savePlan(initialPlan)
-            } catch (_: Exception) {
+            val initialSteps = initialPlan.subtasks.map { subtask ->
+                AgentStep(
+                    id = subtask.id,
+                    title = subtask.description,
+                    description = subtask.verificationCriteria ?: "Verifiable milestone",
+                    status = when (subtask.status) {
+                        SubtaskStatus.COMPLETED -> AgentTaskStatus.COMPLETED
+                        SubtaskStatus.RUNNING -> AgentTaskStatus.IN_PROGRESS
+                        SubtaskStatus.FAILED -> AgentTaskStatus.FAILED
+                        SubtaskStatus.PENDING -> AgentTaskStatus.INITIALIZING
+                    },
+                    timestamp = subtask.updatedAt
+                )
             }
-        }
 
-        // Move the agent loop out of viewModelScope into Android ForegroundService with persistent notification
-        AgentExecutionCoordinator.startSession(
-            context = getApplication(),
-            session = newSession,
-            userMessage = userGoalMessage,
-            initialSteps = initialSteps
-        )
+            val userGoalMessage = ChatMessage(
+                id = UUID.randomUUID().toString(),
+                conversationId = sessionId,
+                role = MessageRole.USER,
+                content = trimmedGoal,
+                modelUsed = state.selectedModel,
+                timestamp = now
+            )
+
+            val assistantMessageId = UUID.randomUUID().toString()
+            val streamingAssistantMessage = ChatMessage(
+                id = assistantMessageId,
+                conversationId = sessionId,
+                role = MessageRole.ASSISTANT,
+                content = "",
+                modelUsed = state.selectedModel,
+                isStreaming = true,
+                timestamp = now + 1
+            )
+
+            val newSession = AgentSession(
+                id = sessionId,
+                goal = trimmedGoal,
+                status = AgentTaskStatus.IN_PROGRESS,
+                createdAt = now,
+                updatedAt = now,
+                modelUsed = state.selectedModel,
+                steps = initialSteps,
+                plan = initialPlan,
+                messages = listOf(userGoalMessage, streamingAssistantMessage)
+            )
+
+            _uiState.update {
+                it.copy(
+                    currentAgentSession = newSession,
+                    agentSessions = listOf(newSession) + it.agentSessions.filterNot { s -> s.id == sessionId },
+                    agentInputText = "",
+                    isAgentLoading = true,
+                    agentErrorMessage = null
+                )
+            }
+
+            viewModelScope.launch {
+                try {
+                    agentPlanRepository.saveAgentSession(newSession)
+                    agentPlanRepository.savePlan(initialPlan)
+                } catch (_: Exception) {
+                }
+            }
+
+            // Move the agent loop out of viewModelScope into Android ForegroundService with persistent notification
+            AgentExecutionCoordinator.startSession(
+                context = getApplication(),
+                session = newSession,
+                userMessage = userGoalMessage,
+                initialSteps = initialSteps
+            )
+        } finally {
+            isCreatingTask = false
+        }
     }
 
     fun retryCurrentAgentTask() {

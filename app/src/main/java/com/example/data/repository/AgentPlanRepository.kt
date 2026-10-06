@@ -4,12 +4,14 @@ import com.example.agent.plan.TaskPlan
 import com.example.data.local.AgentPlanDao
 import com.example.data.local.AgentPlanEntity
 import com.example.data.local.AgentSessionEntity
+import com.example.data.local.ChatDao
 import com.example.data.model.AgentSession
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
 class AgentPlanRepository(
-    private val agentPlanDao: AgentPlanDao
+    private val agentPlanDao: AgentPlanDao,
+    private val chatDao: ChatDao? = null
 ) {
 
     suspend fun savePlan(plan: TaskPlan) {
@@ -51,8 +53,20 @@ class AgentPlanRepository(
         }
     }
 
+    fun observeAllAgentSessions(): Flow<List<AgentSession>> {
+        return agentPlanDao.getAllSessionsFlow().map { sessionEntities ->
+            sessionEntities.map { entity ->
+                val plan = agentPlanDao.getPlanBySessionIdSync(entity.id)?.toDomain()
+                entity.toDomain(plan)
+            }
+        }
+    }
+
     suspend fun deleteAgentSession(sessionId: String) {
         agentPlanDao.deletePlan(sessionId)
         agentPlanDao.deleteSession(sessionId)
+        try {
+            chatDao?.deleteMessagesForConversation(sessionId)
+        } catch (_: Exception) {}
     }
 }

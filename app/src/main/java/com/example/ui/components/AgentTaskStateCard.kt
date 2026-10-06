@@ -3,9 +3,12 @@ package com.example.ui.components
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,21 +26,25 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Flag
 import androidx.compose.material.icons.outlined.HourglassTop
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
-import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.RadioButtonUnchecked
 import androidx.compose.material.icons.outlined.SmartToy
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -51,20 +58,27 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.agent.plan.Subtask
 import com.example.agent.plan.SubtaskStatus
-import com.example.agent.plan.TaskPlan
 import com.example.data.model.AgentSession
-import com.example.data.model.AgentStep
 import com.example.data.model.AgentTaskStatus
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/**
+ * Smartphone-first, calm, outcome-focused card summarizing the active agent task.
+ *
+ * Exposes:
+ * - What is the agent doing?
+ * - What is the current task?
+ * - What has already been accomplished?
+ * - What is next?
+ * With clean expandable detail views and timeline when desired.
+ */
 @Composable
 fun AgentTaskStateCard(
     session: AgentSession,
@@ -77,11 +91,18 @@ fun AgentTaskStateCard(
     modifier: Modifier = Modifier
 ) {
     var isExpanded by remember { mutableStateOf(false) }
+    var selectedTab by remember { mutableStateOf(0) } // 0: Milestones, 1: Timeline
     val chevronRotation by animateFloatAsState(
         targetValue = if (isExpanded) 180f else 0f,
         animationSpec = tween(220),
         label = "task_state_chevron"
     )
+
+    val plan = session.plan
+    val activeSubtask = plan?.activeSubtask
+    val completedCount = plan?.completedCount ?: 0
+    val totalCount = plan?.totalCount ?: 0
+    val progressFraction = if (totalCount > 0) (completedCount.toFloat() / totalCount.toFloat()).coerceIn(0f, 1f) else 0.1f
 
     val statusColor = when (session.status) {
         AgentTaskStatus.INITIALIZING -> MaterialTheme.colorScheme.primary
@@ -94,873 +115,498 @@ fun AgentTaskStateCard(
         AgentTaskStatus.FAILED -> Color(0xFFF87171) // Red
     }
 
-    val formattedTime = remember(session.createdAt) {
-        SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(session.createdAt))
-    }
-
     Surface(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 14.dp, vertical = 4.dp)
             .testTag("agent_task_state_card"),
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f),
         border = BorderStroke(
             width = 1.dp,
-            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)
+            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.22f)
         )
     ) {
         Column(
             modifier = Modifier
-                .clickable { isExpanded = !isExpanded }
-                .padding(horizontal = 12.dp, vertical = 8.dp)
-        ) {
-            // Main single-line status bar when collapsed
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // Left: Agent Icon + Goal / Active Subtask
-                Row(
-                    modifier = Modifier.weight(1f),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(28.dp)
-                            .clip(RoundedCornerShape(7.dp))
-                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.SmartToy,
-                            contentDescription = "Agent",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = session.goal,
-                            style = MaterialTheme.typography.bodyMedium.copy(
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 13.sp,
-                                color = MaterialTheme.colorScheme.onSurface
-                            ),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        val activeDesc = session.plan?.activeSubtask?.description
-                        val subText = if (!activeDesc.isNullOrBlank() && session.status != AgentTaskStatus.COMPLETED) {
-                            "Focus: $activeDesc"
-                        } else {
-                            "Task #${session.id.take(6).uppercase()} • $formattedTime"
-                        }
-                        Text(
-                            text = subText,
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                fontSize = 11.5.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
-                            ),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.width(6.dp))
-
-                // Right: Quick Pause Button + Status badge + Subtask count + Expand Chevron
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    // Quick Pause / Play Button with comfortable touch target
-                    Surface(
-                        shape = CircleShape,
-                        color = MaterialTheme.colorScheme.surface,
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
-                        modifier = Modifier
-                            .size(34.dp)
-                            .clip(CircleShape)
-                            .clickable { onTogglePause() }
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                imageVector = if (session.status == AgentTaskStatus.PAUSED) Icons.Default.PlayArrow else Icons.Default.Pause,
-                                contentDescription = if (session.status == AgentTaskStatus.PAUSED) "Resume" else "Pause",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
-                    }
-
-                    // Compact Status Pill
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = statusColor.copy(alpha = 0.15f),
-                        border = BorderStroke(1.dp, statusColor.copy(alpha = 0.35f))
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.5.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            val isTaskActive = session.status == AgentTaskStatus.IN_PROGRESS ||
-                                session.status == AgentTaskStatus.THINKING ||
-                                session.status == AgentTaskStatus.USING_TOOL ||
-                                session.status == AgentTaskStatus.OBSERVING
-                            ClaudePulseIndicator(
-                                color = statusColor,
-                                isRunning = isTaskActive,
-                                modifier = Modifier.size(10.dp)
-                            )
-                            Text(
-                                text = session.status.displayName,
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = statusColor,
-                                    fontSize = 11.sp
-                                )
-                            )
-                        }
-                    }
-
-                    // Subtasks progress pill if available
-                    session.plan?.let { plan ->
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
-                            border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
-                        ) {
-                            Text(
-                                text = "${plan.completedCount}/${plan.totalCount}",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontWeight = FontWeight.SemiBold,
-                                    fontSize = 11.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                ),
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
-                            )
-                        }
-                    }
-
-                    Icon(
-                        imageVector = Icons.Outlined.KeyboardArrowDown,
-                        contentDescription = if (isExpanded) "Collapse" else "Expand",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier
-                            .size(20.dp)
-                            .rotate(chevronRotation)
-                    )
-                }
-            }
-
-            // Expandable Detailed Content: Minimal Goal & Compact Plan Checklist & Controls
-            AnimatedVisibility(visible = isExpanded) {
-                Column(modifier = Modifier.padding(top = 6.dp)) {
-                    // Full Goal Text
-                    Surface(
-                        shape = RoundedCornerShape(10.dp),
-                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.75f),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.22f)),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(modifier = Modifier.padding(10.dp)) {
-                            Text(
-                                text = "GOAL",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 10.sp,
-                                    letterSpacing = 0.8.sp,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                            )
-                            Text(
-                                text = session.goal,
-                                style = MaterialTheme.typography.bodyMedium.copy(
-                                    fontWeight = FontWeight.Medium,
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                    fontSize = 13.sp,
-                                    lineHeight = 18.sp
-                                ),
-                                modifier = Modifier.padding(top = 3.dp)
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    // Session Info & Shell Control Row
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Model: ${session.modelUsed.substringAfterLast("/")}",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
-                                fontSize = 11.sp
-                            )
-                        )
-
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .clickable { onOpenCommandControl() }
-                        ) {
-                            Text(
-                                text = if (isAlwaysAllowCommands) "⚡ Shell: Always Allow" else "⚡ Shell: Ask Permission",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    color = if (isAlwaysAllowCommands) MaterialTheme.colorScheme.primary else Color(0xFFF59E0B),
-                                    fontWeight = FontWeight.SemiBold,
-                                    fontSize = 11.sp
-                                ),
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                            )
-                        }
-                    }
-
-                    // Structured Task Plan Checklist (compact, ordered, persistent)
-                    session.plan?.let { plan ->
-                        Spacer(modifier = Modifier.height(8.dp))
-                        TaskPlanChecklist(
-                            plan = plan,
-                            onRetrySubtask = onRetrySubtask,
-                            onVerifySubtask = onVerifySubtask
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    // Action buttons: Pause/Resume and Mark Complete
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        // Pause / Resume Button
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant,
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .clickable { onTogglePause() }
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(5.dp)
-                            ) {
-                                Icon(
-                                    imageVector = if (session.status == AgentTaskStatus.PAUSED) Icons.Default.PlayArrow else Icons.Default.Pause,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Text(
-                                    text = if (session.status == AgentTaskStatus.PAUSED) "Resume" else "Pause",
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        fontWeight = FontWeight.Medium,
-                                        fontSize = 12.sp,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.width(8.dp))
-
-                        // Complete Button
-                        if (session.status != AgentTaskStatus.COMPLETED) {
-                            Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = Color(0xFF4ADE80).copy(alpha = 0.16f),
-                                border = BorderStroke(1.dp, Color(0xFF4ADE80).copy(alpha = 0.45f)),
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .clickable { onMarkCompleted() }
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Check,
-                                        contentDescription = null,
-                                        tint = Color(0xFF4ADE80),
-                                        modifier = Modifier.size(14.dp)
-                                    )
-                                    Text(
-                                        text = "Complete",
-                                        style = MaterialTheme.typography.labelSmall.copy(
-                                            fontWeight = FontWeight.SemiBold,
-                                            fontSize = 12.sp,
-                                            color = Color(0xFF4ADE80)
-                                        )
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun AgentStepRow(
-    stepNumber: Int,
-    step: AgentStep
-) {
-    val stepColor = when (step.status) {
-        AgentTaskStatus.COMPLETED -> Color(0xFF4ADE80)
-        AgentTaskStatus.THINKING -> Color(0xFF818CF8)
-        AgentTaskStatus.USING_TOOL -> Color(0xFFF59E0B)
-        AgentTaskStatus.OBSERVING -> Color(0xFF38BDF8)
-        AgentTaskStatus.IN_PROGRESS -> Color(0xFF38BDF8)
-        AgentTaskStatus.PAUSED -> Color(0xFFFBBF24)
-        AgentTaskStatus.FAILED -> Color(0xFFF87171)
-        AgentTaskStatus.INITIALIZING -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-    }
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 4.dp, vertical = 3.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.weight(1f)
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(18.dp)
-                    .background(stepColor.copy(alpha = 0.15f), CircleShape)
-                    .border(1.dp, stepColor.copy(alpha = 0.5f), CircleShape),
-                contentAlignment = Alignment.Center
-            ) {
-                if (step.status == AgentTaskStatus.COMPLETED) {
-                    Icon(
-                        imageVector = Icons.Default.Check,
-                        contentDescription = "Done",
-                        tint = stepColor,
-                        modifier = Modifier.size(11.dp)
-                    )
-                } else {
-                    Text(
-                        text = "$stepNumber",
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontSize = 9.5.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = stepColor
-                        )
-                    )
-                }
-            }
-
-            Column {
-                Text(
-                    text = step.title,
-                    style = MaterialTheme.typography.bodySmall.copy(
-                        fontWeight = if (step.status == AgentTaskStatus.IN_PROGRESS || step.status == AgentTaskStatus.THINKING || step.status == AgentTaskStatus.USING_TOOL) FontWeight.SemiBold else FontWeight.Normal,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        fontSize = 12.5.sp
-                    )
-                )
-                if (step.description.isNotBlank()) {
-                    Text(
-                        text = step.description,
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
-                            fontSize = 10.5.sp
-                        )
-                    )
-                }
-            }
-        }
-
-        Text(
-            text = step.status.displayName,
-            style = MaterialTheme.typography.labelSmall.copy(
-                color = stepColor,
-                fontWeight = FontWeight.Medium,
-                fontSize = 10.5.sp
-            )
-        )
-    }
-}
-
-@Composable
-fun AgentStatePipelineView(
-    currentStatus: AgentTaskStatus,
-    modifier: Modifier = Modifier
-) {
-    Surface(
-        shape = RoundedCornerShape(10.dp),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.6f),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)),
-        modifier = modifier.fillMaxWidth()
-    ) {
-        Row(
-            modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+                .padding(12.dp)
         ) {
-            val isThinkingActive = currentStatus == AgentTaskStatus.THINKING
-            val isUsingToolActive = currentStatus == AgentTaskStatus.USING_TOOL
-            val isObservingActive = currentStatus == AgentTaskStatus.OBSERVING
-            val isTerminal = currentStatus == AgentTaskStatus.COMPLETED || currentStatus == AgentTaskStatus.FAILED
-
-            StatePill(
-                label = "THINKING",
-                isActive = isThinkingActive,
-                activeColor = Color(0xFF818CF8)
-            )
-
-            StateArrow()
-
-            StatePill(
-                label = "USING TOOL",
-                isActive = isUsingToolActive,
-                activeColor = Color(0xFFF59E0B)
-            )
-
-            StateArrow()
-
-            StatePill(
-                label = "OBSERVING",
-                isActive = isObservingActive,
-                activeColor = Color(0xFF38BDF8)
-            )
-
-            StateArrow()
-
-            StatePill(
-                label = if (currentStatus == AgentTaskStatus.FAILED) "FAILED" else "COMPLETED",
-                isActive = isTerminal,
-                activeColor = if (currentStatus == AgentTaskStatus.FAILED) Color(0xFFF87171) else Color(0xFF4ADE80)
-            )
-        }
-    }
-}
-
-@Composable
-private fun StatePill(
-    label: String,
-    isActive: Boolean,
-    activeColor: Color
-) {
-    val textColor = if (isActive) activeColor else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
-    val dotColor = if (isActive) activeColor else MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)
-    val bgColor = if (isActive) activeColor.copy(alpha = 0.16f) else Color.Transparent
-    val borderStroke = if (isActive) BorderStroke(1.dp, activeColor.copy(alpha = 0.5f)) else null
-
-    Surface(
-        shape = RoundedCornerShape(6.dp),
-        color = bgColor,
-        border = borderStroke
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 5.dp, vertical = 3.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(3.5.dp)
-        ) {
-            Box(
+            // Header: Goal + Status badge + Pause button + Expand chevron
+            Row(
                 modifier = Modifier
-                    .size(5.dp)
-                    .background(dotColor, CircleShape)
-            )
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelSmall.copy(
-                    fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
-                    fontSize = 9.sp,
-                    color = textColor,
-                    letterSpacing = 0.3.sp
-                )
-            )
-        }
-    }
-}
-
-@Composable
-private fun StateArrow() {
-    Text(
-        text = "→",
-        style = MaterialTheme.typography.labelSmall.copy(
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
-            fontSize = 10.sp,
-            fontWeight = FontWeight.Bold
-        )
-    )
-}
-
-/**
- * Compact checklist showing the structured task plan, subtasks progress,
- * and maximum step execution safeguard.
- */
-@Composable
-fun TaskPlanChecklist(
-    plan: TaskPlan,
-    onRetrySubtask: (String) -> Unit = {},
-    onVerifySubtask: (String) -> Unit = {},
-    modifier: Modifier = Modifier
-) {
-    Surface(
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.65f),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)),
-        modifier = modifier
-            .fillMaxWidth()
-            .testTag("agent_task_plan_checklist")
-    ) {
-        Column(modifier = Modifier.padding(10.dp)) {
-            // Header Row: PLAN title, completed count badge, and step limit indicator
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.CheckCircle,
-                        contentDescription = "Plan",
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(15.dp)
-                    )
-                    Text(
-                        text = "PLAN",
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 11.sp,
-                            letterSpacing = 0.8.sp,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    )
-                }
-
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    // Completed counter badge
-                    Surface(
-                        shape = RoundedCornerShape(6.dp),
-                        color = if (plan.allSubtasksCompleted) {
-                            Color(0xFF4ADE80).copy(alpha = 0.18f)
-                        } else {
-                            MaterialTheme.colorScheme.surfaceVariant
-                        }
-                    ) {
-                        Text(
-                            text = "${plan.completedCount}/${plan.totalCount} Done",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 10.sp,
-                                color = if (plan.allSubtasksCompleted) Color(0xFF4ADE80) else MaterialTheme.colorScheme.onSurfaceVariant
-                            ),
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                        )
-                    }
-
-                    // Max Step limit badge
-                    Surface(
-                        shape = RoundedCornerShape(6.dp),
-                        color = if (plan.isStepLimitExceeded) {
-                            Color(0xFFF87171).copy(alpha = 0.18f)
-                        } else {
-                            MaterialTheme.colorScheme.surfaceVariant
-                        }
-                    ) {
-                        Text(
-                            text = "Step ${plan.stepCount}/${plan.maxSteps}",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                fontWeight = FontWeight.Medium,
-                                fontSize = 10.sp,
-                                color = if (plan.isStepLimitExceeded) Color(0xFFF87171) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
-                            ),
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Subtasks checklist items
-            Column(
-                verticalArrangement = Arrangement.spacedBy(5.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                plan.subtasks.forEachIndexed { index, subtask ->
-                    SubtaskChecklistItem(
-                        index = index + 1,
-                        subtask = subtask,
-                        isActive = subtask.id == plan.currentSubtaskId,
-                        onRetry = { onRetrySubtask(subtask.id) },
-                        onVerify = { onVerifySubtask(subtask.id) }
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun SubtaskChecklistItem(
-    index: Int,
-    subtask: Subtask,
-    isActive: Boolean,
-    onRetry: () -> Unit,
-    onVerify: () -> Unit
-) {
-    val isDone = subtask.status == SubtaskStatus.COMPLETED
-    val isRunning = subtask.status == SubtaskStatus.RUNNING
-    val isFailed = subtask.status == SubtaskStatus.FAILED
-    val isPending = subtask.status == SubtaskStatus.PENDING
-
-    val statusColor = when (subtask.status) {
-        SubtaskStatus.COMPLETED -> Color(0xFF4ADE80)
-        SubtaskStatus.RUNNING -> Color(0xFF38BDF8)
-        SubtaskStatus.FAILED -> Color(0xFFF87171)
-        SubtaskStatus.PENDING -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-    }
-
-    Surface(
-        shape = RoundedCornerShape(8.dp),
-        color = when {
-            isRunning -> Color(0xFF38BDF8).copy(alpha = 0.08f)
-            isFailed -> Color(0xFFF87171).copy(alpha = 0.08f)
-            else -> Color.Transparent
-        },
-        border = if (isRunning) BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.35f)) else null,
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("subtask_item_${subtask.id}")
-    ) {
-        Column(modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
+                    .fillMaxWidth()
+                    .clickable { isExpanded = !isExpanded },
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Row(
                     modifier = Modifier.weight(1f),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    // Checkbox / State indicator
                     Box(
                         modifier = Modifier
-                            .size(18.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(
-                                when {
-                                    isDone -> Color(0xFF4ADE80).copy(alpha = 0.2f)
-                                    isRunning -> Color(0xFF38BDF8).copy(alpha = 0.2f)
-                                    isFailed -> Color(0xFFF87171).copy(alpha = 0.2f)
-                                    else -> Color.Transparent
-                                }
-                            )
-                            .border(
-                                width = 1.dp,
-                                color = statusColor,
-                                shape = RoundedCornerShape(4.dp)
-                            )
-                            .testTag("subtask_checkbox_${subtask.id}"),
+                            .size(34.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(statusColor.copy(alpha = 0.14f)),
                         contentAlignment = Alignment.Center
                     ) {
-                        when {
-                            isDone -> {
-                                Icon(
-                                    imageVector = Icons.Default.Check,
-                                    contentDescription = "Completed",
-                                    tint = Color(0xFF4ADE80),
-                                    modifier = Modifier
-                                        .size(12.dp)
-                                        .testTag("subtask_status_completed_${subtask.id}")
-                                )
-                            }
-                            isRunning -> {
-                                Icon(
-                                    imageVector = Icons.Outlined.HourglassTop,
-                                    contentDescription = "Running",
-                                    tint = Color(0xFF38BDF8),
-                                    modifier = Modifier
-                                        .size(11.dp)
-                                        .testTag("subtask_status_running_${subtask.id}")
-                                )
-                            }
-                            isFailed -> {
-                                Icon(
-                                    imageVector = Icons.Default.Close,
-                                    contentDescription = "Failed",
-                                    tint = Color(0xFFF87171),
-                                    modifier = Modifier
-                                        .size(11.dp)
-                                        .testTag("subtask_status_failed_${subtask.id}")
-                                )
-                            }
-                            isPending -> {
-                                Box(
-                                    modifier = Modifier
-                                        .size(0.dp)
-                                        .testTag("subtask_status_pending_${subtask.id}")
-                                )
-                            }
-                        }
+                        Icon(
+                            imageVector = Icons.Outlined.SmartToy,
+                            contentDescription = "Agent",
+                            tint = statusColor,
+                            modifier = Modifier.size(19.dp)
+                        )
                     }
 
-                    // Subtask Description
-                    Text(
-                        text = subtask.description,
-                        style = MaterialTheme.typography.bodySmall.copy(
-                            fontWeight = if (isRunning) FontWeight.SemiBold else FontWeight.Normal,
-                            color = when {
-                                isDone -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f)
-                                isRunning -> MaterialTheme.colorScheme.onSurface
-                                isFailed -> Color(0xFFF87171)
-                                else -> MaterialTheme.colorScheme.onSurface
-                            },
-                            textDecoration = if (isDone) TextDecoration.LineThrough else TextDecoration.None,
-                            fontSize = 12.sp
-                        ),
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-
-                // Status Badge & Action buttons
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    if (isFailed) {
-                        // Retry button
-                        Surface(
-                            shape = RoundedCornerShape(6.dp),
-                            color = Color(0xFFF87171).copy(alpha = 0.15f),
-                            border = BorderStroke(1.dp, Color(0xFFF87171).copy(alpha = 0.4f)),
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .clickable { onRetry() }
-                                .testTag("subtask_retry_button_${subtask.id}")
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = session.goal,
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 14.5.sp
+                            ),
+                            maxLines = if (isExpanded) 3 else 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            // Status pill
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(statusColor.copy(alpha = 0.16f))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Refresh,
-                                    contentDescription = "Retry",
-                                    tint = Color(0xFFF87171),
-                                    modifier = Modifier.size(11.dp)
-                                )
                                 Text(
-                                    text = "Retry",
+                                    text = session.status.displayName,
                                     style = MaterialTheme.typography.labelSmall.copy(
-                                        fontSize = 9.5.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = Color(0xFFF87171)
+                                        color = statusColor,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 10.5.sp
+                                    )
+                                )
+                            }
+
+                            if (totalCount > 0) {
+                                Text(
+                                    text = "• $completedCount of $totalCount milestones",
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                        fontSize = 11.sp
                                     )
                                 )
                             }
                         }
-                    } else if (isRunning) {
-                        Surface(
-                            shape = RoundedCornerShape(6.dp),
-                            color = Color(0xFF38BDF8).copy(alpha = 0.15f)
-                        ) {
-                            Text(
-                                text = "ACTIVE",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFF38BDF8),
-                                    letterSpacing = 0.4.sp
-                                ),
-                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
-                            )
-                        }
+                    }
+                }
 
-                        // Manual verify button
-                        Surface(
-                            shape = RoundedCornerShape(6.dp),
-                            color = Color(0xFF4ADE80).copy(alpha = 0.15f),
-                            border = BorderStroke(1.dp, Color(0xFF4ADE80).copy(alpha = 0.4f)),
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    // Quick Pause / Resume button with 48dp touch target
+                    IconButton(
+                        onClick = onTogglePause,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("btn_task_toggle_pause")
+                    ) {
+                        Icon(
+                            imageVector = if (session.status == AgentTaskStatus.PAUSED) Icons.Default.PlayArrow else Icons.Default.Pause,
+                            contentDescription = if (session.status == AgentTaskStatus.PAUSED) "Resume Task" else "Pause Task",
+                            tint = statusColor,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+
+                    // Expand / Collapse Chevron with 48dp touch target
+                    IconButton(
+                        onClick = { isExpanded = !isExpanded },
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("btn_task_expand_toggle")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.KeyboardArrowDown,
+                            contentDescription = if (isExpanded) "Collapse Details" else "Expand Details",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .clickable { onVerify() }
-                                .testTag("subtask_verify_button_${subtask.id}")
-                        ) {
-                            Text(
-                                text = "Verify",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = Color(0xFF4ADE80)
-                                ),
-                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
-                            )
-                        }
+                                .size(20.dp)
+                                .rotate(chevronRotation)
+                        )
                     }
                 }
             }
 
-            // Optional Result / Error snippet preview (sanitized to remove technical exit codes)
-            if (!subtask.result.isNullOrBlank()) {
-                val cleanResult = remember(subtask.result, isDone, isFailed) {
-                    val raw = subtask.result.lines().filter { line ->
-                        val trimmed = line.trim()
-                        !trimmed.startsWith("Exit Code:", ignoreCase = true) &&
-                        !trimmed.startsWith("Exit code:", ignoreCase = true) &&
-                        !trimmed.startsWith("Command exited with code", ignoreCase = true) &&
-                        !trimmed.matches(Regex("""(?i)^exit\s+\d+.*"""))
-                    }.joinToString("\n").trim()
-                    if (raw.isBlank()) {
-                        if (isDone) "✓ Completed successfully" else if (isFailed) "✗ Execution failed" else ""
+            // Minimal Progress bar
+            if (totalCount > 0) {
+                Spacer(modifier = Modifier.height(8.dp))
+                LinearProgressIndicator(
+                    progress = { progressFraction },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(3.5.dp)
+                        .clip(RoundedCornerShape(2.dp)),
+                    color = statusColor,
+                    trackColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.18f)
+                )
+            }
+
+            // Current Activity summary (Always visible, single calm line)
+            if (activeSubtask != null && session.status != AgentTaskStatus.COMPLETED) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.HourglassTop,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Text(
+                        text = "Working on: ${activeSubtask.description}",
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        ),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            // Expanded view: Outcomes, Milestones, and Timeline
+            AnimatedVisibility(
+                visible = isExpanded,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically()
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 12.dp)
+                ) {
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f),
+                        thickness = 1.dp
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Tab Selector: Milestones vs Activity Timeline
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        FilledTonalButton(
+                            onClick = { selectedTab = 0 },
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.filledTonalButtonColors(
+                                containerColor = if (selectedTab == 0) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f) else Color.Transparent
+                            ),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(
+                                text = "Milestones ($completedCount/$totalCount)",
+                                style = MaterialTheme.typography.labelMedium.copy(
+                                    fontWeight = if (selectedTab == 0) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (selectedTab == 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            )
+                        }
+
+                        FilledTonalButton(
+                            onClick = { selectedTab = 1 },
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.filledTonalButtonColors(
+                                containerColor = if (selectedTab == 1) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f) else Color.Transparent
+                            ),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(
+                                text = "Activity Timeline",
+                                style = MaterialTheme.typography.labelMedium.copy(
+                                    fontWeight = if (selectedTab == 1) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (selectedTab == 1) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    if (selectedTab == 0) {
+                        // Milestones list
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            plan?.subtasks?.forEach { subtask ->
+                                MilestoneRow(
+                                    subtask = subtask,
+                                    isActive = subtask.id == plan.currentSubtaskId,
+                                    onRetry = { onRetrySubtask(subtask.id) },
+                                    onVerify = { onVerifySubtask(subtask.id) }
+                                )
+                            }
+                        }
                     } else {
-                        raw
+                        // Clean Activity Timeline
+                        TaskActivityTimeline(session = session)
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Controls row at bottom of expanded sheet
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (session.status != AgentTaskStatus.COMPLETED) {
+                            TextButton(
+                                onClick = onMarkCompleted,
+                                modifier = Modifier.testTag("btn_mark_task_completed")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Mark Completed")
+                            }
+                        }
                     }
                 }
+            }
+        }
+    }
+}
 
-                if (cleanResult.isNotBlank()) {
-                    Surface(
-                        shape = RoundedCornerShape(6.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(start = 26.dp, top = 3.dp, bottom = 2.dp)
-                    ) {
+@Composable
+private fun MilestoneRow(
+    subtask: Subtask,
+    isActive: Boolean,
+    onRetry: () -> Unit,
+    onVerify: () -> Unit
+) {
+    val icon = when (subtask.status) {
+        SubtaskStatus.COMPLETED -> Icons.Outlined.CheckCircle
+        SubtaskStatus.RUNNING -> Icons.Outlined.HourglassTop
+        SubtaskStatus.FAILED -> Icons.Outlined.ErrorOutline
+        SubtaskStatus.PENDING -> Icons.Outlined.RadioButtonUnchecked
+    }
+
+    val iconColor = when (subtask.status) {
+        SubtaskStatus.COMPLETED -> Color(0xFF4ADE80)
+        SubtaskStatus.RUNNING -> MaterialTheme.colorScheme.primary
+        SubtaskStatus.FAILED -> MaterialTheme.colorScheme.error
+        SubtaskStatus.PENDING -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+    }
+
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = if (isActive) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f) else Color.Transparent,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 6.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                modifier = Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = iconColor,
+                    modifier = Modifier.size(17.dp)
+                )
+
+                Column {
+                    Text(
+                        text = subtask.description,
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal,
+                            fontSize = 12.5.sp,
+                            color = if (subtask.status == SubtaskStatus.COMPLETED) {
+                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                            } else MaterialTheme.colorScheme.onSurface
+                        ),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+
+                    if (!subtask.verificationResult.isNullOrBlank()) {
                         Text(
-                            text = cleanResult,
+                            text = "Proof: ${subtask.verificationResult}",
                             style = MaterialTheme.typography.labelSmall.copy(
-                                fontSize = 10.sp,
-                                color = if (isFailed) Color(0xFFF87171) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
-                                fontFamily = FontFamily.Monospace
+                                color = Color(0xFF4ADE80),
+                                fontSize = 10.5.sp
                             ),
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    } else if (!subtask.result.isNullOrBlank()) {
+                        Text(
+                            text = subtask.result,
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
+                                fontSize = 10.5.sp
+                            ),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+
+            if (subtask.status == SubtaskStatus.FAILED) {
+                IconButton(
+                    onClick = onRetry,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "Retry",
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(15.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Clean activity timeline view showing only meaningful events (no trivial noise).
+ */
+@Composable
+private fun TaskActivityTimeline(session: AgentSession) {
+    val meaningfulEvents = remember(session.toolExecutions, session.reflections, session.plan) {
+        val list = mutableListOf<TimelineEvent>()
+
+        // 1. Goal Intake
+        list.add(
+            TimelineEvent(
+                title = "Objective Formulated",
+                detail = session.goal,
+                timestamp = session.createdAt,
+                type = TimelineType.OBJECTIVE
+            )
+        )
+
+        // 2. Meaningful Tool Results (files created, commands verified)
+        session.toolExecutions.forEach { record ->
+            when (record.toolName.lowercase()) {
+                "file_write", "file_patch" -> {
+                    val file = (record.arguments["path"] ?: record.arguments["file"] ?: "file").toString()
+                    list.add(
+                        TimelineEvent(
+                            title = if (record.isSuccess) "Artifact Created/Updated" else "File Operation Failed",
+                            detail = file,
+                            timestamp = record.timestamp,
+                            type = if (record.isSuccess) TimelineType.ARTIFACT else TimelineType.FAILURE
+                        )
+                    )
+                }
+                "run_command", "python_execute" -> {
+                    val cmd = (record.arguments["command"] ?: record.arguments["code"] ?: "").toString().take(40)
+                    list.add(
+                        TimelineEvent(
+                            title = if (record.isSuccess) "Execution Verified" else "Execution Failed",
+                            detail = cmd,
+                            timestamp = record.timestamp,
+                            type = if (record.isSuccess) TimelineType.VERIFICATION else TimelineType.FAILURE
+                        )
+                    )
+                }
+                "web_search", "web_open" -> {
+                    val q = (record.arguments["query"] ?: record.arguments["url"] ?: "").toString().take(40)
+                    list.add(
+                        TimelineEvent(
+                            title = "Discovered Information",
+                            detail = q,
+                            timestamp = record.timestamp,
+                            type = TimelineType.DISCOVERY
+                        )
+                    )
+                }
+            }
+        }
+
+        // 3. Completed Sub-goals
+        session.plan?.subtasks?.filter { it.status == SubtaskStatus.COMPLETED }?.forEach { sub ->
+            list.add(
+                TimelineEvent(
+                    title = "Milestone Achieved",
+                    detail = sub.description,
+                    timestamp = sub.updatedAt,
+                    type = TimelineType.MILESTONE
+                )
+            )
+        }
+
+        list.sortedBy { it.timestamp }.takeLast(8)
+    }
+
+    if (meaningfulEvents.isEmpty()) {
+        Text(
+            text = "No milestones recorded yet.",
+            style = MaterialTheme.typography.bodySmall.copy(
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+            )
+        )
+    } else {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            meaningfulEvents.forEach { event ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val badgeColor = when (event.type) {
+                        TimelineType.OBJECTIVE -> MaterialTheme.colorScheme.primary
+                        TimelineType.DISCOVERY -> Color(0xFF38BDF8)
+                        TimelineType.ARTIFACT -> Color(0xFF818CF8)
+                        TimelineType.VERIFICATION -> Color(0xFF4ADE80)
+                        TimelineType.MILESTONE -> Color(0xFF4ADE80)
+                        TimelineType.FAILURE -> MaterialTheme.colorScheme.error
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(badgeColor)
+                    )
+
+                    Column {
+                        Text(
+                            text = event.title,
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                fontSize = 11.sp
+                            )
+                        )
+                        Text(
+                            text = event.detail,
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                                fontSize = 11.sp
+                            ),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -969,3 +615,18 @@ private fun SubtaskChecklistItem(
     }
 }
 
+private enum class TimelineType {
+    OBJECTIVE,
+    DISCOVERY,
+    ARTIFACT,
+    VERIFICATION,
+    MILESTONE,
+    FAILURE
+}
+
+private data class TimelineEvent(
+    val title: String,
+    val detail: String,
+    val timestamp: Long,
+    val type: TimelineType
+)

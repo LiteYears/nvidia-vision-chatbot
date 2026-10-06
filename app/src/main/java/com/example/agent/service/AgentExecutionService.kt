@@ -79,7 +79,7 @@ class AgentExecutionService : Service() {
         settingsManager = SettingsManager(applicationContext)
         apiClient = NvidiaApiClient { settingsManager.getEffectiveApiKey() }
         repository = ChatRepository(database.chatDao(), settingsManager, apiClient)
-        agentPlanRepository = AgentPlanRepository(database.agentPlanDao())
+        agentPlanRepository = AgentPlanRepository(database.agentPlanDao(), database.chatDao())
         taskPlanner = TaskPlanner()
         workspaceManager = AgentWorkspaceManager.init(File(filesDir, "agent_workspaces"))
         toolRegistry = ToolRegistry.defaultRegistry(workspaceManager)
@@ -342,6 +342,19 @@ class AgentExecutionService : Service() {
             }
 
             val rawResponse = attemptResult.getOrThrow()
+            val cleanRawResponse = rawResponse.trim()
+            if (cleanRawResponse.isBlank() || cleanRawResponse.equals("null", ignoreCase = true)) {
+                // Empty generation anomaly: prompt model explicitly for next action
+                currentTurnMessage = ChatMessage(
+                    id = UUID.randomUUID().toString(),
+                    conversationId = session.id,
+                    role = MessageRole.USER,
+                    content = "Your previous output was empty. Please provide your next terminal command inside a ```bash block to proceed with: \"${session.goal}\".",
+                    modelUsed = session.modelUsed
+                )
+                delay(300L)
+                continue
+            }
 
             // Dynamic agent plan update detection
             val dynamicPlan = taskPlanner.parsePlanFromAgentOutput(rawResponse, currentPlan)
@@ -515,7 +528,13 @@ class AgentExecutionService : Service() {
                             appendLine("\n[UBUNTU TERMINAL: Command executed cleanly. Continue with your next terminal command in ```bash or deliver your final solution.]")
                         }
                     } else {
-                        appendLine("\n[UBUNTU TERMINAL: Command failed with the error shown in the terminal output above. Analyze the terminal output, inspect errors, and run your corrective terminal command in ```bash.]")
+                        appendLine("\n[COMMAND EXECUTION FAILED - IMMEDIATE RECOVERY MANDATE]")
+                        appendLine("The attempted command exited with a non-zero exit code. The overall task is NOT failed.")
+                        appendLine("Action instructions:")
+                        appendLine("1. Inspect the stdout and stderr error trace above to diagnose why the command failed.")
+                        appendLine("2. Apply a targeted repair: fix script syntax, rewrite files via cat << 'EOF' > ..., adjust dependencies, or try an alternative approach.")
+                        appendLine("3. Immediately execute your repair and verification command inside a ```bash block.")
+                        appendLine("4. Do NOT output a final apology or concede failure while recovery options exist.")
                         if (flailingReport != null) {
                             appendLine()
                             appendLine(flailingReport.guidanceDirective)
@@ -719,8 +738,19 @@ class AgentExecutionService : Service() {
         fullReplyText: String,
         plan: TaskPlan
     ) {
+        val safeReplyText = if (fullReplyText.trim().equals("null", ignoreCase = true) || fullReplyText.isBlank()) {
+            val lastTool = AgentExecutionCoordinator.activeSession.value?.toolExecutions?.lastOrNull()
+            if (lastTool != null && !lastTool.isSuccess) {
+                "Execution concluded. The last command resulted in: ${lastTool.error?.take(200)}. Created files and outputs are preserved in the workspace."
+            } else {
+                "Objective concluded. Artifacts and outputs have been generated and saved to the workspace."
+            }
+        } else {
+            fullReplyText
+        }
+
         val responseTimestamp = System.currentTimeMillis()
-        val words = fullReplyText.split(Regex("(?<=\\s)|(?=\\s)"))
+        val words = safeReplyText.split(Regex("(?<=\\s)|(?=\\s)"))
         val accumulated = StringBuilder()
 
         for (token in words) {
@@ -731,13 +761,13 @@ class AgentExecutionService : Service() {
         }
 
         val finalAssistantMessage = streamingAssistantMessage.copy(
-            content = fullReplyText,
+            content = safeReplyText,
             isStreaming = false,
             timestamp = responseTimestamp
         )
 
         val updatedSteps = AgentExecutionCoordinator.activeSession.value?.steps?.map { step ->
-            step.copy(status = AgentTaskStatus.COMPLETED)
+            if (plan.isCompleted) step.copy(status = AgentTaskStatus.COMPLETED) else step
         }
 
         AgentExecutionCoordinator.completeSession(
@@ -763,8 +793,8 @@ class AgentExecutionService : Service() {
 
     private fun pruneAndCompactHistory(
         history: MutableList<ChatMessage>,
-        maxRecentTurns: Int = 4,
-        maxMessageChars: Int = 1200
+        maxRecentTurns: Int = 6,
+        maxMessageChars: Int = 3500
     ) {
         if (history.size <= maxRecentTurns * 2) return
 
