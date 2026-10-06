@@ -48,7 +48,8 @@ object ToolCallParser {
         "file_patch", "replace_file_content", "edit_file", "edit", "patch", "patch_file", "apply_diff", "code_edit", "diff", "modify_file", "str_replace",
         "file_delete", "delete_file", "remove_file",
         "directory_create",
-        "archive_extract"
+        "archive_extract",
+        "env_inspect", "environment_inspect", "system_info", "sys_info", "env_info", "inspect_env"
     )
 
     private val moshi = Moshi.Builder().build()

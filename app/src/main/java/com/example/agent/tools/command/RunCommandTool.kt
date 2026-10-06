@@ -44,16 +44,16 @@ class RunCommandTool(
             ToolParameter(
                 name = "timeout_ms",
                 type = "number",
-                description = "Maximum execution time in milliseconds before terminating the process (default: 5000 ms, maximum: 30000 ms)",
+                description = "Maximum execution time in milliseconds before terminating the process (default: 60000 ms / 60s, maximum: 600000 ms / 10m)",
                 required = false,
-                default = 5000
+                default = 60000
             ),
             ToolParameter(
                 name = "max_output_bytes",
                 type = "number",
-                description = "Maximum output bytes to capture from stdout/stderr (default: 32768 / 32 KB, maximum: 131072 / 128 KB)",
+                description = "Maximum output bytes to capture from stdout/stderr (default: 65536 / 64 KB, maximum: 1048576 / 1 MB)",
                 required = false,
-                default = 32768
+                default = 65536
             ),
             ToolParameter(
                 name = "environment",
@@ -79,11 +79,11 @@ class RunCommandTool(
 
         val workingDirArg = (arguments["working_dir"] ?: arguments["cwd"] ?: arguments["dir"])?.toString()?.trim() ?: "."
 
-        val timeoutMs = parseLong(arguments["timeout_ms"] ?: arguments["timeout"], default = 5000L)
-            .coerceIn(100L, 30000L)
+        val timeoutMs = parseLong(arguments["timeout_ms"] ?: arguments["timeout"], default = 60000L)
+            .coerceIn(100L, 600000L)
 
-        val maxOutputBytes = parseInt(arguments["max_output_bytes"] ?: arguments["max_bytes"], default = 32768)
-            .coerceIn(1024, 131072)
+        val maxOutputBytes = parseInt(arguments["max_output_bytes"] ?: arguments["max_bytes"], default = 65536)
+            .coerceIn(1024, 1048576)
 
         val environmentArg = (arguments["environment"] ?: arguments["env"])?.toString()?.trim()?.lowercase() ?: "ubuntu"
         val targetEnvironment = when (environmentArg) {
@@ -225,14 +225,15 @@ class RunCommandTool(
             ToolResult.failure(callId = callId, toolName = definition.name, error = errorMsg.trim())
         } else if (execResult.exitCode != 0 && !(execResult.isTruncated && execResult.exitCode == 141)) {
             val isUnavailable = (
-                execResult.exitCode == 127 ||
-                execResult.stderr.contains("inaccessible or not found", ignoreCase = true) ||
-                execResult.stderr.contains("not found", ignoreCase = true) ||
-                execResult.stderr.contains("command not found", ignoreCase = true)
+                execResult.exitCode == 127 && (
+                    execResult.stderr.contains("command not found", ignoreCase = true) ||
+                    execResult.stderr.contains("inaccessible or not found", ignoreCase = true) ||
+                    Regex("""(?:bash:\s*|/system/bin/sh:\s*)?[a-zA-Z0-9_.-]+:\s*(?:inaccessible or not found|command not found)""", RegexOption.IGNORE_CASE).containsMatchIn(execResult.stderr)
+                )
             )
 
             if (isUnavailable) {
-                val missingFromStderr = Regex("""(?:bash:\s*|/system/bin/sh:\s*)?([a-zA-Z0-9_.-]+):\s*(?:inaccessible or not found|command not found|not found)""", RegexOption.IGNORE_CASE)
+                val missingFromStderr = Regex("""(?:bash:\s*|/system/bin/sh:\s*)?([a-zA-Z0-9_.-]+):\s*(?:inaccessible or not found|command not found)""", RegexOption.IGNORE_CASE)
                     .find(execResult.stderr)?.groupValues?.get(1)?.trim()
                 val missingExecutable = if (!missingFromStderr.isNullOrBlank() && missingFromStderr != "sh") {
                     missingFromStderr

@@ -977,6 +977,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
 
+            // Handle CTRL+C / interrupt signal cleanly without calling /system/bin/sh: ^C
+            if (command == "^C" || command == "\u0003" || command.endsWith("^C")) {
+                _terminalState.update {
+                    it.copy(
+                        currentInput = "",
+                        isRunning = false
+                    )
+                }
+                return@launch
+            }
+
             try {
                 // Run command via real Linux process runner
                 val currentDir = File(workspaceManager.getWorkspaceDir(), "")

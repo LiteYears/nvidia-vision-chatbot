@@ -124,24 +124,36 @@ fun TerminalScreen(
 
     var selectedFilter by remember { mutableStateOf("All") }
 
-    val filteredLines = remember(state.lines, selectedFilter) {
+    val filterCounts = remember(state.lines) {
+        val agentLines = state.lines.filter {
+            it.isAgent ||
+                it.type == TerminalLineType.AGENT_COMMAND ||
+                it.type == TerminalLineType.AGENT_OUTPUT ||
+                it.type == TerminalLineType.AGENT_STEP ||
+                it.type == TerminalLineType.AGENT_THOUGHT
+        }
+        val shellLines = state.lines.filter {
+            !it.isAgent &&
+                it.type != TerminalLineType.AGENT_COMMAND &&
+                it.type != TerminalLineType.AGENT_OUTPUT &&
+                it.type != TerminalLineType.AGENT_STEP &&
+                it.type != TerminalLineType.AGENT_THOUGHT
+        }
+        val errorLines = state.lines.filter { it.type == TerminalLineType.STDERR }
+        object {
+            val all = state.lines
+            val agent = agentLines
+            val shell = shellLines
+            val errors = errorLines
+        }
+    }
+
+    val filteredLines = remember(filterCounts, selectedFilter) {
         when (selectedFilter) {
-            "Agent" -> state.lines.filter {
-                it.isAgent ||
-                    it.type == TerminalLineType.AGENT_COMMAND ||
-                    it.type == TerminalLineType.AGENT_OUTPUT ||
-                    it.type == TerminalLineType.AGENT_STEP ||
-                    it.type == TerminalLineType.AGENT_THOUGHT
-            }
-            "Shell" -> state.lines.filter {
-                !it.isAgent &&
-                    it.type != TerminalLineType.AGENT_COMMAND &&
-                    it.type != TerminalLineType.AGENT_OUTPUT &&
-                    it.type != TerminalLineType.AGENT_STEP &&
-                    it.type != TerminalLineType.AGENT_THOUGHT
-            }
-            "Errors" -> state.lines.filter { it.type == TerminalLineType.STDERR }
-            else -> state.lines
+            "Agent" -> filterCounts.agent
+            "Shell" -> filterCounts.shell
+            "Errors" -> filterCounts.errors
+            else -> filterCounts.all
         }
     }
 
@@ -206,10 +218,10 @@ fun TerminalScreen(
         TerminalFilterDeck(
             selectedFilter = selectedFilter,
             onFilterSelected = { selectedFilter = it },
-            allCount = state.lines.size,
-            agentCount = state.lines.count { it.isAgent || it.type == TerminalLineType.AGENT_COMMAND || it.type == TerminalLineType.AGENT_OUTPUT || it.type == TerminalLineType.AGENT_STEP },
-            shellCount = state.lines.count { !it.isAgent && it.type != TerminalLineType.AGENT_COMMAND && it.type != TerminalLineType.AGENT_OUTPUT },
-            errorCount = state.lines.count { it.type == TerminalLineType.STDERR }
+            allCount = filterCounts.all.size,
+            agentCount = filterCounts.agent.size,
+            shellCount = filterCounts.shell.size,
+            errorCount = filterCounts.errors.size
         )
 
         // 4. Quick Command Directives (neofetch, python3, apt, pip, etc.)
@@ -343,7 +355,14 @@ fun TerminalScreen(
                         "~" -> onInputChange(state.currentInput + "~")
                         "&&" -> onInputChange(state.currentInput + " && ")
                         "ESC" -> onInputChange("")
-                        "CTRL+C" -> onInputChange(state.currentInput + "^C")
+                        "CTRL+C" -> {
+                            if (state.isRunning) {
+                                onClearTerminal()
+                            } else {
+                                onSendCommand(if (state.currentInput.isNotBlank()) "${state.currentInput}^C" else "^C")
+                                onInputChange("")
+                            }
+                        }
                         else -> onInputChange(state.currentInput + key)
                     }
                 }

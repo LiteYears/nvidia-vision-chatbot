@@ -61,6 +61,7 @@ class ToolRegistry {
             "read_file", "view_file", "cat" -> tools["file_read"]
             "list_dir", "dir_list", "ls" -> tools["file_list"]
             "delete_file", "remove_file", "rm" -> tools["file_delete"]
+            "env_inspect", "environment_inspect", "system_info", "sys_info", "env_info", "inspect_env" -> tools["env_inspect"]
             else -> null
         }
     }
@@ -187,6 +188,7 @@ class ToolRegistry {
                 register(ArchiveExtractTool(workspaceManager))
                 register(RunCommandTool(workspaceManager))
                 register(PythonExecuteTool(workspaceManager))
+                register(com.example.agent.tools.builtin.EnvironmentInspectTool(workspaceManager))
             }
         }
     }

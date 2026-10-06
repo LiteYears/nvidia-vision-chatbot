@@ -46,6 +46,9 @@ class TermuxCommandRunner(
         if (trimmed.isBlank()) {
             return@withContext CommandExecutionResult(0, "", "", 0)
         }
+        if (trimmed == "^C" || trimmed == "\u0003" || trimmed.endsWith("^C")) {
+            return@withContext CommandExecutionResult(130, "", "", 0)
+        }
 
         // Ensure real Termux environment is prepared
         if (!envManager.isInitialized) {

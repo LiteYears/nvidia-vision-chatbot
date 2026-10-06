@@ -548,6 +548,9 @@ class ProotCommandExecutor(
         if (cmd.isBlank() || isPurelyComment(cmd)) {
             return CommandExecutionResult(0, "", "", 0)
         }
+        if (cmd == "^C" || cmd == "\u0003" || cmd.endsWith("^C")) {
+            return CommandExecutionResult(130, "", "", 0)
+        }
         var isRoot = false
 
         // Sudo handling: simulate fake-id0
@@ -617,15 +620,34 @@ class ProotCommandExecutor(
             return handlePython(tokens, workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
         }
 
-        // 4. Bash / Sh subshell or script execution
-        if (cleanExec == "bash" || cleanExec == "sh") {
+        // 4. Bash / Sh / Fish / Zsh subshell or script execution
+        if (cleanExec == "bash" || cleanExec == "sh" || cleanExec == "fish" || cleanExec == "zsh") {
             if (tokens.size >= 3 && tokens[1] == "-c") {
                 val inner = tokens.drop(2).joinToString(" ")
                 return executePipeline(inner, workingDir, workspaceRoot, timeoutMs, maxOutputBytes, stdin)
             } else if (tokens.size >= 2 && !tokens[1].startsWith("-")) {
                 return executeShellScript(tokens[1], tokens.drop(2), workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
+            } else if (tokens.any { it == "--version" || it == "-v" || it == "-V" }) {
+                val ver = when (cleanExec) {
+                    "fish" -> "fish, version 3.4.1 (Ubuntu 22.04 LTS)"
+                    "zsh" -> "zsh 5.8.1 (aarch64-unknown-linux-gnu)"
+                    else -> "bash 5.2.15(1)-release (aarch64-unknown-linux-gnu)"
+                }
+                return CommandExecutionResult(0, "$ver\n", "", 5)
+            } else if (tokens.any { it == "--help" || it == "-h" }) {
+                val help = when (cleanExec) {
+                    "fish" -> "Usage: fish [OPTIONS] [FILE [ARG ...]]\nfish - the friendly interactive shell\n"
+                    "zsh" -> "Usage: zsh [OPTIONS] [ARG ...]\n"
+                    else -> "GNU bash, version 5.2.15(1)-release (aarch64-unknown-linux-gnu)\n"
+                }
+                return CommandExecutionResult(0, help, "", 5)
             } else {
-                return CommandExecutionResult(0, "Ubuntu 22.04 LTS (bash 5.2.15)\n", "", 5)
+                val banner = when (cleanExec) {
+                    "fish" -> "Welcome to fish, the friendly interactive shell\nType 'help' for instructions on how to use fish\nfish, version 3.4.1 (Ubuntu 22.04 LTS)\n"
+                    "zsh" -> "zsh 5.8.1 (aarch64-unknown-linux-gnu)\n"
+                    else -> "Ubuntu 22.04 LTS (bash 5.2.15)\n"
+                }
+                return CommandExecutionResult(0, banner, "", 5)
             }
         }
 
@@ -1450,16 +1472,37 @@ class ProotCommandExecutor(
             "patch" -> {
                 return handlePatch(args, workingDir, workspaceRoot, stdin)
             }
+            "nano", "pico" -> {
+                return handleNano(args, workingDir, workspaceRoot, stdin)
+            }
+            "vim", "vi" -> {
+                return handleVim(args, workingDir, workspaceRoot, stdin)
+            }
         }
 
-        // 6. Check for executable script with shebang (./script.py, ./script.sh, etc.)
-        val candidateScript = rootfsManager.resolveVirtualPath(tokens[0], workingDir, workspaceRoot)
-        if (candidateScript.exists() && candidateScript.isFile) {
+        // 6. Check for executable script or installed rootfs binary ($ROOTFS/usr/local/bin, /usr/bin, /bin)
+        val rootfsDir = rootfsManager.persistentRootfsDir
+        val candidateScript = listOf(
+            rootfsManager.resolveVirtualPath(tokens[0], workingDir, workspaceRoot),
+            File(rootfsDir, "usr/local/bin/$cleanExec"),
+            File(rootfsDir, "usr/bin/$cleanExec"),
+            File(rootfsDir, "bin/$cleanExec"),
+            File(rootfsDir, "usr/local/sbin/$cleanExec"),
+            File(rootfsDir, "usr/sbin/$cleanExec")
+        ).firstOrNull { it.exists() && it.isFile }
+
+        if (candidateScript != null) {
             val firstLine = try { candidateScript.bufferedReader().use { it.readLine() ?: "" } } catch (_: Exception) { "" }
             if (firstLine.contains("python") || candidateScript.name.endsWith(".py")) {
                 return handlePython(listOf("python3", candidateScript.name) + args, workingDir, workspaceRoot, timeoutMs, maxOutputBytes)
             }
-            if (firstLine.contains("bash") || firstLine.contains("sh") || candidateScript.name.endsWith(".sh")) {
+            if (firstLine.startsWith("#!") || firstLine.contains("sh") || firstLine.contains("bash") || candidateScript.name.endsWith(".sh")) {
+                // Run script passing arguments without triggering Android's SELinux execve NOEXEC on /data/data/ files
+                val passArgs = args.joinToString(" ")
+                val fallbackRes = executeHostFallback("sh \"${candidateScript.absolutePath}\" $passArgs".trim(), workingDir, timeoutMs, maxOutputBytes)
+                if (fallbackRes.exitCode == 0 || fallbackRes.stdout.isNotBlank() || !fallbackRes.stderr.contains("Permission denied")) {
+                    return fallbackRes
+                }
                 val scriptContent = try { candidateScript.readText(Charsets.UTF_8) } catch (_: Exception) { "" }
                 return executePipeline(scriptContent, workingDir, workspaceRoot, timeoutMs, maxOutputBytes, stdin)
             }
@@ -2871,6 +2914,40 @@ class ProotCommandExecutor(
                 return CommandExecutionResult(-1, stdout, "Process timed out after ${timeoutMs}ms", System.currentTimeMillis() - startTime, isTimedOut = true, isTruncated = isTruncated)
             }
             val exitCode = try { process.exitValue() } catch (_: Exception) { 127 }
+
+            // Automatic workaround for Android SELinux "Permission denied" on /data/data/ files:
+            if (exitCode != 0 && rawStderr.contains("Permission denied")) {
+                val deniedMatch = Regex("""/system/bin/sh:\s*([^:]+):\s*Permission denied""").find(rawStderr)
+                val deniedPath = deniedMatch?.groupValues?.get(1)?.trim()
+                if (deniedPath != null) {
+                    val deniedFile = File(deniedPath)
+                    if (deniedFile.exists() && deniedFile.isFile) {
+                        try {
+                            val cmdTokens = tokenize(command)
+                            val passArgs = cmdTokens.drop(1)
+                            val retryPb = ProcessBuilder(listOf(shell, deniedPath) + passArgs)
+                            retryPb.directory(workingDir)
+                            retryPb.environment().putAll(processBuilder.environment())
+                            val retryProc = retryPb.start()
+                            val rStdout = retryProc.inputStream.bufferedReader().use { it.readText() }
+                            val rStderr = retryProc.errorStream.bufferedReader().use { it.readText() }
+                            val rFinished = retryProc.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
+                            if (rFinished && (rStdout.isNotBlank() || retryProc.exitValue() == 0 || !rStderr.contains("Permission denied"))) {
+                                return CommandExecutionResult(
+                                    retryProc.exitValue(),
+                                    rStdout.take(maxOutputBytes),
+                                    rStderr.take(maxOutputBytes),
+                                    System.currentTimeMillis() - startTime,
+                                    isTimedOut = false,
+                                    isTruncated = rStdout.length > maxOutputBytes || rStderr.length > maxOutputBytes
+                                )
+                            }
+                        } catch (_: Exception) {
+                        }
+                    }
+                }
+            }
+
             CommandExecutionResult(exitCode, stdout, stderr, System.currentTimeMillis() - startTime, isTimedOut = false, isTruncated = isTruncated)
         } catch (e: Exception) {
             val execName = command.trim().split(Regex("\\s+")).firstOrNull() ?: command
@@ -3906,6 +3983,145 @@ class ProotCommandExecutor(
         val header: String,
         val hunks: List<ParsedHunk>
     )
+
+    private fun handleNano(
+        args: List<String>,
+        workingDir: File,
+        workspaceRoot: File,
+        stdin: String
+    ): CommandExecutionResult {
+        if (args.any { it == "-v" || it == "--version" }) {
+            val ver = """
+            GNU nano, version 6.2
+             (C) 1999-2011, 2013-2022 Free Software Foundation, Inc.
+             (C) 2014-2022 the contributors to nano
+             Email: nano@nano-editor.org	Web: https://nano-editor.org/
+             Compiled options: --enable-utf8
+            """.trimIndent() + "\n"
+            return CommandExecutionResult(0, ver, "", 5)
+        }
+        if (args.any { it == "-h" || it == "--help" }) {
+            val help = """
+            Usage: nano [OPTIONS] [[+LINE[,COLUMN]] FILE]...
+
+            Option		Meaning
+             -h, --help	Show this help message
+             -v, --version	Show version information
+             -B, --backup	Save backups of existing files
+             -l, --linenumbers	Show line numbers in front of the text
+             -c, --constantshow	Constantly show cursor position
+             -m, --mouse	Enable mouse clicks
+            """.trimIndent() + "\n"
+            return CommandExecutionResult(0, help, "", 5)
+        }
+
+        val targetFileName = args.lastOrNull { !it.startsWith("-") && !it.startsWith("+") }
+        if (targetFileName == null) {
+            val out = """
+              GNU nano 6.2                     New Buffer                           
+
+            [ New Buffer ]
+            Use standard redirection or specify a file name: nano <filename>
+
+            ^G Help       ^O Write Out  ^W Where Is   ^K Cut        ^T Execute    ^C Location
+            ^X Exit       ^R Read File  ^\ Replace    ^U Paste      ^J Justify    ^/ Go To Line
+            """.trimIndent() + "\n"
+            return CommandExecutionResult(0, out, "", 5)
+        }
+
+        val targetFile = rootfsManager.resolveVirtualPath(targetFileName, workingDir, workspaceRoot)
+        targetFile.parentFile?.mkdirs()
+
+        // If stdin is supplied, write it directly into the file!
+        if (stdin.isNotBlank()) {
+            targetFile.writeText(stdin)
+        }
+
+        val fileExisted = targetFile.exists() && targetFile.isFile && targetFile.length() > 0
+        if (!targetFile.exists()) {
+            targetFile.createNewFile()
+        }
+
+        val lines = if (fileExisted) targetFile.readLines() else emptyList()
+        val fileStatus = if (fileExisted) "[ Read ${lines.size} line${if (lines.size == 1) "" else "s"} ]" else "[ New File - 0 lines ]"
+
+        val body = if (lines.isNotEmpty()) {
+            lines.take(30).mapIndexed { idx, line ->
+                String.format(Locale.US, "%3d │ %s", idx + 1, line)
+            }.joinToString("\n") + if (lines.size > 30) "\n... (${lines.size - 30} more lines)" else ""
+        } else {
+            "[ Empty File ]\nTip: To edit or write content, use: echo 'content' >> $targetFileName"
+        }
+
+        val headerName = targetFileName.take(24).padEnd(24)
+        val out = """
+          GNU nano 6.2                 $headerName                  
+
+        $body
+
+        $fileStatus
+        ^G Help       ^O Write Out  ^W Where Is   ^K Cut        ^T Execute    ^C Location
+        ^X Exit       ^R Read File  ^\ Replace    ^U Paste      ^J Justify    ^/ Go To Line
+        """.trimIndent() + "\n"
+
+        return CommandExecutionResult(0, out, "", 5)
+    }
+
+    private fun handleVim(
+        args: List<String>,
+        workingDir: File,
+        workspaceRoot: File,
+        stdin: String
+    ): CommandExecutionResult {
+        if (args.any { it == "-v" || it == "--version" }) {
+            val ver = """
+            VIM - Vi IMproved 8.2 (2019 Dec 12, compiled Feb 20 2024 08:30:00)
+            Included patches: 1-3995
+            Modified by pkg-vim-maintainers@lists.alioth.debian.org
+            Compiled by root@localhost
+            """.trimIndent() + "\n"
+            return CommandExecutionResult(0, ver, "", 5)
+        }
+        val targetFileName = args.lastOrNull { !it.startsWith("-") }
+        if (targetFileName == null) {
+            val banner = """
+            ~
+            ~                               VIM - Vi IMproved
+            ~                                 version 8.2
+            ~                             by Bram Moolenaar et al.
+            ~                    Vim is open source and freely distributable
+            ~
+            ~                           type :help iccf<Enter>  for information
+            ~                           type :q<Enter>          to exit
+            ~
+            """.trimIndent() + "\n"
+            return CommandExecutionResult(0, banner, "", 5)
+        }
+
+        val targetFile = rootfsManager.resolveVirtualPath(targetFileName, workingDir, workspaceRoot)
+        targetFile.parentFile?.mkdirs()
+        if (stdin.isNotBlank()) {
+            targetFile.writeText(stdin)
+        }
+        val fileExisted = targetFile.exists() && targetFile.isFile && targetFile.length() > 0
+        if (!targetFile.exists()) {
+            targetFile.createNewFile()
+        }
+        val lines = if (fileExisted) targetFile.readLines() else emptyList()
+        val statusLine = if (fileExisted) "\"$targetFileName\" ${lines.size}L, ${targetFile.length()}B" else "\"$targetFileName\" [New File]"
+
+        val body = if (lines.isNotEmpty()) {
+            lines.take(20).joinToString("\n")
+        } else {
+            "~\n~\n~"
+        }
+
+        val out = """
+        $body
+        $statusLine
+        """.trimIndent() + "\n"
+        return CommandExecutionResult(0, out, "", 5)
+    }
 
     private fun handlePatch(
         args: List<String>,
