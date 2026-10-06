@@ -181,26 +181,32 @@ node_modules/
         }
 
         val candidate = File(trimmed)
-        if (candidate.isAbsolute) {
-            return candidate.canonicalFile
-        }
+        val resolved = if (candidate.isAbsolute) {
+            candidate.canonicalFile
+        } else {
+            // Check if file/dir exists relative to currentWorkingDir first, then workspaceRoot
+            val inCwd = if (currentWorkingDir != workspaceRoot && currentWorkingDir.exists()) File(currentWorkingDir, trimmed) else null
+            val inRoot = File(workspaceRoot, trimmed)
 
-        // Check if file/dir exists relative to currentWorkingDir first, then workspaceRoot
-        val inCwd = if (currentWorkingDir != workspaceRoot && currentWorkingDir.exists()) File(currentWorkingDir, trimmed) else null
-        val inRoot = File(workspaceRoot, trimmed)
-
-        return when {
-            inCwd != null && inCwd.exists() -> inCwd.canonicalFile
-            inRoot.exists() -> inRoot.canonicalFile
-            inCwd != null && currentWorkingDir.exists() -> {
-                if (trimmed.startsWith(currentWorkingDir.name + "/")) {
-                    File(workspaceRoot, trimmed).canonicalFile
-                } else {
-                    inCwd.canonicalFile
+            when {
+                inCwd != null && inCwd.exists() -> inCwd.canonicalFile
+                inRoot.exists() -> inRoot.canonicalFile
+                inCwd != null && currentWorkingDir.exists() -> {
+                    if (trimmed.startsWith(currentWorkingDir.name + "/")) {
+                        File(workspaceRoot, trimmed).canonicalFile
+                    } else {
+                        inCwd.canonicalFile
+                    }
                 }
+                else -> inRoot.canonicalFile
             }
-            else -> inRoot.canonicalFile
         }
+
+        val canonical = resolved.canonicalFile
+        if (canonical.canonicalPath != rootPath && !canonical.canonicalPath.startsWith(rootPath + File.separator)) {
+            throw SecurityException("Path traversal attempt detected: '$relativePath' resolves outside workspace boundary.")
+        }
+        return canonical
     }
 
     /**
@@ -472,6 +478,10 @@ node_modules/
                     }
 
                     val targetFile = File(canonicalDest, name).canonicalFile
+                    if (targetFile.canonicalPath != canonicalDestPath && !targetFile.canonicalPath.startsWith(canonicalDestPath + File.separator)) {
+                        zis.closeEntry()
+                        throw SecurityException("Zip-Slip detected: entry '$name' attempts to escape destination directory.")
+                    }
 
                     if (entry.isDirectory) {
                         targetFile.mkdirs()
@@ -619,6 +629,9 @@ node_modules/
                 val typeFlag = header[156].toInt().toChar()
 
                 val targetFile = File(canonicalDest, nameRaw).canonicalFile
+                if (targetFile.canonicalPath != canonicalDestPath && !targetFile.canonicalPath.startsWith(canonicalDestPath + File.separator)) {
+                    throw SecurityException("Tar-Slip detected: entry '$nameRaw' attempts to escape destination directory.")
+                }
 
                 if (typeFlag == '5' || nameRaw.endsWith("/")) {
                     targetFile.mkdirs()
