@@ -84,7 +84,7 @@ class AgentFlailingDetector(
         if (history.size < 2) return null
 
         // 1. Detect consecutive identical failing calls (e.g. same command failing 2+ times in a row)
-        val last = history.last
+        val last = history.last()
         if (!last.isSuccess) {
             var consecutiveIdenticalFails = 0
             for (i in history.indices.reversed()) {

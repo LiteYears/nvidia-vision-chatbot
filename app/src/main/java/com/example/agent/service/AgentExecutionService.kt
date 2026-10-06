@@ -131,7 +131,7 @@ class AgentExecutionService : Service() {
     ) {
         executionJob?.cancel()
 
-        serviceScope.launch {
+        executionJob = serviceScope.launch {
             var session = AgentExecutionCoordinator.activeSession.value
             if (session == null || session.id != sessionId) {
                 session = agentPlanRepository.getAgentSession(sessionId)
@@ -180,50 +180,48 @@ class AgentExecutionService : Service() {
                 timestamp = System.currentTimeMillis() + 1
             )
 
-            executionJob = serviceScope.launch {
-                try {
-                    runAgentLoop(
-                        initialSession = session,
-                        userMessage = userMessage,
-                        assistantMessageId = assistantMessageId,
-                        streamingAssistantMessage = streamingAssistantMessage
-                    )
-                } catch (e: CancellationException) {
-                    if (!AgentExecutionCoordinator.isRunning.value) {
-                        val cur = AgentExecutionCoordinator.activeSession.value ?: session
-                        AgentExecutionCoordinator.notifyPaused(cur.id)
-                        try {
-                            agentPlanRepository.saveAgentSession(
-                                cur.copy(
-                                    status = AgentTaskStatus.PAUSED,
-                                    updatedAt = System.currentTimeMillis()
-                                )
-                            )
-                        } catch (_: Exception) {}
-                        stopForegroundCompat(true)
-                        stopSelf()
-                    }
-                    throw e
-                } catch (e: Throwable) {
+            try {
+                runAgentLoop(
+                    initialSession = session,
+                    userMessage = userMessage,
+                    assistantMessageId = assistantMessageId,
+                    streamingAssistantMessage = streamingAssistantMessage
+                )
+            } catch (e: CancellationException) {
+                if (!AgentExecutionCoordinator.isRunning.value) {
                     val cur = AgentExecutionCoordinator.activeSession.value ?: session
-                    AgentExecutionCoordinator.failSession(
-                        sessionId = cur.id,
-                        assistantMessageId = assistantMessageId,
-                        streamingAssistantMessage = streamingAssistantMessage,
-                        error = e
-                    )
+                    AgentExecutionCoordinator.notifyPaused(cur.id)
                     try {
                         agentPlanRepository.saveAgentSession(
                             cur.copy(
-                                status = AgentTaskStatus.FAILED,
+                                status = AgentTaskStatus.PAUSED,
                                 updatedAt = System.currentTimeMillis()
                             )
                         )
                     } catch (_: Exception) {}
-                    showFailureNotification(cur, e.message ?: "Task execution error")
                     stopForegroundCompat(true)
                     stopSelf()
                 }
+                throw e
+            } catch (e: Throwable) {
+                val cur = AgentExecutionCoordinator.activeSession.value ?: session
+                AgentExecutionCoordinator.failSession(
+                    sessionId = cur.id,
+                    assistantMessageId = assistantMessageId,
+                    streamingAssistantMessage = streamingAssistantMessage,
+                    error = e
+                )
+                try {
+                    agentPlanRepository.saveAgentSession(
+                        cur.copy(
+                            status = AgentTaskStatus.FAILED,
+                            updatedAt = System.currentTimeMillis()
+                        )
+                    )
+                } catch (_: Exception) {}
+                showFailureNotification(cur, e.message ?: "Task execution error")
+                stopForegroundCompat(true)
+                stopSelf()
             }
         }
     }
@@ -1035,8 +1033,8 @@ class AgentExecutionService : Service() {
         const val EXTRA_MODEL = "com.example.agent.extra.MODEL"
         const val EXTRA_NAVIGATE_TO_AGENT = "com.example.agent.extra.NAVIGATE_TO_AGENT"
 
-        private const val MAX_AUTONOMOUS_TOOL_STEPS = 30
-        private const val MAX_CONSECUTIVE_NUDGES = 4
-        private const val MAX_TOTAL_NUDGES = 10
+        private const val MAX_AUTONOMOUS_TOOL_STEPS = 100
+        private const val MAX_CONSECUTIVE_NUDGES = 10
+        private const val MAX_TOTAL_NUDGES = 25
     }
 }

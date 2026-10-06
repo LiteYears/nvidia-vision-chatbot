@@ -2158,7 +2158,7 @@ class ProotCommandExecutor(
                     val mtimeStr = String.format(Locale.US, "%011o ", mtime)
                     System.arraycopy(mtimeStr.toByteArray(Charsets.US_ASCII), 0, header, 136, 12)
 
-                    header[156] = if (file.isDirectory) '5'.toByte() else '0'.toByte()
+                    header[156] = if (file.isDirectory) '5'.code.toByte() else '0'.code.toByte()
 
                     System.arraycopy("ustar\u0000".toByteArray(Charsets.US_ASCII), 0, header, 257, 6)
                     System.arraycopy("00".toByteArray(Charsets.US_ASCII), 0, header, 263, 2)

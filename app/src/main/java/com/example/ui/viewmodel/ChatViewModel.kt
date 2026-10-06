@@ -988,9 +988,42 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
 
+            // Handle interactive cd directory changes in terminal shell
+            if (command == "cd" || command.startsWith("cd ")) {
+                val targetArg = command.removePrefix("cd").trim().trim('\'', '"')
+                val workspaceRoot = workspaceManager.getWorkspaceDir()
+                val currentCwd = workspaceManager.getCurrentWorkingDir()
+                val targetDir = when {
+                    targetArg.isEmpty() || targetArg == "~" || targetArg == "~/workspace" || targetArg == "/workspace" -> workspaceRoot
+                    File(targetArg).isAbsolute && File(targetArg).exists() && File(targetArg).isDirectory -> File(targetArg).canonicalFile
+                    File(currentCwd, targetArg).exists() && File(currentCwd, targetArg).isDirectory -> File(currentCwd, targetArg).canonicalFile
+                    else -> try {
+                        val resolved = workspaceManager.resolvePath(targetArg)
+                        if (resolved.exists() && resolved.isDirectory) resolved else null
+                    } catch (_: Exception) { null }
+                }
+                if (targetDir != null && targetDir.exists() && targetDir.isDirectory) {
+                    workspaceManager.setCurrentWorkingDir(targetDir)
+                    val relPath = try {
+                        val rel = targetDir.relativeTo(workspaceRoot).path
+                        if (rel.isBlank() || rel == ".") "~/workspace" else "~/workspace/$rel"
+                    } catch (_: Exception) { targetDir.canonicalPath }
+                    _terminalState.update { it.copy(workingDirectory = relPath, isRunning = false) }
+                    return@launch
+                } else {
+                    _terminalState.update {
+                        it.copy(
+                            lines = it.lines + TerminalLine(type = TerminalLineType.STDERR, text = "bash: cd: $targetArg: No such file or directory", exitCode = 1),
+                            isRunning = false
+                        )
+                    }
+                    return@launch
+                }
+            }
+
             try {
-                // Run command via real Linux process runner
-                val currentDir = File(workspaceManager.getWorkspaceDir(), "")
+                // Run command via real Linux process runner in current working directory
+                val currentDir = workspaceManager.getCurrentWorkingDir()
                 val result = termuxRunner.run(
                     command = command,
                     workingDir = currentDir,
@@ -1098,11 +1131,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val plan = agentPlanRepository.getPlan(session.id)
-                if (plan != null) {
+                database.chatDao().getMessagesForConversation(session.id).collectLatest { messageEntities ->
+                    val domainMessages = messageEntities.map { it.toDomain() }
                     _uiState.update { state ->
                         val current = state.currentAgentSession
                         if (current?.id == session.id) {
-                            val updated = current.copy(plan = plan)
+                            val updated = current.copy(
+                                plan = plan ?: current.plan,
+                                messages = if (domainMessages.isNotEmpty()) domainMessages else current.messages
+                            )
                             state.copy(
                                 currentAgentSession = updated,
                                 agentSessions = state.agentSessions.map { if (it.id == updated.id) updated else it }
@@ -1408,7 +1445,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         generationJob?.cancel()
         // DO NOT cancel the agent task here: it runs inside AgentExecutionService (ForegroundService)
         // so multi-step builds and test suites continue running when the user switches apps.
-        tts?.shutdown()
+        try { tts?.stop() } catch (_: Exception) {}
+        try { tts?.shutdown() } catch (_: Exception) {}
     }
 }
 

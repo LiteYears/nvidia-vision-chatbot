@@ -55,7 +55,7 @@ class FileReadTool(
             ToolParameter(
                 name = "max_bytes",
                 type = "number",
-                description = "Maximum bytes to read (default: 65536 / 64 KB, maximum: 262144 / 256 KB)",
+                description = "Maximum bytes to read (default: 65536 / 64 KB, maximum: 4194304 / 4 MB)",
                 required = false,
                 default = 65536
             ),
@@ -145,7 +145,7 @@ class FileReadTool(
             is Number -> m.toInt()
             is String -> m.toIntOrNull() ?: 65536
             else -> 65536
-        }.coerceIn(512, 262144)
+        }.coerceIn(512, 4194304)
 
         val encoding = arguments["encoding"]?.toString()?.trim()?.lowercase() ?: "auto"
 

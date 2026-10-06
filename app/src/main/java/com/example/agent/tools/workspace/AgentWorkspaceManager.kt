@@ -67,7 +67,7 @@ class AgentWorkspaceManager(
     fun getCurrentWorkingDir(sessionId: String = activeSessionId): File {
         val root = getWorkspaceDir(sessionId)
         val dir = sessionWorkingDirs[sessionId]
-        return if (dir != null && dir.exists() && dir.isDirectory && dir.canonicalPath.startsWith(root.canonicalPath)) {
+        return if (dir != null && dir.exists() && dir.isDirectory) {
             dir
         } else {
             root
@@ -76,9 +76,9 @@ class AgentWorkspaceManager(
 
     fun setCurrentWorkingDir(dir: File, sessionId: String = activeSessionId) {
         val root = getWorkspaceDir(sessionId)
-        if (dir.exists() && dir.isDirectory && dir.canonicalPath.startsWith(root.canonicalPath)) {
+        if (dir.exists() && dir.isDirectory) {
             sessionWorkingDirs[sessionId] = dir.canonicalFile
-        } else if (dir.canonicalPath == root.canonicalPath) {
+        } else {
             sessionWorkingDirs.remove(sessionId)
         }
     }
@@ -591,13 +591,14 @@ node_modules/
         val extractedPaths = mutableListOf<String>()
         var totalBytes = 0L
 
+        val rawIn = inputStream
+        val inStream = if (isGzip || archiveName.endsWith(".gz") || archiveName.endsWith(".tgz")) {
+            java.util.zip.GZIPInputStream(rawIn)
+        } else {
+            rawIn
+        }
+
         return try {
-            val rawIn = inputStream
-            val inStream = if (isGzip || archiveName.endsWith(".gz") || archiveName.endsWith(".tgz")) {
-                java.util.zip.GZIPInputStream(rawIn)
-            } else {
-                rawIn
-            }
             val header = ByteArray(512)
             var consecutiveZeroBlocks = 0
             while (true) {
@@ -688,6 +689,10 @@ node_modules/
                 isSuccess = false,
                 errorMessage = e.message ?: e.javaClass.simpleName
             )
+        } finally {
+            if (inStream != rawIn) {
+                try { inStream.close() } catch (_: Exception) {}
+            }
         }
     }
 

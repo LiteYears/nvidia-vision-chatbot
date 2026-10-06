@@ -51,7 +51,7 @@ data class TaskPlan(
     val goal: String,
     val subtasks: List<Subtask> = emptyList(),
     val currentSubtaskId: String? = null,
-    val maxSteps: Int = 15,
+    val maxSteps: Int = 100,
     val stepCount: Int = 0,
     val isCompleted: Boolean = false,
     val createdAt: Long = System.currentTimeMillis(),

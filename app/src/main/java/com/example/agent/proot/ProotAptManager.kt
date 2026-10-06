@@ -1410,7 +1410,7 @@ class ProotAptManager(
             System.arraycopy(sizeStr, 0, header, 124, 12)
             val mtimeStr = String.format(Locale.US, "%011o ", System.currentTimeMillis() / 1000L).toByteArray(Charsets.US_ASCII)
             System.arraycopy(mtimeStr, 0, header, 136, 12)
-            header[156] = '0'.toByte()
+            header[156] = '0'.code.toByte()
             System.arraycopy("ustar\u0000".toByteArray(Charsets.US_ASCII), 0, header, 257, 6)
             System.arraycopy("00".toByteArray(Charsets.US_ASCII), 0, header, 263, 2)
             for (c in 148..155) header[c] = 0x20.toByte()

@@ -9,7 +9,7 @@ import java.util.UUID
 class TaskPlanner {
 
     companion object {
-        const val DEFAULT_MAX_STEPS = 30
+        const val DEFAULT_MAX_STEPS = 100
 
         private val PLAN_CODE_BLOCK_REGEX = Regex(
             """```(?:plan|task_plan|checklist)?\s*([\s\S]*?)\s*```""",

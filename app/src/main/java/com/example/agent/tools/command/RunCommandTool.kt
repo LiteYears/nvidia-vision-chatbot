@@ -44,14 +44,14 @@ class RunCommandTool(
             ToolParameter(
                 name = "timeout_ms",
                 type = "number",
-                description = "Maximum execution time in milliseconds before terminating the process (default: 60000 ms / 60s, maximum: 600000 ms / 10m)",
+                description = "Maximum execution time in milliseconds before terminating the process (default: 60000 ms / 60s, maximum: 3600000 ms / 1h)",
                 required = false,
                 default = 60000
             ),
             ToolParameter(
                 name = "max_output_bytes",
                 type = "number",
-                description = "Maximum output bytes to capture from stdout/stderr (default: 65536 / 64 KB, maximum: 1048576 / 1 MB)",
+                description = "Maximum output bytes to capture from stdout/stderr (default: 65536 / 64 KB, maximum: 10485760 / 10 MB)",
                 required = false,
                 default = 65536
             ),
@@ -80,10 +80,10 @@ class RunCommandTool(
         val workingDirArg = (arguments["working_dir"] ?: arguments["cwd"] ?: arguments["dir"])?.toString()?.trim() ?: "."
 
         val timeoutMs = parseLong(arguments["timeout_ms"] ?: arguments["timeout"], default = 60000L)
-            .coerceIn(100L, 600000L)
+            .coerceIn(100L, 3600000L)
 
         val maxOutputBytes = parseInt(arguments["max_output_bytes"] ?: arguments["max_bytes"], default = 65536)
-            .coerceIn(1024, 1048576)
+            .coerceIn(1024, 10485760)
 
         val environmentArg = (arguments["environment"] ?: arguments["env"])?.toString()?.trim()?.lowercase() ?: "ubuntu"
         val targetEnvironment = when (environmentArg) {
@@ -280,7 +280,10 @@ class RunCommandTool(
                 val targetArg = trimmedCmd.removePrefix("cd").trim().trim('\'', '"')
                 val candidateDir = when {
                     targetArg.isEmpty() || targetArg == "~" -> workspaceRoot
+                    File(targetArg).isAbsolute && File(targetArg).exists() -> File(targetArg).canonicalFile
+                    targetArg.startsWith("/") && File(targetArg).exists() -> File(targetArg).canonicalFile
                     targetArg.startsWith("/") -> File(workspaceRoot, targetArg.trimStart('/')).canonicalFile
+                    File(resolvedWorkingDir, targetArg).exists() -> File(resolvedWorkingDir, targetArg).canonicalFile
                     else -> File(resolvedWorkingDir, targetArg).canonicalFile
                 }
                 if (candidateDir.exists() && candidateDir.isDirectory) {

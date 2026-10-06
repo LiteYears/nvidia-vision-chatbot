@@ -122,77 +122,88 @@ class TermuxCommandRunner(
             pb.environment().putAll(envVars)
 
             val process = pb.start()
-
-            // Close standard input immediately so child commands waiting for EOF on stdin do not hang
             try {
-                process.outputStream.close()
-            } catch (_: Exception) {}
+                // Close standard input immediately so child commands waiting for EOF on stdin do not hang
+                try {
+                    process.outputStream.close()
+                } catch (_: Exception) {}
 
-            val stdoutDeferred = async(Dispatchers.IO) {
-                readStreamLimited(process.inputStream, maxOutputBytes)
-            }
-            val stderrDeferred = async(Dispatchers.IO) {
-                readStreamLimited(process.errorStream, maxOutputBytes)
-            }
+                val stdoutDeferred = async(Dispatchers.IO) {
+                    readStreamLimited(process.inputStream, maxOutputBytes)
+                }
+                val stderrDeferred = async(Dispatchers.IO) {
+                    readStreamLimited(process.errorStream, maxOutputBytes)
+                }
 
-            val finished = process.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
-            val durationMs = System.currentTimeMillis() - startTime
+                val finished = process.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+                val durationMs = System.currentTimeMillis() - startTime
 
-            if (!finished) {
-                process.destroyForcibly()
-                @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-                val partialStdout = if (stdoutDeferred.isCompleted) {
-                    try { stdoutDeferred.getCompleted() } catch (_: Exception) { StreamReadResult("", false) }
-                } else StreamReadResult("", false)
-                @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-                val partialStderr = if (stderrDeferred.isCompleted) {
-                    try { stderrDeferred.getCompleted() } catch (_: Exception) { StreamReadResult("", false) }
-                } else StreamReadResult("", false)
-                return@withContext CommandExecutionResult(
-                    exitCode = -1,
-                    stdout = partialStdout.text,
-                    stderr = "${partialStderr.text}\nProcess timed out after ${timeoutMs}ms and was killed.",
+                if (!finished) {
+                    process.destroyForcibly()
+                    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+                    val partialStdout = if (stdoutDeferred.isCompleted) {
+                        try { stdoutDeferred.getCompleted() } catch (_: Exception) { StreamReadResult("", false) }
+                    } else {
+                        stdoutDeferred.cancel()
+                        StreamReadResult("", false)
+                    }
+                    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+                    val partialStderr = if (stderrDeferred.isCompleted) {
+                        try { stderrDeferred.getCompleted() } catch (_: Exception) { StreamReadResult("", false) }
+                    } else {
+                        stderrDeferred.cancel()
+                        StreamReadResult("", false)
+                    }
+                    return@withContext CommandExecutionResult(
+                        exitCode = -1,
+                        stdout = partialStdout.text,
+                        stderr = "${partialStderr.text}\nProcess timed out after ${timeoutMs}ms and was killed.",
+                        durationMs = durationMs,
+                        isTimedOut = true,
+                        isTruncated = partialStdout.isTruncated || partialStderr.isTruncated
+                    )
+                }
+
+                val exitCode = process.exitValue()
+                val stdoutResult = stdoutDeferred.await()
+                val stderrResult = stderrDeferred.await()
+
+                // Fallback check:
+                // If the native process failed because of Permission denied (code 126, e.g. SELinux W^X blocking
+                // execution of user binaries/scripts in data dir), command not found (code 127), syntax errors,
+                // or missing host tools, automatically route to the PRoot Ubuntu virtual executor!
+                val isRestrictedOrUnavailable = exitCode == 126 || exitCode == 127 ||
+                    stderrResult.text.contains("Permission denied", ignoreCase = true) ||
+                    stderrResult.text.contains("inaccessible or not found", ignoreCase = true) ||
+                    stderrResult.text.contains("not found", ignoreCase = true) ||
+                    (exitCode != 0 && (stderrResult.text.contains("syntax error", ignoreCase = true) || trimmed.contains("<<")))
+
+                if (isRestrictedOrUnavailable) {
+                    val fallbackRes = fallbackExecutor.execute(
+                        commandLine = trimmed,
+                        workingDir = effectiveDir,
+                        workspaceRoot = workspaceRoot,
+                        timeoutMs = timeoutMs,
+                        maxOutputBytes = maxOutputBytes
+                    )
+                    if (fallbackRes.exitCode == 0 || fallbackRes.stdout.isNotBlank() || !fallbackRes.stderr.contains("Unknown package tool")) {
+                        return@withContext fallbackRes
+                    }
+                }
+
+                CommandExecutionResult(
+                    exitCode = exitCode,
+                    stdout = stdoutResult.text,
+                    stderr = stderrResult.text,
                     durationMs = durationMs,
-                    isTimedOut = true,
-                    isTruncated = partialStdout.isTruncated || partialStderr.isTruncated
+                    isTimedOut = false,
+                    isTruncated = stdoutResult.isTruncated || stderrResult.isTruncated
                 )
-            }
-
-            val exitCode = process.exitValue()
-            val stdoutResult = stdoutDeferred.await()
-            val stderrResult = stderrDeferred.await()
-
-            // Fallback check:
-            // If the native process failed because of Permission denied (code 126, e.g. SELinux W^X blocking
-            // execution of user binaries/scripts in data dir), command not found (code 127), syntax errors,
-            // or missing host tools, automatically route to the PRoot Ubuntu virtual executor!
-            val isRestrictedOrUnavailable = exitCode == 126 || exitCode == 127 ||
-                stderrResult.text.contains("Permission denied", ignoreCase = true) ||
-                stderrResult.text.contains("inaccessible or not found", ignoreCase = true) ||
-                stderrResult.text.contains("not found", ignoreCase = true) ||
-                (exitCode != 0 && (stderrResult.text.contains("syntax error", ignoreCase = true) || trimmed.contains("<<")))
-
-            if (isRestrictedOrUnavailable) {
-                val fallbackRes = fallbackExecutor.execute(
-                    commandLine = trimmed,
-                    workingDir = effectiveDir,
-                    workspaceRoot = workspaceRoot,
-                    timeoutMs = timeoutMs,
-                    maxOutputBytes = maxOutputBytes
-                )
-                if (fallbackRes.exitCode == 0 || fallbackRes.stdout.isNotBlank() || !fallbackRes.stderr.contains("Unknown package tool")) {
-                    return@withContext fallbackRes
+            } finally {
+                if (process.isAlive) {
+                    try { process.destroyForcibly() } catch (_: Exception) {}
                 }
             }
-
-            CommandExecutionResult(
-                exitCode = exitCode,
-                stdout = stdoutResult.text,
-                stderr = stderrResult.text,
-                durationMs = durationMs,
-                isTimedOut = false,
-                isTruncated = stdoutResult.isTruncated || stderrResult.isTruncated
-            )
         } catch (e: Exception) {
             val fallbackResult = fallbackExecutor.execute(
                 commandLine = trimmed,
@@ -259,46 +270,54 @@ class TermuxCommandRunner(
 
             val process = pb.start()
             try {
-                process.outputStream.close()
-            } catch (_: Exception) {}
+                try {
+                    process.outputStream.close()
+                } catch (_: Exception) {}
 
-            val stdoutDeferred = async(Dispatchers.IO) { readStreamLimited(process.inputStream, maxOutputBytes) }
-            val stderrDeferred = async(Dispatchers.IO) { readStreamLimited(process.errorStream, maxOutputBytes) }
+                val stdoutDeferred = async(Dispatchers.IO) { readStreamLimited(process.inputStream, maxOutputBytes) }
+                val stderrDeferred = async(Dispatchers.IO) { readStreamLimited(process.errorStream, maxOutputBytes) }
 
-            val finished = process.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
-            val durationMs = System.currentTimeMillis() - startTime
+                val finished = process.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+                val durationMs = System.currentTimeMillis() - startTime
 
-            if (!finished) {
-                process.destroyForcibly()
-                return@withContext CommandExecutionResult(
-                    exitCode = -1,
-                    stdout = "",
-                    stderr = "Process timed out after ${timeoutMs}ms and was killed.",
+                if (!finished) {
+                    process.destroyForcibly()
+                    stdoutDeferred.cancel()
+                    stderrDeferred.cancel()
+                    return@withContext CommandExecutionResult(
+                        exitCode = -1,
+                        stdout = "",
+                        stderr = "Process timed out after ${timeoutMs}ms and was killed.",
+                        durationMs = durationMs,
+                        isTimedOut = true
+                    )
+                }
+
+                val exitCode = process.exitValue()
+                val stdoutRes = stdoutDeferred.await()
+                val stderrRes = stderrDeferred.await()
+
+                // If PRoot failed with ptrace or permission error, return null to fall back to virtual executor
+                if (exitCode == 126 || exitCode == 127 ||
+                    stderrRes.text.contains("ptrace", ignoreCase = true) ||
+                    stderrRes.text.contains("proot info", ignoreCase = true) ||
+                    (stderrRes.text.contains("Permission denied", ignoreCase = true) && stderrRes.text.contains("proot", ignoreCase = true))) {
+                    return@withContext null
+                }
+
+                CommandExecutionResult(
+                    exitCode = exitCode,
+                    stdout = stdoutRes.text,
+                    stderr = stderrRes.text,
                     durationMs = durationMs,
-                    isTimedOut = true
+                    isTimedOut = false,
+                    isTruncated = stdoutRes.isTruncated || stderrRes.isTruncated
                 )
+            } finally {
+                if (process.isAlive) {
+                    try { process.destroyForcibly() } catch (_: Exception) {}
+                }
             }
-
-            val exitCode = process.exitValue()
-            val stdoutRes = stdoutDeferred.await()
-            val stderrRes = stderrDeferred.await()
-
-            // If PRoot failed with ptrace or permission error, return null to fall back to virtual executor
-            if (exitCode == 126 || exitCode == 127 ||
-                stderrRes.text.contains("ptrace", ignoreCase = true) ||
-                stderrRes.text.contains("proot info", ignoreCase = true) ||
-                (stderrRes.text.contains("Permission denied", ignoreCase = true) && stderrRes.text.contains("proot", ignoreCase = true))) {
-                return@withContext null
-            }
-
-            CommandExecutionResult(
-                exitCode = exitCode,
-                stdout = stdoutRes.text,
-                stderr = stderrRes.text,
-                durationMs = durationMs,
-                isTimedOut = false,
-                isTruncated = stdoutRes.isTruncated || stderrRes.isTruncated
-            )
         } catch (_: Exception) {
             null
         }
