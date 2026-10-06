@@ -27,7 +27,9 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.automirrored.outlined.Article
 import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Flag
 import androidx.compose.material.icons.outlined.HourglassTop
@@ -56,6 +58,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -91,7 +94,7 @@ fun AgentTaskStateCard(
     modifier: Modifier = Modifier
 ) {
     var isExpanded by remember { mutableStateOf(false) }
-    var selectedTab by remember { mutableStateOf(0) } // 0: Milestones, 1: Timeline
+    var selectedTab by remember { mutableStateOf(0) } // 0: Milestones, 1: Timeline, 2: Deliverables
     val chevronRotation by animateFloatAsState(
         targetValue = if (isExpanded) 180f else 0f,
         animationSpec = tween(220),
@@ -105,14 +108,14 @@ fun AgentTaskStateCard(
     val progressFraction = if (totalCount > 0) (completedCount.toFloat() / totalCount.toFloat()).coerceIn(0f, 1f) else 0.1f
 
     val statusColor = when (session.status) {
-        AgentTaskStatus.INITIALIZING -> MaterialTheme.colorScheme.primary
-        AgentTaskStatus.THINKING -> Color(0xFF818CF8) // Indigo
-        AgentTaskStatus.USING_TOOL -> Color(0xFFF59E0B) // Amber
-        AgentTaskStatus.OBSERVING -> Color(0xFF38BDF8) // Sky blue
+        AgentTaskStatus.INITIALIZING, AgentTaskStatus.CREATED -> MaterialTheme.colorScheme.primary
+        AgentTaskStatus.THINKING, AgentTaskStatus.PLANNING, AgentTaskStatus.REPLANNING -> Color(0xFF818CF8) // Indigo
+        AgentTaskStatus.USING_TOOL, AgentTaskStatus.READY_TO_ACT, AgentTaskStatus.EXECUTING -> Color(0xFFF59E0B) // Amber
+        AgentTaskStatus.OBSERVING, AgentTaskStatus.VERIFYING -> Color(0xFF38BDF8) // Sky blue
         AgentTaskStatus.IN_PROGRESS -> Color(0xFF38BDF8)
         AgentTaskStatus.COMPLETED -> Color(0xFF4ADE80) // Emerald green
-        AgentTaskStatus.PAUSED -> Color(0xFFFBBF24) // Amber
-        AgentTaskStatus.FAILED -> Color(0xFFF87171) // Red
+        AgentTaskStatus.PAUSED, AgentTaskStatus.CANCELLED, AgentTaskStatus.WAITING_FOR_USER -> Color(0xFFFBBF24) // Amber
+        AgentTaskStatus.FAILED, AgentTaskStatus.BLOCKED -> Color(0xFFF87171) // Red
     }
 
     Surface(
@@ -331,12 +334,31 @@ fun AgentTaskStateCard(
                             modifier = Modifier.weight(1f)
                         ) {
                             Text(
-                                text = "Activity Timeline",
+                                text = "Timeline",
                                 style = MaterialTheme.typography.labelMedium.copy(
                                     fontWeight = if (selectedTab == 1) FontWeight.Bold else FontWeight.Normal,
                                     color = if (selectedTab == 1) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             )
+                        }
+
+                        if (session.artifacts.isNotEmpty()) {
+                            FilledTonalButton(
+                                onClick = { selectedTab = 2 },
+                                shape = RoundedCornerShape(10.dp),
+                                colors = ButtonDefaults.filledTonalButtonColors(
+                                    containerColor = if (selectedTab == 2) Color(0xFF10B981).copy(alpha = 0.18f) else Color.Transparent
+                                ),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(
+                                    text = "Deliverables (${session.artifacts.size})",
+                                    style = MaterialTheme.typography.labelMedium.copy(
+                                        fontWeight = if (selectedTab == 2) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (selectedTab == 2) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                )
+                            }
                         }
                     }
 
@@ -354,9 +376,16 @@ fun AgentTaskStateCard(
                                 )
                             }
                         }
-                    } else {
+                    } else if (selectedTab == 1) {
                         // Clean Activity Timeline
                         TaskActivityTimeline(session = session)
+                    } else {
+                        // Deliverables list
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            session.artifacts.forEach { artifact ->
+                                DeliverableRow(artifact = artifact)
+                            }
+                        }
                     }
 
                     Spacer(modifier = Modifier.height(10.dp))
@@ -630,3 +659,120 @@ private data class TimelineEvent(
     val timestamp: Long,
     val type: TimelineType
 )
+
+@Composable
+fun DeliverableRow(
+    artifact: com.example.agent.artifact.Artifact,
+    modifier: Modifier = Modifier
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f)),
+        modifier = modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                val icon = if (artifact.filename.endsWith(".docx", ignoreCase = true)) {
+                    Icons.Outlined.Description
+                } else if (artifact.filename.endsWith(".pdf", ignoreCase = true)) {
+                    Icons.Outlined.Description
+                } else {
+                    Icons.AutoMirrored.Outlined.Article
+                }
+
+                val statusColor = if (artifact.valid) Color(0xFF10B981) else Color(0xFFF59E0B)
+
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = statusColor,
+                    modifier = Modifier.size(20.dp)
+                )
+
+                Column {
+                    Text(
+                        text = artifact.filename,
+                        style = TextStyle(
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        ),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = if (artifact.valid) "✓ Verified" else "Unverified",
+                            style = TextStyle(
+                                fontSize = 10.5.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = statusColor
+                            )
+                        )
+                        Text(
+                            text = "• ${artifact.size} B",
+                            style = TextStyle(
+                                fontSize = 10.5.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        )
+                    }
+                }
+            }
+
+            IconButton(
+                onClick = {
+                    try {
+                        val file = java.io.File(context.filesDir, "agent_workspaces/${artifact.taskId}/${artifact.path}")
+                        val targetFile = if (file.exists()) file else java.io.File(context.filesDir, "agent_workspaces/default/${artifact.path}")
+                        if (targetFile.exists()) {
+                            val uri = androidx.core.content.FileProvider.getUriForFile(
+                                context,
+                                "${context.packageName}.fileprovider",
+                                targetFile
+                            )
+                            val sendIntent = android.content.Intent().apply {
+                                action = android.content.Intent.ACTION_SEND
+                                putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                                type = artifact.mimeType
+                                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            val shareIntent = android.content.Intent.createChooser(sendIntent, "Share ${artifact.filename}")
+                            shareIntent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                            shareIntent.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            context.startActivity(shareIntent)
+                        } else {
+                            android.widget.Toast.makeText(context, "File path: ${artifact.path}", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    } catch (e: Exception) {
+                        android.widget.Toast.makeText(context, "Cannot share: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                },
+                modifier = Modifier.size(32.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.CheckCircle,
+                    contentDescription = "Share or Open Deliverable",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+    }
+}

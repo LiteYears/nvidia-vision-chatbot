@@ -8,6 +8,7 @@ import java.util.LinkedList
 enum class FlailingType {
     NONE,
     REPEATED_IDENTICAL_FAILURE,
+    REPEATED_IDENTICAL_ACTION,
     PING_PONG_CYCLE,
     CONSECUTIVE_FAILURE_STREAK
 }
@@ -121,6 +122,32 @@ class AgentFlailingDetector(
                     description = "Repeated identical failure on '${last.toolName}' ($consecutiveIdenticalFails times)",
                     guidanceDirective = directive,
                     shouldAutoAdaptPlan = shouldAdapt
+                )
+            }
+        } else {
+            // Check for identical repeated actions even if successful (no progress loop)
+            var consecutiveIdentical = 0
+            for (i in history.indices.reversed()) {
+                val item = history[i]
+                if (item.toolName == last.toolName && item.normalizedArgKey == last.normalizedArgKey) {
+                    consecutiveIdentical++
+                } else break
+            }
+            if (consecutiveIdentical >= 3) {
+                val directive = buildString {
+                    appendLine("[ANTI-LOOP DIRECTIVE: Redundant Invariant Action Repeated]")
+                    appendLine("You have called '${last.toolName}' with identical arguments $consecutiveIdentical times consecutively without taking further action.")
+                    appendLine("Target: \"${last.normalizedArgKey}\"")
+                    appendLine("You already have the observation from this action. Do not run it again. Advance directly to your next step or deliver your final answer.")
+                }.trim()
+
+                return FlailingReport(
+                    type = FlailingType.REPEATED_IDENTICAL_ACTION,
+                    severityCount = consecutiveIdentical,
+                    toolName = last.toolName,
+                    description = "Repeated identical redundant action '${last.toolName}' ($consecutiveIdentical times)",
+                    guidanceDirective = directive,
+                    shouldAutoAdaptPlan = true
                 )
             }
         }

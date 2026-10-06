@@ -746,6 +746,9 @@ fun ChatScreen(
                                         is AgentFeedItem.Tool -> {
                                             ToolExecutionCard(record = item.record)
                                         }
+                                        is AgentFeedItem.ArtifactItem -> {
+                                            com.example.ui.components.DeliverableRow(artifact = item.artifact)
+                                        }
                                     }
                                 }
                             }

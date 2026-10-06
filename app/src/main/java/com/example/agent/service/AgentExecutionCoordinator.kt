@@ -38,6 +38,15 @@ object AgentExecutionCoordinator {
     private val _currentStatus = MutableStateFlow(AgentTaskStatus.INITIALIZING)
     val currentStatus: StateFlow<AgentTaskStatus> = _currentStatus.asStateFlow()
 
+    private val _executionState = MutableStateFlow(com.example.agent.state.AgentExecutionState.CREATED)
+    val executionState: StateFlow<com.example.agent.state.AgentExecutionState> = _executionState.asStateFlow()
+
+    private val _lastTransitionReason = MutableStateFlow("")
+    val lastTransitionReason: StateFlow<String> = _lastTransitionReason.asStateFlow()
+
+    private val _activeArtifacts = MutableStateFlow<List<com.example.agent.artifact.Artifact>>(emptyList())
+    val activeArtifacts: StateFlow<List<com.example.agent.artifact.Artifact>> = _activeArtifacts.asStateFlow()
+
     private val _currentActionDescription = MutableStateFlow("")
     val currentActionDescription: StateFlow<String> = _currentActionDescription.asStateFlow()
 
@@ -185,6 +194,56 @@ object AgentExecutionCoordinator {
                     isAgent = true
                 )
             )
+        }
+    }
+
+    fun updateExecutionState(
+        sessionId: String,
+        state: com.example.agent.state.AgentExecutionState,
+        reason: String
+    ) {
+        _executionState.value = state
+        _lastTransitionReason.value = reason
+        updateStatus(sessionId, state.toAgentTaskStatus(), "[${state.displayName}] $reason")
+    }
+
+    fun addArtifact(sessionId: String, artifact: com.example.agent.artifact.Artifact) {
+        _activeArtifacts.update { list ->
+            if (list.any { it.path == artifact.path }) {
+                list.map { if (it.path == artifact.path) artifact else it }
+            } else {
+                list + artifact
+            }
+        }
+        _activeSession.update { current ->
+            if (current?.id == sessionId) {
+                val updated = if (current.artifacts.any { it.path == artifact.path }) {
+                    current.artifacts.map { if (it.path == artifact.path) artifact else it }
+                } else {
+                    current.artifacts + artifact
+                }
+                current.copy(artifacts = updated, updatedAt = System.currentTimeMillis())
+            } else {
+                current
+            }
+        }
+        postTerminalEvent(
+            TerminalLine(
+                type = TerminalLineType.SYSTEM_INFO,
+                text = "📁 [ARTIFACT REGISTERED] ${artifact.filename} (${artifact.size} bytes) [Status: ${artifact.verificationStatus}]",
+                isAgent = true
+            )
+        )
+    }
+
+    fun setArtifacts(sessionId: String, artifacts: List<com.example.agent.artifact.Artifact>) {
+        _activeArtifacts.value = artifacts
+        _activeSession.update { current ->
+            if (current?.id == sessionId) {
+                current.copy(artifacts = artifacts, updatedAt = System.currentTimeMillis())
+            } else {
+                current
+            }
         }
     }
 

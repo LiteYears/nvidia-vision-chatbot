@@ -13,17 +13,26 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
 import com.example.R
+import com.example.agent.artifact.Artifact
+import com.example.agent.artifact.ArtifactDetector
 import com.example.agent.plan.AgentFlailingDetector
 import com.example.agent.plan.Subtask
 import com.example.agent.plan.SubtaskStatus
 import com.example.agent.plan.TaskPlan
 import com.example.agent.plan.TaskPlanner
+import com.example.agent.state.ActionRecord
+import com.example.agent.state.AgentExecutionState
+import com.example.agent.state.AgentStateMachine
+import com.example.agent.state.TaskObjective
+import com.example.agent.state.TaskState
 import com.example.agent.tools.ToolCallParser
 import com.example.agent.tools.ToolRegistry
 import com.example.agent.tools.workspace.AgentWorkspaceContext
 import com.example.agent.tools.workspace.AgentWorkspaceManager
 import com.example.agent.tools.workspace.FileChangeType
 import com.example.agent.tools.workspace.VerificationStatus
+import com.example.agent.trace.AgentTraceLogger
+import com.example.agent.verification.TaskVerificationEngine
 import com.example.data.local.ChatDatabase
 import com.example.data.model.AgentSession
 import com.example.data.model.AgentStep
@@ -259,12 +268,11 @@ class AgentExecutionService : Service() {
             workspaceManager = workspaceManager
         )
         workspaceContext.discoverWorkspace()
-        val flailingDetector = AgentFlailingDetector()
 
-        val historyMessages = session.messages
-            .filter { it.id != assistantMessageId && !it.isError }
-            .filterNot { it.id == userMessage.id }
-            .toMutableList()
+        val taskObjective = TaskObjective.fromUserGoal(session.goal)
+        val stateMachine = AgentStateMachine(AgentExecutionState.CREATED)
+        val artifactDetector = ArtifactDetector(workspaceManager.getWorkspaceDir(), session.id)
+        val flailingDetector = AgentFlailingDetector()
 
         var currentPlan = session.plan ?: taskPlanner.createInitialPlan(session.id, session.goal, MAX_AUTONOMOUS_TOOL_STEPS)
         AgentExecutionCoordinator.updatePlan(session.id, currentPlan)
@@ -272,15 +280,32 @@ class AgentExecutionService : Service() {
             agentPlanRepository.savePlan(currentPlan)
         } catch (_: Exception) {}
 
+        var taskState = TaskState(
+            taskId = session.id,
+            originalObjective = taskObjective,
+            currentState = AgentExecutionState.CREATED,
+            currentPlan = currentPlan
+        )
+
+        stateMachine.transitionTo(AgentExecutionState.PLANNING, "Initialized autonomous execution for: \"${session.goal}\"")
+        AgentExecutionCoordinator.updateExecutionState(session.id, AgentExecutionState.PLANNING, "Analyzing objective: ${session.goal}")
+        AgentTraceLogger.record(session.id, "TaskStarted", iteration = 0, payload = mapOf("goal" to session.goal))
+
+        val historyMessages = session.messages
+            .filter { it.id != assistantMessageId && !it.isError }
+            .filterNot { it.id == userMessage.id }
+            .toMutableList()
+
         val agentSystemPrompt = buildAgentSystemPrompt(session.goal)
         var currentTurnMessage = userMessage
         var toolStepCount = 0
         var consecutiveNudges = 0
         var totalNudges = 0
+        var consecutiveEmptyResponses = 0
         var loopActive = true
 
         while (loopActive && toolStepCount < MAX_AUTONOMOUS_TOOL_STEPS && !currentPlan.isStepLimitExceeded && currentCoroutineContext().isActive) {
-            // Ensure an active subtask is assigned and set to RUNNING
+            // 1. Ensure active subtask
             if (currentPlan.activeSubtask == null || currentPlan.activeSubtask?.status == SubtaskStatus.COMPLETED) {
                 currentPlan = taskPlanner.startNextSubtask(currentPlan)
                 AgentExecutionCoordinator.updatePlan(session.id, currentPlan)
@@ -290,15 +315,21 @@ class AgentExecutionService : Service() {
             }
             val activeSubtask = currentPlan.activeSubtask
 
-            // 1. STATE: THINKING
-            val thinkingDesc = "Thinking: Planning next step..."
-            AgentExecutionCoordinator.updateStatus(session.id, AgentTaskStatus.THINKING, thinkingDesc)
-            updateNotification(session, AgentTaskStatus.THINKING, thinkingDesc)
+            // 2. Planning State
+            if (stateMachine.currentState != AgentExecutionState.REPLANNING) {
+                stateMachine.transitionTo(AgentExecutionState.PLANNING, "Formulating next action for subtask \"${activeSubtask?.description}\"")
+                AgentExecutionCoordinator.updateExecutionState(session.id, AgentExecutionState.PLANNING, "Planning next step...")
+            }
+            updateNotification(session, stateMachine.currentState.toAgentTaskStatus(), "Planning: ${activeSubtask?.description ?: "next step"}")
 
             val planPromptSnippet = taskPlanner.formatPlanForPrompt(currentPlan)
             val workspacePromptSnippet = workspaceContext.formatContextForPrompt()
-            val fullSystemPrompt = "$agentSystemPrompt\n\n$workspacePromptSnippet\n\n$planPromptSnippet"
+            val statePromptSnippet = taskState.toContextPrompt()
+            val toolsPromptSnippet = toolRegistry.formatToolsForPrompt()
+            val fullSystemPrompt = "$agentSystemPrompt\n\n$toolsPromptSnippet\n\n$workspacePromptSnippet\n\n$statePromptSnippet\n\n$planPromptSnippet"
 
+            // 3. Request LLM completion
+            AgentTraceLogger.record(session.id, "ModelCalled", iteration = toolStepCount)
             var attemptResult = repository.requestAiCompletion(
                 history = historyMessages,
                 userMessage = currentTurnMessage,
@@ -334,6 +365,8 @@ class AgentExecutionService : Service() {
 
             if (attemptResult.isFailure) {
                 val error = attemptResult.exceptionOrNull() ?: Exception("Unknown error during agent generation")
+                stateMachine.transitionTo(AgentExecutionState.FAILED, "Fatal generation error: ${error.message}")
+                AgentTraceLogger.record(session.id, "TaskFailed", iteration = toolStepCount, payload = mapOf("error" to (error.message ?: "")))
                 AgentExecutionCoordinator.failSession(session.id, assistantMessageId, streamingAssistantMessage, error)
                 showFailureNotification(session, error.message ?: "Agent generation failure")
                 stopForegroundCompat(true)
@@ -343,42 +376,81 @@ class AgentExecutionService : Service() {
 
             val rawResponse = attemptResult.getOrThrow()
             val cleanRawResponse = rawResponse.trim()
+
+            // 4. Handle empty/null model response
             if (cleanRawResponse.isBlank() || cleanRawResponse.equals("null", ignoreCase = true)) {
-                // Empty generation anomaly: prompt model explicitly for next action
-                currentTurnMessage = ChatMessage(
-                    id = UUID.randomUUID().toString(),
-                    conversationId = session.id,
-                    role = MessageRole.USER,
-                    content = "Your previous output was empty. Please provide your next terminal command inside a ```bash block to proceed with: \"${session.goal}\".",
-                    modelUsed = session.modelUsed
-                )
+                consecutiveEmptyResponses++
+                AgentTraceLogger.record(session.id, "MODEL_RESPONSE_EMPTY", iteration = toolStepCount, payload = mapOf("streak" to consecutiveEmptyResponses))
+                if (consecutiveEmptyResponses >= 3) {
+                    stateMachine.transitionTo(AgentExecutionState.REPLANNING, "Model returned repeated empty responses. Rebuilding context.")
+                    currentTurnMessage = ChatMessage(
+                        id = UUID.randomUUID().toString(),
+                        conversationId = session.id,
+                        role = MessageRole.USER,
+                        content = "[SYSTEM ALERT: Repeated empty response detected. You must emit your next terminal command inside a ```bash block or a structured ```tool_call block to accomplish: \"${session.goal}\".]",
+                        modelUsed = session.modelUsed
+                    )
+                } else {
+                    currentTurnMessage = ChatMessage(
+                        id = UUID.randomUUID().toString(),
+                        conversationId = session.id,
+                        role = MessageRole.USER,
+                        content = "Your previous output was empty. Please provide your next terminal command inside a ```bash block or ```tool_call block to proceed with: \"${session.goal}\".",
+                        modelUsed = session.modelUsed
+                    )
+                }
                 delay(300L)
                 continue
             }
+            consecutiveEmptyResponses = 0
 
-            // Dynamic agent plan update detection
+            // Dynamic plan update parsing
             val dynamicPlan = taskPlanner.parsePlanFromAgentOutput(rawResponse, currentPlan)
             if (dynamicPlan != null) {
                 currentPlan = dynamicPlan
+                taskState = taskState.copy(currentPlan = currentPlan)
                 AgentExecutionCoordinator.updatePlan(session.id, currentPlan)
                 try {
                     agentPlanRepository.savePlan(currentPlan)
                 } catch (_: Exception) {}
             }
 
+            // 5. Parse tool call
             val toolCall = ToolCallParser.parse(rawResponse)
 
             if (toolCall != null) {
                 consecutiveNudges = 0
                 toolStepCount++
                 currentPlan = taskPlanner.incrementStep(currentPlan)
+                taskState = taskState.copy(currentPlan = currentPlan, iterationCount = toolStepCount)
                 AgentExecutionCoordinator.updatePlan(session.id, currentPlan)
 
+                // Validate tool call schema before execution
+                val validation = toolRegistry.validateToolCall(toolCall)
+                if (!validation.isValid) {
+                    val valError = validation.errorMessage ?: "Invalid tool call format"
+                    AgentTraceLogger.record(session.id, "ToolCallValidated", iteration = toolStepCount, payload = mapOf("valid" to false, "error" to valError))
+                    stateMachine.transitionTo(AgentExecutionState.REPLANNING, valError)
+                    AgentExecutionCoordinator.updateExecutionState(session.id, AgentExecutionState.REPLANNING, valError)
+
+                    currentTurnMessage = ChatMessage(
+                        id = UUID.randomUUID().toString(),
+                        conversationId = session.id,
+                        role = MessageRole.USER,
+                        content = "[TOOL VALIDATION ERROR]\n$valError\nPlease correct the tool call parameters and re-invoke.",
+                        modelUsed = session.modelUsed
+                    )
+                    continue
+                }
+
+                // 6. Transition: READY_TO_ACT
+                stateMachine.transitionTo(AgentExecutionState.READY_TO_ACT, "Tool '${toolCall.toolName}' selected and validated")
                 val cmdPreview = (toolCall.arguments["command"] ?: toolCall.arguments["cmd"] ?: toolCall.arguments["code"] ?: toolCall.arguments["path"] ?: "").toString().take(45)
                 val usingToolDesc = if (cmdPreview.isNotBlank()) "Running ${toolCall.toolName}: $cmdPreview" else "Executing ${toolCall.toolName}..."
 
-                // 2. STATE: USING_TOOL
-                AgentExecutionCoordinator.updateStatus(session.id, AgentTaskStatus.USING_TOOL, usingToolDesc)
+                // 7. Transition: EXECUTING
+                stateMachine.transitionTo(AgentExecutionState.EXECUTING, "Executing ${toolCall.toolName}")
+                AgentExecutionCoordinator.updateExecutionState(session.id, AgentExecutionState.EXECUTING, usingToolDesc)
                 updateNotification(session, AgentTaskStatus.USING_TOOL, usingToolDesc)
 
                 val preToolNarrative = ToolCallParser.stripToolCalls(rawResponse).trim()
@@ -386,8 +458,22 @@ class AgentExecutionService : Service() {
                     AgentExecutionCoordinator.addReflection(session.id, preToolNarrative)
                 }
 
-                // Execute the requested tool safely via the modular registry
+                // Capture pre-execution workspace snapshot for artifact discovery
+                val beforeSnapshot = artifactDetector.captureSnapshot()
+
+                AgentTraceLogger.record(session.id, "ToolStarted", iteration = toolStepCount, payload = mapOf("tool" to toolCall.toolName, "args" to toolCall.arguments))
+
+                // Execute tool
                 val toolResult = toolRegistry.execute(toolCall)
+
+                // 8. Transition: OBSERVING
+                stateMachine.transitionTo(AgentExecutionState.OBSERVING, "Captured output from ${toolCall.toolName}")
+                val observingDesc = "Observing output from ${toolCall.toolName}..."
+                AgentExecutionCoordinator.updateExecutionState(session.id, AgentExecutionState.OBSERVING, observingDesc)
+                updateNotification(session, AgentTaskStatus.OBSERVING, observingDesc)
+
+                AgentTraceLogger.record(session.id, if (toolResult.isSuccess) "ToolCompleted" else "ToolFailed", iteration = toolStepCount, payload = mapOf("tool" to toolCall.toolName, "exitCode" to (toolResult.exitCode ?: 0)))
+
                 val record = ToolExecutionRecord(
                     callId = toolCall.callId,
                     messageId = assistantMessageId,
@@ -398,11 +484,23 @@ class AgentExecutionService : Service() {
                     error = toolResult.error,
                     timestamp = System.currentTimeMillis()
                 )
-
-                // Store tool execution record in active session
                 AgentExecutionCoordinator.addToolExecution(session.id, record)
 
-                // Update workspace context with tool effects
+                // 9. Discover and verify newly created artifacts
+                val discoveredArtifacts = artifactDetector.detectNewOrModifiedArtifacts(beforeSnapshot, taskState.artifacts)
+                if (discoveredArtifacts.isNotEmpty()) {
+                    val updatedArtifacts = (taskState.artifacts + discoveredArtifacts).distinctBy { it.path }
+                    taskState = taskState.copy(artifacts = updatedArtifacts)
+                    AgentExecutionCoordinator.setArtifacts(session.id, updatedArtifacts)
+                    discoveredArtifacts.forEach { art ->
+                        AgentTraceLogger.record(session.id, "ArtifactDetected", iteration = toolStepCount, payload = mapOf("file" to art.filename, "valid" to art.valid, "size" to art.size))
+                    }
+                }
+
+                // 10. Verification state
+                stateMachine.transitionTo(AgentExecutionState.VERIFYING, "Verifying deliverables and command exit state")
+
+                // Update workspace context
                 val pathArg = (toolCall.arguments["path"] ?: toolCall.arguments["file"] ?: toolCall.arguments["script_path"])?.toString()
                 when (toolCall.toolName.lowercase()) {
                     "file_list", "file_tree" -> {
@@ -443,40 +541,53 @@ class AgentExecutionService : Service() {
                         val cmd = (toolCall.arguments["command"] ?: toolCall.arguments["code"] ?: toolCall.arguments["script_path"] ?: toolCall.toolName).toString()
                         workspaceContext.recordCommandExecution(
                             command = cmd,
-                            exitCode = if (toolResult.isSuccess) 0 else 1,
-                            output = toolResult.result ?: toolResult.error ?: "",
+                            exitCode = toolResult.exitCode ?: (if (toolResult.isSuccess) 0 else 1),
+                            output = toolResult.stdout ?: toolResult.result ?: toolResult.error ?: "",
                             isSuccess = toolResult.isSuccess
                         )
                     }
                 }
-                if (!toolResult.isSuccess) {
-                    workspaceContext.recordToolFailure(toolCall.toolName, toolResult.error ?: "Error")
-                }
+
+                val actionRecord = ActionRecord(
+                    actionId = toolCall.callId,
+                    toolName = toolCall.toolName,
+                    arguments = toolCall.arguments,
+                    isSuccess = toolResult.isSuccess,
+                    exitCode = toolResult.exitCode,
+                    outputSummary = (toolResult.result ?: toolResult.error ?: "").take(200),
+                    timestamp = System.currentTimeMillis()
+                )
 
                 if (toolResult.isSuccess) {
-                    // Advance subtask state if this tool logically achieves its objective
+                    taskState = taskState.copy(
+                        actionsAttempted = taskState.actionsAttempted + actionRecord,
+                        successfulActions = taskState.successfulActions + actionRecord
+                    )
                     currentPlan = taskPlanner.advanceSubtaskOnToolSuccess(
                         plan = currentPlan,
                         subtaskId = activeSubtask?.id,
                         toolName = toolCall.toolName,
                         toolResult = toolResult.result ?: ""
                     )
-                    AgentExecutionCoordinator.updatePlan(session.id, currentPlan)
                 } else {
-                    // Record failure and allow retry or alternative
+                    taskState = taskState.copy(
+                        actionsAttempted = taskState.actionsAttempted + actionRecord,
+                        failedActions = taskState.failedActions + actionRecord
+                    )
                     currentPlan = taskPlanner.recordToolFailure(
                         plan = currentPlan,
                         subtaskId = activeSubtask?.id,
                         toolName = toolCall.toolName,
-                        error = toolResult.error ?: "Unknown error"
+                        error = toolResult.error ?: "Command execution error"
                     )
-                    AgentExecutionCoordinator.updatePlan(session.id, currentPlan)
+                    workspaceContext.recordToolFailure(toolCall.toolName, toolResult.error ?: "Error")
                 }
+                AgentExecutionCoordinator.updatePlan(session.id, currentPlan)
                 try {
                     agentPlanRepository.savePlan(currentPlan)
                 } catch (_: Exception) {}
 
-                // Track tool execution signature for loop/flailing analysis
+                // Loop & Flailing analysis
                 flailingDetector.recordExecution(
                     toolName = toolCall.toolName,
                     arguments = toolCall.arguments,
@@ -485,8 +596,9 @@ class AgentExecutionService : Service() {
                 )
                 val flailingReport = flailingDetector.detectFlailing()
                 if (flailingReport?.shouldAutoAdaptPlan == true && activeSubtask != null) {
+                    stateMachine.transitionTo(AgentExecutionState.REPLANNING, "Loop detected: ${flailingReport.description}")
                     val recoverySubtask = Subtask(
-                        description = "Diagnose '${flailingReport.toolName}' failure and implement alternative approach",
+                        description = "Diagnose '${flailingReport.toolName}' issue and implement alternative approach",
                         status = SubtaskStatus.RUNNING
                     )
                     currentPlan = taskPlanner.adaptPlanForFailure(
@@ -501,53 +613,50 @@ class AgentExecutionService : Service() {
                     } catch (_: Exception) {}
                 }
 
-                // 3. STATE: OBSERVING
-                val observingDesc = "Observing command output..."
-                AgentExecutionCoordinator.updateStatus(session.id, AgentTaskStatus.OBSERVING, observingDesc)
-                updateNotification(session, AgentTaskStatus.OBSERVING, observingDesc)
-                delay(120L)
-
-                // Build structured observation feedback for the model
-                val nextActiveSubtask = currentPlan.activeSubtask
-                val cmdExecuted = (record.arguments["command"] ?: record.arguments["cmd"] ?: record.arguments["code"] ?: record.arguments["script_path"])?.toString() ?: record.toolName
+                // Construct structured feedback with separate STDOUT and STDERR (Section 8)
+                val cmdExecuted = (record.arguments["command"] ?: record.arguments["cmd"] ?: record.arguments["code"] ?: record.arguments["path"])?.toString() ?: record.toolName
                 val toolFeedbackContent = buildString {
                     appendLine("```terminal-output")
                     appendLine("root@localhost:~# $cmdExecuted")
-                    if (record.isSuccess) {
-                        appendLine(record.result?.trim() ?: "(Command finished with no output)")
-                        appendLine("[Process exited 0]")
-                    } else {
-                        appendLine(record.error?.trim() ?: "Command execution error")
-                        appendLine("[Process exited with non-zero status]")
+                    val effectiveStdout = toolResult.stdout ?: (if (toolResult.isSuccess) toolResult.result else null)
+                    val effectiveStderr = toolResult.stderr ?: (if (!toolResult.isSuccess) toolResult.error else null)
+
+                    if (!effectiveStdout.isNullOrBlank()) {
+                        appendLine("STDOUT:")
+                        appendLine(effectiveStdout.trim())
                     }
+                    if (!effectiveStderr.isNullOrBlank()) {
+                        appendLine("STDERR:")
+                        appendLine(effectiveStderr.trim())
+                    }
+                    if (effectiveStdout.isNullOrBlank() && effectiveStderr.isNullOrBlank()) {
+                        appendLine("(Command finished with no output)")
+                    }
+                    val code = toolResult.exitCode ?: (if (toolResult.isSuccess) 0 else 1)
+                    appendLine("[Process exited with exitCode $code]")
                     appendLine("```")
-                    if (record.isSuccess) {
-                        if (nextActiveSubtask != null && nextActiveSubtask.id != activeSubtask?.id) {
-                            appendLine("\n[SUBTASK PROGRESSION: Subtask \"${activeSubtask?.description}\" is COMPLETED. Active subtask is now: \"${nextActiveSubtask.description}\".]")
-                        } else {
-                            appendLine("\n[UBUNTU TERMINAL: Command executed cleanly. Continue with your next terminal command in ```bash or deliver your final solution.]")
+
+                    // Show detected artifacts
+                    if (taskState.artifacts.isNotEmpty()) {
+                        appendLine("\n[WORKSPACE ARTIFACT STATUS]")
+                        taskState.artifacts.forEach { art ->
+                            val statusMark = if (art.valid) "✓ VALID" else "✗ INVALID"
+                            appendLine("- ${art.filename} ($statusMark, ${art.size} bytes): ${art.verificationDetails}")
                         }
+                    }
+
+                    if (toolResult.isSuccess) {
+                        appendLine("\n[ACTION SUCCEEDED: Exit status 0. Review verified artifacts above. Continue with next action or complete objective.]")
                     } else {
-                        appendLine("\n[COMMAND EXECUTION FAILED - IMMEDIATE RECOVERY MANDATE]")
-                        appendLine("The attempted command exited with a non-zero exit code. The overall task is NOT failed.")
-                        appendLine("Action instructions:")
-                        appendLine("1. Inspect the stdout and stderr error trace above to diagnose why the command failed.")
-                        appendLine("2. Apply a targeted repair: fix script syntax, rewrite files via cat << 'EOF' > ..., adjust dependencies, or try an alternative approach.")
-                        appendLine("3. Immediately execute your repair and verification command inside a ```bash block.")
-                        appendLine("4. Do NOT output a final apology or concede failure while recovery options exist.")
+                        stateMachine.transitionTo(AgentExecutionState.REPLANNING, "Action failed: ${toolResult.error?.take(80)}. Diagnosing error.")
+                        appendLine("\n[ACTION FAILED: Exit code $code - NON-FATAL RECOVERY MANDATE]")
+                        appendLine("Inspect the STDERR above, diagnose root cause, repair code or dependencies, and continue.")
                         if (flailingReport != null) {
                             appendLine()
                             appendLine(flailingReport.guidanceDirective)
                         }
                     }
                     appendLine("Autonomous plan step ${currentPlan.stepCount} of ${currentPlan.maxSteps} executed.")
-                    if (currentPlan.isStepLimitExceeded) {
-                        appendLine("Maximum plan step limit reached. Deliver your final complete answer to the user now without any further terminal commands.")
-                    } else {
-                        appendLine("\nNEXT ACTION MANDATE:")
-                        appendLine("- If the overall objective is NOT fully verified and achieved, you MUST immediately invoke the next command in your Ubuntu terminal using ```bash.")
-                        appendLine("- Only provide a final text response when all terminal steps and objectives are completed and verified.")
-                    }
                 }
 
                 // Add past turn to ongoing history
@@ -563,7 +672,6 @@ class AgentExecutionService : Service() {
                 )
                 pruneAndCompactHistory(historyMessages)
 
-                // Set feedback message as next user message to feed back to model
                 currentTurnMessage = ChatMessage(
                     id = UUID.randomUUID().toString(),
                     conversationId = session.id,
@@ -571,17 +679,21 @@ class AgentExecutionService : Service() {
                     content = toolFeedbackContent,
                     modelUsed = session.modelUsed
                 )
-
-                // Refresh latest session reference from coordinator
                 session = AgentExecutionCoordinator.activeSession.value ?: session
             } else {
-                // Model returned text without a tool call
-                val lastExecution = session.toolExecutions.lastOrNull()
-                val lastActionFailed = lastExecution != null && !lastExecution.isSuccess
-                val hasPendingAction = taskPlanner.hasPendingActionSubtasks(currentPlan) ||
-                    workspaceContext.hasUnverifiedModifications() ||
-                    lastActionFailed
-                val canNudge = hasPendingAction &&
+                // Model returned text without tool call
+                // Run deterministic objective verification (Section 29)
+                val objVerification = TaskVerificationEngine.verifyTaskObjective(
+                    taskObjective,
+                    taskState.artifacts,
+                    workspaceManager.getWorkspaceDir()
+                )
+
+                val hasUnfinishedActions = taskPlanner.hasPendingActionSubtasks(currentPlan) ||
+                    taskState.artifacts.any { !it.valid } ||
+                    !objVerification.isPassed
+
+                val canNudge = hasUnfinishedActions &&
                     consecutiveNudges < MAX_CONSECUTIVE_NUDGES &&
                     totalNudges < MAX_TOTAL_NUDGES &&
                     toolStepCount < MAX_AUTONOMOUS_TOOL_STEPS
@@ -589,13 +701,14 @@ class AgentExecutionService : Service() {
                 if (canNudge) {
                     consecutiveNudges++
                     totalNudges++
+                    stateMachine.transitionTo(AgentExecutionState.REPLANNING, "Objective not yet verified: ${objVerification.details}")
+                    AgentExecutionCoordinator.updateExecutionState(session.id, AgentExecutionState.REPLANNING, "Re-planning to satisfy objective criteria")
 
                     val preToolNarrative = rawResponse.trim()
                     if (preToolNarrative.isNotBlank()) {
                         AgentExecutionCoordinator.addReflection(session.id, preToolNarrative)
                     }
 
-                    // Add past turn to ongoing history
                     historyMessages.add(currentTurnMessage)
                     historyMessages.add(
                         ChatMessage(
@@ -609,41 +722,13 @@ class AgentExecutionService : Service() {
                     pruneAndCompactHistory(historyMessages)
 
                     val nudgeContent = buildString {
-                        appendLine("[EXECUTION CONTROL: Command or tool execution required]")
-                        if (lastActionFailed) {
-                            appendLine("CRITICAL: Your previous command or script failed with an error:")
-                            appendLine(lastExecution?.error?.take(300) ?: "Unknown failure")
-                            appendLine("You cannot complete the task with an active error or syntax failure. You MUST fix the error in the affected file and re-run your verification command before concluding.")
-                        } else {
-                            appendLine("You provided commentary or described next steps, but did not execute a command in your Ubuntu terminal.")
+                        appendLine("[EXECUTION CONTROL: OBJECTIVE NOT YET VERIFIED]")
+                        appendLine("You provided commentary, but the objective completion criteria have not been satisfied:")
+                        appendLine("STATUS: ${objVerification.details}")
+                        if (taskObjective.requiredArtifacts.isNotEmpty()) {
+                            appendLine("Required Deliverables: ${taskObjective.requiredArtifacts.joinToString(", ")}")
                         }
-                        appendLine("Unfinished action subtask: \"${activeSubtask?.description}\".")
-                        if (workspaceContext.hasUnverifiedModifications()) {
-                            val unverified = workspaceContext.modifiedFiles.filter { it.value.verificationStatus == VerificationStatus.NEEDS_VERIFICATION }.keys
-                            appendLine("Unverified modifications exist on disk for: ${unverified.joinToString(", ")}.")
-                            appendLine("You must run compilation or test checks (using standard bash commands or 'run_command') to verify the modified workspace state before completing.")
-                        }
-                        if (activeSubtask?.status == SubtaskStatus.FAILED) {
-                            appendLine("The previous tool execution for subtask \"${activeSubtask.description}\" FAILED.")
-                            appendLine("You must inspect diagnostics, apply a repair (using bash heredocs or file tools), test an alternative approach, or adapt your plan before concluding.")
-                        } else if (activeSubtask?.description?.contains("test", ignoreCase = true) == true ||
-                            activeSubtask?.description?.contains("compile", ignoreCase = true) == true ||
-                            activeSubtask?.description?.contains("verify", ignoreCase = true) == true ||
-                            activeSubtask?.description?.contains("execute", ignoreCase = true) == true ||
-                            activeSubtask?.description?.contains("run", ignoreCase = true) == true) {
-                            appendLine("The implementation has not been tested or verified yet. You MUST run tests or verify the build (via a ```bash block or 'run_command') before claiming completion.")
-                        } else if (activeSubtask?.description?.contains("inspect", ignoreCase = true) == true ||
-                            activeSubtask?.description?.contains("locate", ignoreCase = true) == true ||
-                            activeSubtask?.description?.contains("search", ignoreCase = true) == true) {
-                            appendLine("Before editing, inspect the existing code and architecture using standard terminal commands (ls, cat, grep, find) or file tools.")
-                        } else if (activeSubtask?.description?.contains("modify", ignoreCase = true) == true ||
-                            activeSubtask?.description?.contains("implement", ignoreCase = true) == true ||
-                            activeSubtask?.description?.contains("fix", ignoreCase = true) == true ||
-                            activeSubtask?.description?.contains("write", ignoreCase = true) == true) {
-                            appendLine("The required code modifications have not been saved yet. You MUST write or update the files using a bash heredoc (cat << 'EOF' > filename ... EOF) or file tools.")
-                        }
-                        appendLine("You MUST output your next command in a ```bash ... ``` block or a ```tool_call``` block now to proceed with execution.")
-                        appendLine("Do NOT deliver an intermediate text-only response without executing a command until the objective is fully executed and verified.")
+                        appendLine("You MUST execute the required command or tool now (using a ```bash block or ```tool_call block) to satisfy all criteria before concluding.")
                     }
 
                     currentTurnMessage = ChatMessage(
@@ -654,29 +739,20 @@ class AgentExecutionService : Service() {
                         modelUsed = session.modelUsed
                     )
                 } else {
-                    // Model delivered final response
+                    // Task concludes
                     loopActive = false
-
-                    val hasUnfinishedActions = taskPlanner.hasPendingActionSubtasks(currentPlan) ||
-                        workspaceContext.hasUnverifiedModifications() ||
-                        lastActionFailed
-                    if (!hasUnfinishedActions && activeSubtask != null && activeSubtask.status != SubtaskStatus.FAILED) {
-                        currentPlan = taskPlanner.verifyAndCompleteSubtask(
-                            plan = currentPlan,
-                            subtaskId = activeSubtask.id,
-                            verificationNotes = "Verified by agent completion"
-                        )
-                    }
+                    val finalState = if (objVerification.isPassed) AgentExecutionState.COMPLETED else AgentExecutionState.FAILED
+                    stateMachine.transitionTo(finalState, objVerification.details)
+                    AgentExecutionCoordinator.updateExecutionState(session.id, finalState, objVerification.details)
 
                     val updatedSubtasks = currentPlan.subtasks.map {
-                        if (it.status != SubtaskStatus.COMPLETED && taskPlanner.isSynthesisOrFinalSubtask(it.description) && !hasUnfinishedActions) {
-                            it.copy(status = SubtaskStatus.COMPLETED, result = it.result ?: "Completed in final deliverable")
+                        if (it.status != SubtaskStatus.COMPLETED && (objVerification.isPassed || taskPlanner.isSynthesisOrFinalSubtask(it.description))) {
+                            it.copy(status = SubtaskStatus.COMPLETED, result = it.result ?: "Completed and verified")
                         } else it
                     }
-                    val allCompleted = updatedSubtasks.isNotEmpty() && updatedSubtasks.all { it.status == SubtaskStatus.COMPLETED }
                     currentPlan = currentPlan.copy(
                         subtasks = updatedSubtasks,
-                        isCompleted = allCompleted,
+                        isCompleted = objVerification.isPassed,
                         updatedAt = System.currentTimeMillis()
                     )
                     AgentExecutionCoordinator.updatePlan(session.id, currentPlan)
@@ -684,11 +760,28 @@ class AgentExecutionService : Service() {
                         agentPlanRepository.savePlan(currentPlan)
                     } catch (_: Exception) {}
 
+                    // Build formatted final deliverable response (Section 30)
+                    val formattedResponse = buildString {
+                        appendLine(ToolCallParser.stripToolCalls(rawResponse).trim())
+                        if (taskState.artifacts.isNotEmpty()) {
+                            appendLine("\n\n### 📦 Generated Deliverables & Artifacts")
+                            taskState.artifacts.forEach { art ->
+                                val mark = if (art.valid) "✓" else "⚠"
+                                appendLine("- **${art.filename}** ($mark ${art.verificationStatus}, ${art.size} bytes)")
+                                if (art.verificationDetails.isNotBlank()) {
+                                    appendLine("  *${art.verificationDetails}*")
+                                }
+                            }
+                        }
+                        appendLine("\n### 🔍 Objective Verification Status")
+                        appendLine(if (objVerification.isPassed) "✓ All required deliverables and criteria verified successfully." else "⚠ Objective status: ${objVerification.details}")
+                    }
+
                     streamAndCompleteResponse(
                         sessionId = session.id,
                         assistantMessageId = assistantMessageId,
                         streamingAssistantMessage = streamingAssistantMessage,
-                        fullReplyText = rawResponse,
+                        fullReplyText = formattedResponse,
                         plan = currentPlan
                     )
                     return
@@ -894,14 +987,15 @@ class AgentExecutionService : Service() {
         val activeSubtask = plan?.activeSubtask?.description
 
         val title = when (status) {
-            AgentTaskStatus.THINKING -> "Agent: Thinking"
-            AgentTaskStatus.USING_TOOL -> if (actionDescription.isNotBlank()) actionDescription else "Agent: Executing Command"
-            AgentTaskStatus.OBSERVING -> "Agent: Observing Results"
+            AgentTaskStatus.THINKING, AgentTaskStatus.PLANNING, AgentTaskStatus.REPLANNING -> "Agent: Planning"
+            AgentTaskStatus.USING_TOOL, AgentTaskStatus.EXECUTING, AgentTaskStatus.READY_TO_ACT -> if (actionDescription.isNotBlank()) actionDescription else "Agent: Executing Command"
+            AgentTaskStatus.OBSERVING, AgentTaskStatus.VERIFYING -> "Agent: Observing & Verifying"
             AgentTaskStatus.IN_PROGRESS -> "Agent: Working"
             AgentTaskStatus.COMPLETED -> "Agent: Task Completed"
-            AgentTaskStatus.PAUSED -> "Agent: Paused"
-            AgentTaskStatus.FAILED -> "Agent: Task Failed"
-            AgentTaskStatus.INITIALIZING -> "Agent: Initializing Environment"
+            AgentTaskStatus.PAUSED, AgentTaskStatus.WAITING_FOR_USER -> "Agent: Paused"
+            AgentTaskStatus.FAILED, AgentTaskStatus.BLOCKED -> "Agent: Task Failed"
+            AgentTaskStatus.INITIALIZING, AgentTaskStatus.CREATED -> "Agent: Initializing Environment"
+            else -> "Agent: ${status.displayName}"
         }
 
         val contentText = when {

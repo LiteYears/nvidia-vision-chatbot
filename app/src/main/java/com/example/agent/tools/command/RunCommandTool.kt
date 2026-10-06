@@ -234,7 +234,19 @@ class RunCommandTool(
                     append(execResult.stderr)
                 }
             }
-            ToolResult.failure(callId = callId, toolName = definition.name, error = errorMsg.trim())
+            ToolResult.commandResult(
+                callId = callId,
+                toolName = definition.name,
+                isSuccess = false,
+                exitCode = -1,
+                stdout = execResult.stdout,
+                stderr = execResult.stderr,
+                durationMs = execResult.durationMs,
+                workingDirectory = relativeDir,
+                command = rawCommand,
+                timedOut = true,
+                terminationReason = "Timeout after ${timeoutMs}ms"
+            )
         } else if (execResult.exitCode != 0 && !(execResult.isTruncated && execResult.exitCode == 141)) {
             val isUnavailable = (
                 execResult.exitCode == 127 && (
@@ -253,26 +265,31 @@ class RunCommandTool(
                     cleanExec
                 }
                 val errorMsg = capabilityDetector.buildCapabilityUnavailableError(missingExecutable, rawCommand, execResult.stderr)
-                return ToolResult.failure(callId = callId, toolName = definition.name, error = errorMsg)
+                return ToolResult.commandResult(
+                    callId = callId,
+                    toolName = definition.name,
+                    isSuccess = false,
+                    exitCode = execResult.exitCode,
+                    stdout = execResult.stdout,
+                    stderr = errorMsg,
+                    durationMs = execResult.durationMs,
+                    workingDirectory = relativeDir,
+                    command = rawCommand,
+                    terminationReason = "Capability unavailable: $missingExecutable"
+                )
             }
 
-            val errorMsg = buildString {
-                appendLine("Command exited with code ${execResult.exitCode} (Duration: ${execResult.durationMs}ms)")
-                appendLine("Command: $rawCommand")
-                appendLine("Working Directory: $relativeDir")
-                if (execResult.stdout.isNotBlank()) {
-                    appendLine("\n[stdout]")
-                    append(execResult.stdout)
-                }
-                if (execResult.stderr.isNotBlank()) {
-                    appendLine("\n[stderr]")
-                    append(execResult.stderr)
-                }
-                if (execResult.stdout.isBlank() && execResult.stderr.isBlank()) {
-                    appendLine("\n(No output produced)")
-                }
-            }
-            ToolResult.failure(callId = callId, toolName = definition.name, error = errorMsg.trim())
+            ToolResult.commandResult(
+                callId = callId,
+                toolName = definition.name,
+                isSuccess = false,
+                exitCode = execResult.exitCode,
+                stdout = execResult.stdout,
+                stderr = execResult.stderr,
+                durationMs = execResult.durationMs,
+                workingDirectory = relativeDir,
+                command = rawCommand
+            )
         } else {
             // Track working directory changes on successful cd
             val trimmedCmd = sanitizedCommand.trim()
@@ -291,26 +308,17 @@ class RunCommandTool(
                 }
             }
 
-            val resultMsg = buildString {
-                appendLine("Exit Code: 0 (Duration: ${execResult.durationMs}ms)")
-                appendLine("Command: $rawCommand")
-                appendLine("Working Directory: $relativeDir")
-                if (execResult.isTruncated) {
-                    appendLine("[Output truncated: exceeded $maxOutputBytes bytes limit]")
-                }
-                if (execResult.stdout.isNotBlank()) {
-                    appendLine("\n[stdout]")
-                    append(execResult.stdout.trimEnd())
-                }
-                if (execResult.stderr.isNotBlank()) {
-                    appendLine("\n[stderr]")
-                    append(execResult.stderr.trimEnd())
-                }
-                if (execResult.stdout.isBlank() && execResult.stderr.isBlank()) {
-                    appendLine("\n(Command executed successfully with no output)")
-                }
-            }
-            ToolResult.success(callId = callId, toolName = definition.name, result = resultMsg.trim())
+            ToolResult.commandResult(
+                callId = callId,
+                toolName = definition.name,
+                isSuccess = true,
+                exitCode = 0,
+                stdout = execResult.stdout,
+                stderr = execResult.stderr,
+                durationMs = execResult.durationMs,
+                workingDirectory = relativeDir,
+                command = rawCommand
+            )
         }
     }
 

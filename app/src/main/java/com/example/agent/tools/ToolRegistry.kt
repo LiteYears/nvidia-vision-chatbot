@@ -57,13 +57,53 @@ class ToolRegistry {
             "bash", "terminal", "sh", "shell", "exec", "cmd" -> tools["run_command"]
             "python", "py" -> tools["python_execute"] ?: tools["run_command"]
             "replace_file_content", "edit_file", "edit", "patch", "patch_file", "apply_diff", "code_edit", "diff", "modify_file", "str_replace" -> tools["file_patch"]
-            "write_to_file", "create_file", "overwrite_file" -> tools["file_write"]
-            "read_file", "view_file", "cat" -> tools["file_read"]
-            "list_dir", "dir_list", "ls" -> tools["file_list"]
+            "write_text_file", "write_to_file", "create_file", "overwrite_file" -> tools["file_write"]
+            "write_binary_file", "binary_write" -> tools["write_binary_file"]
+            "read_file", "view_file", "cat", "file_inspect", "inspect_file" -> tools["file_read"]
+            "list_dir", "dir_list", "ls", "directory_list" -> tools["file_list"]
             "delete_file", "remove_file", "rm" -> tools["file_delete"]
             "env_inspect", "environment_inspect", "system_info", "sys_info", "env_info", "inspect_env" -> tools["env_inspect"]
             else -> null
         }
+    }
+
+    /**
+     * Validates that the requested tool call exists and has all required arguments.
+     */
+    fun validateToolCall(toolCall: ToolCall): ToolValidationResult {
+        val tool = getTool(toolCall.toolName)
+            ?: return ToolValidationResult(
+                isValid = false,
+                errorMessage = "Tool '${toolCall.toolName}' is not registered. Available tools: ${tools.keys.joinToString(", ")}"
+            )
+
+        val missing = mutableListOf<String>()
+        for (param in tool.definition.parameters) {
+            if (param.required) {
+                val value = toolCall.arguments[param.name]
+                if (value == null || (value is String && value.isBlank())) {
+                    // Check common aliases
+                    val aliasValue = when (param.name) {
+                        "path" -> toolCall.arguments["file"] ?: toolCall.arguments["target_file"] ?: toolCall.arguments["filePath"]
+                        "command" -> toolCall.arguments["cmd"] ?: toolCall.arguments["code"]
+                        "content" -> toolCall.arguments["text"] ?: toolCall.arguments["data"]
+                        else -> null
+                    }
+                    if (aliasValue == null || (aliasValue is String && aliasValue.isBlank())) {
+                        missing.add(param.name)
+                    }
+                }
+            }
+        }
+
+        if (missing.isNotEmpty()) {
+            return ToolValidationResult(
+                isValid = false,
+                errorMessage = "Tool '${toolCall.toolName}' is missing required parameter(s): ${missing.joinToString(", ")}."
+            )
+        }
+
+        return ToolValidationResult(isValid = true)
     }
 
     /**
@@ -182,6 +222,7 @@ class ToolRegistry {
                 register(FileSearchTool(workspaceManager))
                 register(FileReadTool(workspaceManager))
                 register(FileWriteTool(workspaceManager))
+                register(com.example.agent.tools.workspace.WriteBinaryFileTool(workspaceManager))
                 register(FilePatchTool(workspaceManager))
                 register(FileDeleteTool(workspaceManager))
                 register(DirectoryCreateTool(workspaceManager))
@@ -193,3 +234,11 @@ class ToolRegistry {
         }
     }
 }
+
+/**
+ * Result of validating a ToolCall against registered schema.
+ */
+data class ToolValidationResult(
+    val isValid: Boolean,
+    val errorMessage: String? = null
+)

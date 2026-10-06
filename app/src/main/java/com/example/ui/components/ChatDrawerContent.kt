@@ -471,13 +471,22 @@ fun ChatDrawerContent(
                         items(agentSessions, key = { it.id }) { session ->
                             val isSelected = session.id == activeAgentSessionId
                             val statusColor = when (session.status) {
-                                AgentTaskStatus.INITIALIZING -> MaterialTheme.colorScheme.primary
-                                AgentTaskStatus.THINKING -> Color(0xFF818CF8)
+                                AgentTaskStatus.INITIALIZING,
+                                AgentTaskStatus.CREATED,
+                                AgentTaskStatus.PLANNING -> MaterialTheme.colorScheme.primary
+                                AgentTaskStatus.READY_TO_ACT,
+                                AgentTaskStatus.EXECUTING,
                                 AgentTaskStatus.USING_TOOL -> Color(0xFFF59E0B)
-                                AgentTaskStatus.OBSERVING -> Color(0xFF38BDF8)
+                                AgentTaskStatus.THINKING,
+                                AgentTaskStatus.REPLANNING -> Color(0xFF818CF8)
+                                AgentTaskStatus.OBSERVING,
+                                AgentTaskStatus.VERIFYING,
                                 AgentTaskStatus.IN_PROGRESS -> Color(0xFF38BDF8)
                                 AgentTaskStatus.COMPLETED -> Color(0xFF4ADE80)
-                                AgentTaskStatus.PAUSED -> Color(0xFFFBBF24)
+                                AgentTaskStatus.PAUSED,
+                                AgentTaskStatus.WAITING_FOR_USER -> Color(0xFFFBBF24)
+                                AgentTaskStatus.BLOCKED,
+                                AgentTaskStatus.CANCELLED,
                                 AgentTaskStatus.FAILED -> Color(0xFFF87171)
                             }
 

@@ -40,11 +40,12 @@ object ToolCallParser {
         "calculator",
         "web_search",
         "web_open",
-        "file_list", "list_files", "dir_list",
+        "file_list", "list_files", "dir_list", "directory_list",
         "file_tree",
         "file_search",
-        "file_read", "read_file", "view_file",
-        "file_write", "write_file", "create_file",
+        "file_read", "read_file", "view_file", "file_inspect",
+        "file_write", "write_file", "create_file", "write_text_file",
+        "write_binary_file",
         "file_patch", "replace_file_content", "edit_file", "edit", "patch", "patch_file", "apply_diff", "code_edit", "diff", "modify_file", "str_replace",
         "file_delete", "delete_file", "remove_file",
         "directory_create",
@@ -510,12 +511,56 @@ object ToolCallParser {
     }
 
     /**
-     * Parses command-style pseudo-tool calls (e.g. file_list path='.' recursive=true).
+     * Parses command-style pseudo-tool calls (e.g. file_list path='.' recursive=true, or file_write(path="...", content="...")).
      */
     fun parseCommandStyleToolCall(text: String): ToolCall? {
         val lines = text.lines().map { it.trim() }.filter { it.isNotBlank() && !it.startsWith("#") }
         for (line in lines) {
-            val cleanLine = line.removePrefix("tool_call:").trim()
+            val cleanLine = line.trim()
+                .trim('"', '\'', '`')
+                .removePrefix("tool_call:")
+                .removePrefix("tool:")
+                .removePrefix("action:")
+                .removePrefix("call:")
+                .removePrefix("Action:")
+                .removePrefix("Command:")
+                .trim()
+
+            // 1. Function style invocation: tool_name(param1="val1", param2="val2")
+            val funcMatch = Regex("""^([a-zA-Z_][a-zA-Z0-9_-]*)\s*\(([\s\S]*?)\)$""").find(cleanLine)
+            if (funcMatch != null) {
+                val rawName = funcMatch.groupValues[1].lowercase()
+                val canonicalName = normalizeToolCallName(rawName)
+                if (canonicalName in KNOWN_TOOL_NAMES || rawName in KNOWN_TOOL_NAMES) {
+                    val innerArgs = funcMatch.groupValues[2]
+                    val argsMap = mutableMapOf<String, Any?>()
+                    val paramRegex = Regex("""([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?:'([^']*)'|"([^"]*)"|(\S+))""")
+                    for (m in paramRegex.findAll(innerArgs)) {
+                        val k = m.groupValues[1]
+                        val rawV = when {
+                            m.groupValues[2].isNotEmpty() -> m.groupValues[2]
+                            m.groupValues[3].isNotEmpty() -> m.groupValues[3]
+                            else -> m.groupValues[4]
+                        }
+                        val v: Any = when (rawV.lowercase()) {
+                            "true" -> true
+                            "false" -> false
+                            else -> rawV.toLongOrNull() ?: rawV
+                        }
+                        argsMap[k] = v
+                    }
+                    if (argsMap.isNotEmpty()) {
+                        normalizeToolArguments(canonicalName, argsMap)
+                        return ToolCall(
+                            callId = UUID.randomUUID().toString(),
+                            toolName = canonicalName,
+                            arguments = argsMap
+                        )
+                    }
+                }
+            }
+
+            // 2. Command-style invocation: tool_name path='.' recursive=true
             val tokens = cleanLine.split(Regex("\\s+"), limit = 2)
             if (tokens.isEmpty()) continue
             val rawName = tokens[0].trim().lowercase()
@@ -548,6 +593,19 @@ object ToolCallParser {
                 }
             }
         }
+
+        // 3. Fallback: check if text has raw bash commands outside code block (e.g. cat << 'EOF' > ... or python3 ...)
+        if (text.contains("cat <<") || (text.contains("python3 ") && text.contains(".py")) || text.contains("pip install ")) {
+            val cmd = extractExecutableCommandsFromBlock(text)
+            if (cmd != null && cmd.isNotBlank()) {
+                return ToolCall(
+                    callId = UUID.randomUUID().toString(),
+                    toolName = "bash",
+                    arguments = mapOf("command" to cmd)
+                )
+            }
+        }
+
         return null
     }
 

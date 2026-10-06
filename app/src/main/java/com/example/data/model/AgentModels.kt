@@ -11,12 +11,21 @@ enum class AppMode {
 
 enum class AgentTaskStatus(val displayName: String) {
     INITIALIZING("Initializing"),
+    CREATED("Created"),
+    PLANNING("Planning"),
+    READY_TO_ACT("Ready to Act"),
     THINKING("Thinking"),
+    EXECUTING("Executing"),
     USING_TOOL("Using Tool"),
     OBSERVING("Observing"),
+    VERIFYING("Verifying"),
+    REPLANNING("Replanning"),
+    WAITING_FOR_USER("Waiting for User"),
     IN_PROGRESS("In Progress"),
     COMPLETED("Completed"),
     PAUSED("Paused"),
+    BLOCKED("Blocked"),
+    CANCELLED("Cancelled"),
     FAILED("Failed")
 }
 
@@ -56,7 +65,8 @@ data class AgentSession(
     val plan: TaskPlan? = null,
     val messages: List<ChatMessage> = emptyList(),
     val toolExecutions: List<ToolExecutionRecord> = emptyList(),
-    val reflections: List<AgentReflection> = emptyList()
+    val reflections: List<AgentReflection> = emptyList(),
+    val artifacts: List<com.example.agent.artifact.Artifact> = emptyList()
 )
 
 sealed interface AgentFeedItem {
@@ -76,6 +86,11 @@ sealed interface AgentFeedItem {
     data class Tool(val record: ToolExecutionRecord) : AgentFeedItem {
         override val id: String get() = record.callId
         override val timestamp: Long get() = record.timestamp
+    }
+
+    data class ArtifactItem(val artifact: com.example.agent.artifact.Artifact) : AgentFeedItem {
+        override val id: String get() = artifact.id
+        override val timestamp: Long get() = artifact.modifiedAt
     }
 }
 
