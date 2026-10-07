@@ -94,15 +94,55 @@ data class ToolResult(
             command: String,
             timedOut: Boolean = false,
             cancelled: Boolean = false,
-            terminationReason: String? = null
+            terminationReason: String? = null,
+            isTruncated: Boolean = false
         ): ToolResult {
-            val summary = if (isSuccess) stdout.ifBlank { "(Command exited 0 with no stdout)" } else stderr.ifBlank { stdout }
+            val formatted = buildString {
+                if (isSuccess) {
+                    appendLine("Exit Code: $exitCode (Duration: ${durationMs}ms)")
+                    appendLine("Command: $command")
+                    appendLine("Working Directory: $workingDirectory")
+                    if (isTruncated) {
+                        appendLine("(Output truncated to maximum allowed size)")
+                    }
+                    if (stdout.isNotBlank()) {
+                        appendLine()
+                        append(stdout)
+                    } else {
+                        appendLine("\n(Command executed successfully with no output)")
+                    }
+                    if (stderr.isNotBlank()) {
+                        appendLine()
+                        append(stderr)
+                    }
+                } else {
+                    if (timedOut) {
+                        appendLine("Command execution timed out after ${durationMs}ms and was killed.")
+                    } else {
+                        appendLine("Command exited with code $exitCode")
+                    }
+                    appendLine("Command: $command")
+                    appendLine("Working Directory: $workingDirectory")
+                    if (isTruncated) {
+                        appendLine("(Output truncated to maximum allowed size)")
+                    }
+                    if (stderr.isNotBlank()) {
+                        appendLine()
+                        append(stderr)
+                    }
+                    if (stdout.isNotBlank()) {
+                        appendLine()
+                        append(stdout)
+                    }
+                }
+            }.trim()
+
             return ToolResult(
                 callId = callId,
                 toolName = toolName,
                 isSuccess = isSuccess,
-                result = if (isSuccess) summary else null,
-                error = if (!isSuccess) summary else null,
+                result = if (isSuccess) formatted else null,
+                error = if (!isSuccess) formatted else null,
                 exitCode = exitCode,
                 stdout = stdout,
                 stderr = stderr,

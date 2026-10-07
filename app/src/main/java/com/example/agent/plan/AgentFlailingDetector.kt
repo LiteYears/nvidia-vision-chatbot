@@ -225,6 +225,35 @@ class AgentFlailingDetector(
     }
 
     /**
+     * Checks how many consecutive times this exact tool and argument signature has failed recently.
+     */
+    fun getConsecutiveFailures(toolName: String, arguments: Map<String, Any?>): Int {
+        val argKey = extractNormalizedArgKey(toolName, arguments)
+        val normTool = toolName.lowercase().trim()
+        var count = 0
+        for (i in history.indices.reversed()) {
+            val item = history[i]
+            if (item.toolName == normTool && item.normalizedArgKey == argKey) {
+                if (!item.isSuccess) {
+                    count++
+                } else {
+                    break
+                }
+            } else {
+                break
+            }
+        }
+        return count
+    }
+
+    /**
+     * Checks whether an action has already failed repeatedly without successful recovery.
+     */
+    fun isActionRepeatedFailure(toolName: String, arguments: Map<String, Any?>, threshold: Int = 2): Boolean {
+        return getConsecutiveFailures(toolName, arguments) >= threshold
+    }
+
+    /**
      * Clears all recorded trajectory history.
      */
     fun reset() {
@@ -234,7 +263,9 @@ class AgentFlailingDetector(
     private fun extractNormalizedArgKey(toolName: String, args: Map<String, Any?>): String {
         return when (toolName.lowercase().trim()) {
             "run_command", "bash", "terminal", "sh", "cmd", "exec" -> {
-                (args["command"] ?: args["cmd"] ?: args["code"] ?: "").toString().trim()
+                val cmd = (args["command"] ?: args["cmd"] ?: args["code"] ?: "").toString().trim()
+                val cwd = (args["working_dir"] ?: args["cwd"] ?: "").toString().trim()
+                if (cwd.isNotBlank() && cwd != ".") "cwd:$cwd|cmd:$cmd" else cmd
             }
             "python_execute" -> {
                 val script = (args["script_path"] ?: args["file"] ?: args["script"])?.toString()?.trim()

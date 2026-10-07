@@ -25,6 +25,8 @@ class AgentWorkspaceManager(
     @Volatile
     var activeSessionId: String = "default"
 
+    val pathResolver: WorkspacePathResolver by lazy { WorkspacePathResolver(this) }
+
     init {
         if (!baseDir.exists()) {
             baseDir.mkdirs()
@@ -148,65 +150,43 @@ node_modules/
         if (relativePath.contains('\u0000')) {
             throw SecurityException("Invalid character in path: null byte detected.")
         }
+        val clean = relativePath.trim().trim('\'', '"')
+        val workspaceRoot = getWorkspaceDir(sessionId).canonicalFile
+        val hostRootPath = workspaceRoot.canonicalPath
 
-        // Clean quotes and trim whitespace
-        var trimmed = relativePath.trim().trim('\'', '"')
-        val workspaceRoot = getWorkspaceDir(sessionId)
-        val currentWorkingDir = getCurrentWorkingDir(sessionId)
-        val rootPath = workspaceRoot.canonicalPath
-
-        // 1. Direct workspace root aliases
-        if (trimmed.isEmpty() || trimmed == "." || trimmed == "./" || trimmed == "/" || trimmed == "~" ||
-            trimmed == "/workspace" || trimmed == "/workspace/" || trimmed == "workspace" || trimmed == "workspace/" ||
-            trimmed == "/home/ubuntu" || trimmed == "/home/ubuntu/" || trimmed == "/home/ubuntu/workspace" || trimmed == "/home/ubuntu/workspace/" ||
-            trimmed == "/home" || trimmed == "/root" || trimmed == "~/workspace" || trimmed == "~/workspace/") {
+        if (clean.isEmpty() || clean == "." || clean == "./") {
             return workspaceRoot
         }
 
-        // 2. Strip standard virtual workspace prefixes
-        if (trimmed.startsWith("/workspace/")) {
-            trimmed = trimmed.removePrefix("/workspace/").trimStart('/')
-        } else if (trimmed.startsWith("/home/ubuntu/workspace/")) {
-            trimmed = trimmed.removePrefix("/home/ubuntu/workspace/").trimStart('/')
-        } else if (trimmed.startsWith("~/workspace/")) {
-            trimmed = trimmed.removePrefix("~/workspace/").trimStart('/')
-        } else if (trimmed.startsWith("/home/ubuntu/")) {
-            val sub = trimmed.removePrefix("/home/ubuntu/").trimStart('/')
-            trimmed = if (sub.startsWith("workspace/")) sub.removePrefix("workspace/").trimStart('/')
-            else if (sub == "workspace") ""
-            else sub
-            if (trimmed.isEmpty()) return workspaceRoot
-        } else if (trimmed.startsWith("workspace/")) {
-            trimmed = trimmed.removePrefix("workspace/").trimStart('/')
+        var normalized = clean.replace('\\', '/')
+
+        if (normalized.startsWith(hostRootPath)) {
+            normalized = normalized.removePrefix(hostRootPath).trimStart('/')
+        } else if (normalized.startsWith("/workspace/")) {
+            normalized = normalized.removePrefix("/workspace/").trimStart('/')
+        } else if (normalized == "/workspace" || normalized == "/workspace/") {
+            return workspaceRoot
+        } else if (normalized.startsWith("/home/ubuntu/workspace/")) {
+            normalized = normalized.removePrefix("/home/ubuntu/workspace/").trimStart('/')
+        } else if (normalized.startsWith("~/workspace/")) {
+            normalized = normalized.removePrefix("~/workspace/").trimStart('/')
         }
 
-        val candidate = File(trimmed)
-        val resolved = if (candidate.isAbsolute) {
-            candidate.canonicalFile
+        if (normalized.isEmpty() || normalized == "." || normalized == "./") {
+            return workspaceRoot
+        }
+
+        val resolved = if (normalized.startsWith("/")) {
+            File(normalized).canonicalFile
         } else {
-            // Check if file/dir exists relative to currentWorkingDir first, then workspaceRoot
-            val inCwd = if (currentWorkingDir != workspaceRoot && currentWorkingDir.exists()) File(currentWorkingDir, trimmed) else null
-            val inRoot = File(workspaceRoot, trimmed)
-
-            when {
-                inCwd != null && inCwd.exists() -> inCwd.canonicalFile
-                inRoot.exists() -> inRoot.canonicalFile
-                inCwd != null && currentWorkingDir.exists() -> {
-                    if (trimmed.startsWith(currentWorkingDir.name + "/")) {
-                        File(workspaceRoot, trimmed).canonicalFile
-                    } else {
-                        inCwd.canonicalFile
-                    }
-                }
-                else -> inRoot.canonicalFile
-            }
+            File(workspaceRoot, normalized).canonicalFile
         }
 
-        val canonical = resolved.canonicalFile
-        if (canonical.canonicalPath != rootPath && !canonical.canonicalPath.startsWith(rootPath + File.separator)) {
-            throw SecurityException("Path traversal attempt detected: '$relativePath' resolves outside workspace boundary.")
+        val resolvedCanonical = resolved.canonicalPath
+        if (resolvedCanonical != hostRootPath && !resolvedCanonical.startsWith(hostRootPath + File.separator)) {
+            throw SecurityException("Path traversal outside workspace sandbox: '$relativePath'")
         }
-        return canonical
+        return resolved
     }
 
     /**

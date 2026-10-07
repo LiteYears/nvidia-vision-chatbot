@@ -291,10 +291,16 @@ object ToolCallParser {
 
     fun normalizeToolArguments(toolName: String, args: MutableMap<String, Any?>) {
         val normTool = normalizeToolCallName(toolName)
-        // Command line normalization
-        val cmd = (args["command"] ?: args["cmd"]) as? String
-        if (cmd != null && !cmd.contains('\n') && cmd.contains("\\n")) {
-            args["command"] = cmd.replace("\\n", "\n").replace("\\r", "\r")
+        // Command line normalization for run_command / bash / shell tools
+        if (normTool == "run_command" || normTool == "bash") {
+            val cmdVal = (args["command"] ?: args["cmd"] ?: args["code"] ?: args["script"] ?: args["commandLine"] ?: args["command_line"])?.toString()
+            if (cmdVal != null) {
+                args["command"] = if (!cmdVal.contains('\n') && cmdVal.contains("\\n")) {
+                    cmdVal.replace("\\n", "\n").replace("\\r", "\r")
+                } else {
+                    cmdVal
+                }
+            }
         }
 
         // File path normalization across all file tools

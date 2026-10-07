@@ -6,6 +6,7 @@ import com.example.agent.tools.ToolDefinition
 import com.example.agent.tools.ToolParameter
 import com.example.agent.tools.ToolResult
 import com.example.agent.tools.workspace.AgentWorkspaceManager
+import com.example.agent.tools.workspace.WorkspacePathResolver
 import java.io.File
 import java.util.UUID
 
@@ -93,75 +94,43 @@ class RunCommandTool(
         }
 
         val workspaceRoot = workspaceManager.getWorkspaceDir()
-        val activeWorkingDir = workspaceManager.getCurrentWorkingDir()
-
-        // 1. Resolve and validate working directory (supporting active working dir, /workspace, /home/ubuntu, ~/workspace, and relative paths)
-        val cleanWorkingDir = workingDirArg.trim('\'', '"')
-        val strippedDir = when {
-            cleanWorkingDir.startsWith("/home/ubuntu/workspace/") -> cleanWorkingDir.removePrefix("/home/ubuntu/workspace/").trimStart('/')
-            cleanWorkingDir.startsWith("/workspace/") -> cleanWorkingDir.removePrefix("/workspace/").trimStart('/')
-            cleanWorkingDir.startsWith("~/workspace/") -> cleanWorkingDir.removePrefix("~/workspace/").trimStart('/')
-            cleanWorkingDir.startsWith("/home/ubuntu/") -> {
-                val rem = cleanWorkingDir.removePrefix("/home/ubuntu/").trimStart('/')
-                if (rem.startsWith("workspace/")) rem.removePrefix("workspace/").trimStart('/')
-                else if (rem == "workspace") ""
-                else rem
-            }
-            cleanWorkingDir.startsWith("~/") -> cleanWorkingDir.removePrefix("~/").trimStart('/')
-            cleanWorkingDir == "/home/ubuntu/workspace" || cleanWorkingDir == "/workspace" ||
-            cleanWorkingDir == "~/workspace" || cleanWorkingDir == "/home/ubuntu" ||
-            cleanWorkingDir == "~" || cleanWorkingDir == "/" || cleanWorkingDir == "/home" -> ""
-            else -> cleanWorkingDir
-        }
+        val pathResolver = WorkspacePathResolver.getInstance(workspaceManager)
+        val resolution = pathResolver.resolveWorkingDirectory(workspaceManager.activeSessionId, workingDirArg)
 
         // Check if requested working directory exists as a file rather than directory
-        val isFile = when {
-            File(strippedDir).isFile -> true
-            File(activeWorkingDir, strippedDir).isFile -> true
-            File(workspaceRoot, strippedDir).isFile -> true
-            File(workspaceRoot, strippedDir.removePrefix("workspace/")).isFile -> true
-            else -> false
-        }
-        if (isFile) {
-            return ToolResult.failure(
+        if (resolution.exists && !resolution.isDirectory) {
+            return ToolResult.commandResult(
                 callId = callId,
                 toolName = definition.name,
-                error = "Working directory is not a directory: '$workingDirArg'"
+                isSuccess = false,
+                exitCode = 1,
+                stdout = "",
+                stderr = "Working directory is not a directory: '$workingDirArg'",
+                durationMs = 0L,
+                workingDirectory = resolution.relativePath,
+                command = rawCommand,
+                terminationReason = "NOT_A_DIRECTORY"
             )
         }
 
-        val resolvedWorkingDir: File = when {
-            strippedDir.isEmpty() || strippedDir == "." || strippedDir == "./" -> {
-                if (activeWorkingDir.exists() && activeWorkingDir.isDirectory) activeWorkingDir else workspaceRoot
-            }
-            File(strippedDir).isAbsolute && File(strippedDir).exists() && File(strippedDir).isDirectory -> {
-                File(strippedDir).canonicalFile
-            }
-            // Check if activeWorkingDir is already the requested directory name
-            (activeWorkingDir.name.equals(strippedDir.trimEnd('/'), ignoreCase = true) ||
-             activeWorkingDir.canonicalPath.endsWith(File.separator + strippedDir.trimEnd('/'))) && activeWorkingDir.exists() && activeWorkingDir.isDirectory -> {
-                activeWorkingDir
-            }
-            // Check relative to activeWorkingDir
-            File(activeWorkingDir, strippedDir).exists() && File(activeWorkingDir, strippedDir).isDirectory -> {
-                File(activeWorkingDir, strippedDir).canonicalFile
-            }
-            // Check relative to workspaceRoot
-            File(workspaceRoot, strippedDir).exists() && File(workspaceRoot, strippedDir).isDirectory -> {
-                File(workspaceRoot, strippedDir).canonicalFile
-            }
-            // Check if user specified "workspace/foo" and we strip "workspace/"
-            strippedDir.startsWith("workspace/") && File(workspaceRoot, strippedDir.removePrefix("workspace/")).isDirectory -> {
-                File(workspaceRoot, strippedDir.removePrefix("workspace/")).canonicalFile
-            }
-            else -> {
-                return ToolResult.failure(
-                    callId = callId,
-                    toolName = definition.name,
-                    error = "Working directory does not exist: '$workingDirArg'"
-                )
-            }
+        if (!resolution.exists) {
+            return ToolResult.commandResult(
+                callId = callId,
+                toolName = definition.name,
+                isSuccess = false,
+                exitCode = 1,
+                stdout = "",
+                stderr = "Working directory does not exist: '$workingDirArg'. [ERROR_TYPE: WORKING_DIRECTORY_NOT_FOUND]\n" +
+                    "The directory does not exist on disk. Please create it first using 'directory_create' or 'mkdir -p $workingDirArg', " +
+                    "or execute the command from the workspace root by omitting working_dir or setting working_dir='.'.",
+                durationMs = 0L,
+                workingDirectory = ".",
+                command = rawCommand,
+                terminationReason = "WORKING_DIRECTORY_NOT_FOUND"
+            )
         }
+
+        val resolvedWorkingDir = resolution.hostFile
 
         // 2. Validate command and arguments through security policy
         try {
@@ -212,10 +181,10 @@ class RunCommandTool(
             environment = targetEnvironment
         )
 
-        val relativeDir = try {
-            workspaceManager.getRelativePath(resolvedWorkingDir).ifBlank { "." }
-        } catch (_: Exception) {
-            resolvedWorkingDir.canonicalPath
+        val relativeDir = if (resolution.isWithinWorkspace) {
+            if (resolution.relativePath.isBlank()) "." else resolution.relativePath
+        } else {
+            resolution.hostFile.canonicalPath
         }
 
         // 5. Return structured ToolResult
@@ -288,23 +257,17 @@ class RunCommandTool(
                 stderr = execResult.stderr,
                 durationMs = execResult.durationMs,
                 workingDirectory = relativeDir,
-                command = rawCommand
+                command = rawCommand,
+                isTruncated = execResult.isTruncated
             )
         } else {
             // Track working directory changes on successful cd
             val trimmedCmd = sanitizedCommand.trim()
             if (trimmedCmd == "cd" || trimmedCmd.startsWith("cd ")) {
                 val targetArg = trimmedCmd.removePrefix("cd").trim().trim('\'', '"')
-                val candidateDir = when {
-                    targetArg.isEmpty() || targetArg == "~" -> workspaceRoot
-                    File(targetArg).isAbsolute && File(targetArg).exists() -> File(targetArg).canonicalFile
-                    targetArg.startsWith("/") && File(targetArg).exists() -> File(targetArg).canonicalFile
-                    targetArg.startsWith("/") -> File(workspaceRoot, targetArg.trimStart('/')).canonicalFile
-                    File(resolvedWorkingDir, targetArg).exists() -> File(resolvedWorkingDir, targetArg).canonicalFile
-                    else -> File(resolvedWorkingDir, targetArg).canonicalFile
-                }
-                if (candidateDir.exists() && candidateDir.isDirectory) {
-                    workspaceManager.setCurrentWorkingDir(candidateDir)
+                val targetResolution = pathResolver.resolveWorkingDirectory(workspaceManager.activeSessionId, targetArg)
+                if (targetResolution.exists && targetResolution.isDirectory && targetResolution.isWithinWorkspace) {
+                    workspaceManager.setCurrentWorkingDir(targetResolution.hostFile)
                 }
             }
 
@@ -317,7 +280,8 @@ class RunCommandTool(
                 stderr = execResult.stderr,
                 durationMs = execResult.durationMs,
                 workingDirectory = relativeDir,
-                command = rawCommand
+                command = rawCommand,
+                isTruncated = execResult.isTruncated
             )
         }
     }

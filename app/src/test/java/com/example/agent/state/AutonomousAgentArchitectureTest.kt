@@ -1,11 +1,13 @@
 package com.example.agent.state
 
 import com.example.agent.artifact.ArtifactDetector
+import com.example.agent.plan.AgentFlailingDetector
+import com.example.agent.plan.FlailingType
 import com.example.agent.tools.ToolCallParser
 import com.example.agent.verification.TaskVerificationEngine
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -18,37 +20,41 @@ class AutonomousAgentArchitectureTest {
         val machine = AgentStateMachine(initialState = AgentExecutionState.CREATED)
         assertEquals(AgentExecutionState.CREATED, machine.currentState)
 
-        assertTrue(machine.transitionTo(AgentExecutionState.PLANNING, "Task initialized, breaking down objective"))
+        machine.transitionTo(AgentExecutionState.PLANNING, "Task initialized, breaking down objective")
         assertEquals(AgentExecutionState.PLANNING, machine.currentState)
 
-        assertTrue(machine.transitionTo(AgentExecutionState.READY_TO_ACT, "Parsed executable tool action"))
+        machine.transitionTo(AgentExecutionState.READY_TO_ACT, "Parsed executable tool action")
         assertEquals(AgentExecutionState.READY_TO_ACT, machine.currentState)
 
-        assertTrue(machine.transitionTo(AgentExecutionState.EXECUTING, "Dispatched tool call"))
+        machine.transitionTo(AgentExecutionState.EXECUTING, "Dispatched tool call")
         assertEquals(AgentExecutionState.EXECUTING, machine.currentState)
 
-        assertTrue(machine.transitionTo(AgentExecutionState.OBSERVING, "Tool execution completed with output"))
+        machine.transitionTo(AgentExecutionState.OBSERVING, "Tool execution completed with output")
         assertEquals(AgentExecutionState.OBSERVING, machine.currentState)
 
-        assertTrue(machine.transitionTo(AgentExecutionState.VERIFYING, "Checking artifacts and outputs"))
+        machine.transitionTo(AgentExecutionState.VERIFYING, "Checking artifacts and outputs")
         assertEquals(AgentExecutionState.VERIFYING, machine.currentState)
 
-        assertTrue(machine.transitionTo(AgentExecutionState.COMPLETED, "All deliverables verified and objective met"))
+        machine.transitionTo(AgentExecutionState.COMPLETED, "All deliverables verified and objective met")
         assertEquals(AgentExecutionState.COMPLETED, machine.currentState)
 
-        val history = machine.getHistory()
+        val history = machine.transitionHistory
         assertEquals(6, history.size)
     }
 
     @Test
     fun testFlailingAndLoopDetection() {
-        val machine = AgentStateMachine(initialState = AgentExecutionState.PLANNING)
-        val action = "run_command: cat << EOF > generate.py"
+        val detector = AgentFlailingDetector()
+        val args = mapOf<String, Any?>("command" to "cat << EOF > generate.py")
 
-        assertFalse(machine.recordActionAndCheckFlailing(action))
-        assertFalse(machine.recordActionAndCheckFlailing(action))
-        // 3rd time repeating identical action should trigger flailing
-        assertTrue(machine.recordActionAndCheckFlailing(action))
+        detector.recordExecution("run_command", args, isSuccess = false, error = "Syntax error")
+        var report = detector.detectFlailing()
+        assertNull(report)
+
+        detector.recordExecution("run_command", args, isSuccess = false, error = "Syntax error")
+        report = detector.detectFlailing()
+        assertNotNull(report)
+        assertEquals(FlailingType.REPEATED_IDENTICAL_FAILURE, report?.type)
     }
 
     @Test
@@ -97,19 +103,18 @@ class AutonomousAgentArchitectureTest {
             val file = File(tempDir, "sample.txt")
             file.writeText("Artifact content here")
 
-            val detector = ArtifactDetector(tempDir)
-            val artifacts = detector.scanWorkspace("test-task")
+            val detector = ArtifactDetector(tempDir, "test-task")
+            val artifacts = detector.detectNewOrModifiedArtifacts(emptyMap())
             assertTrue(artifacts.isNotEmpty())
             val sampleArtifact = artifacts.find { it.filename == "sample.txt" }
             assertNotNull(sampleArtifact)
             assertTrue(sampleArtifact!!.size > 0)
 
-            val verificationEngine = TaskVerificationEngine()
-            val result = verificationEngine.verifyFile(file)
-            assertTrue(result.passed)
-            assertEquals(1.0f, result.confidence, 0.01f)
+            val result = TaskVerificationEngine.verifyFile(file)
+            assertTrue(result.isPassed)
         } finally {
             tempDir.deleteRecursively()
         }
     }
 }
+

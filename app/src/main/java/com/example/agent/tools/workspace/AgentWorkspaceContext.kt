@@ -334,7 +334,9 @@ class AgentWorkspaceContext(
         val project = detectedProject ?: identifyProject(knownFiles.keys.toList(), workspaceRoot)
         val sb = StringBuilder()
         sb.appendLine("### WORKSPACE & ENVIRONMENT CONTEXT")
-        sb.appendLine("- Workspace Root: ${workspaceRoot.name} (`${workspaceRoot.path}`)")
+        sb.appendLine("- Workspace Root: /workspace")
+        sb.appendLine("- Current Working Directory: /workspace")
+        sb.appendLine("- Authoritative Filesystem Fact: Only files that currently exist on disk in /workspace are real. Model thoughts do not create files or directories.")
         sb.appendLine("- Project Architecture: ${project.type.displayName}")
         if (project.keyComponents.isNotEmpty()) {
             sb.appendLine("- Key Components: ${project.keyComponents.joinToString(", ")}")

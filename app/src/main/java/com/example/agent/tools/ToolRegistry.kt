@@ -193,8 +193,11 @@ class ToolRegistry {
                 error = "Tool '${toolCall.toolName}' is not registered in the tool registry. Available tools: ${tools.keys.joinToString(", ")}"
             )
 
+        val effectiveArgs = toolCall.arguments.toMutableMap()
+        ToolCallParser.normalizeToolArguments(tool.definition.name, effectiveArgs)
+
         try {
-            tool.execute(toolCall.arguments)
+            tool.execute(effectiveArgs)
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {

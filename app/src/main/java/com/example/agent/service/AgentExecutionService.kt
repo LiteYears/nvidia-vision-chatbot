@@ -27,6 +27,7 @@ import com.example.agent.state.TaskObjective
 import com.example.agent.state.TaskState
 import com.example.agent.tools.ToolCallParser
 import com.example.agent.tools.ToolRegistry
+import com.example.agent.tools.ToolResult
 import com.example.agent.tools.workspace.AgentWorkspaceContext
 import com.example.agent.tools.workspace.AgentWorkspaceManager
 import com.example.agent.tools.workspace.FileChangeType
@@ -302,6 +303,7 @@ class AgentExecutionService : Service() {
         var consecutiveNudges = 0
         var totalNudges = 0
         var consecutiveEmptyResponses = 0
+        var consecutiveNoProgress = 0
         var loopActive = true
 
         while (loopActive && toolStepCount < MAX_AUTONOMOUS_TOOL_STEPS && !currentPlan.isStepLimitExceeded && currentCoroutineContext().isActive) {
@@ -463,8 +465,31 @@ class AgentExecutionService : Service() {
 
                 AgentTraceLogger.record(session.id, "ToolStarted", iteration = toolStepCount, payload = mapOf("tool" to toolCall.toolName, "args" to toolCall.arguments))
 
-                // Execute tool
-                val toolResult = toolRegistry.execute(toolCall)
+                // Check loop protection: if the exact same tool and arguments failed repeatedly, block execution
+                val isRepeatedFailure = flailingDetector.isActionRepeatedFailure(toolCall.toolName, toolCall.arguments, threshold = 2)
+                val toolResult = if (isRepeatedFailure) {
+                    val cmdStr = (toolCall.arguments["command"] ?: toolCall.arguments["cmd"] ?: toolCall.arguments["path"] ?: "").toString()
+                    ToolResult.commandResult(
+                        callId = toolCall.callId,
+                        toolName = toolCall.toolName,
+                        isSuccess = false,
+                        exitCode = 1,
+                        stdout = "",
+                        stderr = "[EXECUTION BLOCKED: REPEATED_ACTION_FAILURE]\n" +
+                            "Action '${toolCall.toolName}' with arguments '$cmdStr' has already failed twice consecutively.\n" +
+                            "The runtime has blocked this execution to prevent an infinite loop.\n" +
+                            "MANDATORY ACTION: You must change strategy now:\n" +
+                            "1. Inspect existing files using 'file_list'.\n" +
+                            "2. Create missing files or directories first before trying to access or execute them.\n" +
+                            "3. Do not retry this identical command.",
+                        durationMs = 0L,
+                        workingDirectory = ".",
+                        command = cmdStr,
+                        terminationReason = "REPEATED_ACTION_FAILURE"
+                    )
+                } else {
+                    toolRegistry.execute(toolCall)
+                }
 
                 // 8. Transition: OBSERVING
                 stateMachine.transitionTo(AgentExecutionState.OBSERVING, "Captured output from ${toolCall.toolName}")
@@ -588,6 +613,19 @@ class AgentExecutionService : Service() {
                 } catch (_: Exception) {}
 
                 // Loop & Flailing analysis
+                val hasObservableProgress = when {
+                    discoveredArtifacts.isNotEmpty() -> true
+                    toolResult.isSuccess && toolCall.toolName in setOf("file_write", "directory_create", "file_patch", "write_binary_file") -> true
+                    toolResult.isSuccess && !toolResult.stdout.isNullOrBlank() && (toolResult.exitCode == 0) -> true
+                    toolResult.isSuccess && toolCall.toolName == "file_list" -> true
+                    else -> false
+                }
+                if (hasObservableProgress) {
+                    consecutiveNoProgress = 0
+                } else {
+                    consecutiveNoProgress++
+                }
+
                 flailingDetector.recordExecution(
                     toolName = toolCall.toolName,
                     arguments = toolCall.arguments,
@@ -656,7 +694,19 @@ class AgentExecutionService : Service() {
                             appendLine(flailingReport.guidanceDirective)
                         }
                     }
+                    if (consecutiveNoProgress >= 3) {
+                        appendLine("\n[PROGRESS WARNING: $consecutiveNoProgress consecutive actions executed without observable progress.]")
+                        appendLine("Authoritative reality: Current directory is /workspace. Inspect existing files or create missing items before executing commands.")
+                    }
                     appendLine("Autonomous plan step ${currentPlan.stepCount} of ${currentPlan.maxSteps} executed.")
+                }
+
+                if (consecutiveNoProgress >= 6) {
+                    loopActive = false
+                    val maxFailMsg = "Task halted: exceeded limit of consecutive failures / no-progress actions ($consecutiveNoProgress steps). Last error: ${toolResult.error?.take(100)}"
+                    stateMachine.transitionTo(AgentExecutionState.FAILED, maxFailMsg)
+                    AgentExecutionCoordinator.updateExecutionState(session.id, AgentExecutionState.FAILED, maxFailMsg)
+                    updateNotification(session, AgentTaskStatus.FAILED, maxFailMsg)
                 }
 
                 // Add past turn to ongoing history
